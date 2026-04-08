@@ -1,0 +1,3 @@
+root:root
+sudo:root,guest
+guest:guest

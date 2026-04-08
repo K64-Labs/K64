@@ -1,0 +1,3 @@
+name=shell
+class=system
+description=Interactive command shell service.

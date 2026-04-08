@@ -1,0 +1,590 @@
+#include "k64_fs.h"
+#include "k64_hotreload.h"
+#include "k64_modules.h"
+#include "k64_reload.h"
+#include "k64_shell.h"
+#include "k64_string.h"
+#include "k64_system.h"
+#include "k64_terminal.h"
+#include "k64_user.h"
+
+static void svc_print_line(const char* text) {
+    k64_term_write(text ? text : "");
+    k64_term_putc('\n');
+}
+
+static const char* svc_skip_ws(const char* s) {
+    while (s && (*s == ' ' || *s == '\t')) {
+        s++;
+    }
+    return s;
+}
+
+static const char* svc_next_token(const char* s, char* token, int token_size) {
+    int i = 0;
+
+    s = svc_skip_ws(s);
+    while (s && *s && *s != ' ' && *s != '\t' && i + 1 < token_size) {
+        token[i++] = *s++;
+    }
+    token[i] = '\0';
+    return svc_skip_ws(s);
+}
+
+static bool svc_parse_u64(const char* text, uint64_t* out) {
+    uint64_t value = 0;
+
+    if (!text || !text[0]) {
+        return false;
+    }
+    while (*text) {
+        if (*text < '0' || *text > '9') {
+            return false;
+        }
+        value = value * 10 + (uint64_t)(*text - '0');
+        text++;
+    }
+    *out = value;
+    return true;
+}
+
+static void servicectl_usage(void) {
+    svc_print_line("usage: servicectl <list|stopped|start|stop|restart> [pid]");
+}
+
+static void driverctl_usage(void) {
+    svc_print_line("usage: driverctl <list|stopped|start|stop|restart> [id]");
+}
+
+static void servicectl_list(bool stopped_only) {
+    size_t count = k64_system_service_count();
+
+    k64_term_write("PID   STATE    CLASS   NAME              VM BASE\n");
+    for (size_t i = 0; i < count; ++i) {
+        k64_service_t* service = k64_system_service_at(i);
+        if (!service) {
+            continue;
+        }
+        if (stopped_only && service->state != K64_SERVICE_STATE_STOPPED) {
+            continue;
+        }
+
+        k64_term_write_dec(service->managed_pid);
+        k64_term_write("  ");
+        k64_term_write(k64_system_state_name(service->state));
+        if (service->state == K64_SERVICE_STATE_RUNNING) {
+            k64_term_write("  ");
+        }
+        k64_term_write("  ");
+        k64_term_write(k64_system_class_name(service->class_id));
+        if (service->class_id == K64_SERVICE_CLASS_USER) {
+            k64_term_write("    ");
+        } else {
+            k64_term_write("  ");
+        }
+        k64_term_write("  ");
+        k64_term_write(service->name);
+        for (size_t pad = k64_strlen(service->name); pad < 16; ++pad) {
+            k64_term_putc(' ');
+        }
+        k64_term_write("  ");
+        k64_term_write_hex(service->vm_space.root_base);
+        k64_term_putc('\n');
+    }
+}
+
+static void driverctl_list(bool stopped_only) {
+    size_t count = k64_modules_driver_count();
+
+    k64_term_write("ID    STATE    NAME              SOURCE\n");
+    for (size_t i = 0; i < count; ++i) {
+        k64_driver_t* driver = k64_modules_driver_at(i);
+        if (!driver) {
+            continue;
+        }
+        if (stopped_only && driver->state != K64_DRIVER_STATE_STOPPED) {
+            continue;
+        }
+
+        k64_term_write_dec(driver->id);
+        k64_term_write("  ");
+        k64_term_write(k64_modules_state_name(driver->state));
+        if (driver->state == K64_DRIVER_STATE_RUNNING) {
+            k64_term_write("  ");
+        }
+        k64_term_write("  ");
+        k64_term_write(driver->name);
+        for (size_t pad = k64_strlen(driver->name); pad < 16; ++pad) {
+            k64_term_putc(' ');
+        }
+        k64_term_write("  ");
+        k64_term_write(driver->source);
+        k64_term_putc('\n');
+    }
+}
+
+static bool servicectl_command(const char* command, const char* args) {
+    char subcmd[16];
+    char id_buf[24];
+    uint64_t pid = 0;
+    k64_service_result_t result;
+    k64_service_t* service;
+
+    (void)command;
+    args = svc_next_token(args, subcmd, sizeof(subcmd));
+    if (!subcmd[0]) {
+        servicectl_usage();
+        return true;
+    }
+    if (k64_streq(subcmd, "list")) {
+        char extra[16];
+        svc_next_token(args, extra, sizeof(extra));
+        servicectl_list(k64_streq(extra, "stopped"));
+        return true;
+    }
+    if (k64_streq(subcmd, "stopped")) {
+        servicectl_list(true);
+        return true;
+    }
+    args = svc_next_token(args, id_buf, sizeof(id_buf));
+    if (!svc_parse_u64(id_buf, &pid)) {
+        servicectl_usage();
+        return true;
+    }
+
+    service = k64_system_find_service(pid);
+    if (!service) {
+        svc_print_line("service not found");
+        return true;
+    }
+    if (!k64_user_can_manage_service(service)) {
+        svc_print_line("permission denied");
+        return true;
+    }
+
+    if (k64_streq(subcmd, "start")) {
+        result = k64_system_start_service(pid);
+    } else if (k64_streq(subcmd, "stop")) {
+        result = k64_system_stop_service(pid);
+    } else if (k64_streq(subcmd, "restart")) {
+        result = k64_system_restart_service(pid);
+    } else {
+        servicectl_usage();
+        return true;
+    }
+
+    if (result == K64_SERVICE_OK) {
+        svc_print_line("service action completed");
+    } else {
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+    return true;
+}
+
+static bool driverctl_command(const char* command, const char* args) {
+    char subcmd[16];
+    char id_buf[24];
+    uint64_t id = 0;
+    k64_driver_result_t result;
+
+    (void)command;
+    args = svc_next_token(args, subcmd, sizeof(subcmd));
+    if (!subcmd[0]) {
+        driverctl_usage();
+        return true;
+    }
+    if (k64_streq(subcmd, "list")) {
+        char extra[16];
+        svc_next_token(args, extra, sizeof(extra));
+        driverctl_list(k64_streq(extra, "stopped"));
+        return true;
+    }
+    if (k64_streq(subcmd, "stopped")) {
+        driverctl_list(true);
+        return true;
+    }
+    if (!k64_user_can_manage_drivers()) {
+        svc_print_line("permission denied");
+        return true;
+    }
+    args = svc_next_token(args, id_buf, sizeof(id_buf));
+    if (!svc_parse_u64(id_buf, &id)) {
+        driverctl_usage();
+        return true;
+    }
+
+    if (k64_streq(subcmd, "start")) {
+        result = k64_modules_start_driver(id);
+    } else if (k64_streq(subcmd, "stop")) {
+        result = k64_modules_stop_driver(id);
+    } else if (k64_streq(subcmd, "restart")) {
+        result = k64_modules_restart_driver(id);
+    } else {
+        driverctl_usage();
+        return true;
+    }
+
+    if (result == K64_DRIVER_OK) {
+        svc_print_line("driver action completed");
+    } else {
+        k64_term_write(k64_modules_result_string(result));
+        k64_term_putc('\n');
+    }
+    return true;
+}
+
+static bool reload_command(const char* command, const char* args) {
+    char target[16];
+    k64_reload_mode_t mode;
+
+    (void)command;
+    if (!k64_user_is_root()) {
+        svc_print_line("permission denied");
+        return true;
+    }
+
+    args = svc_next_token(args, target, sizeof(target));
+    if (!target[0]) {
+        svc_print_line("usage: reload <drivers|kernel>");
+        return true;
+    }
+    if (k64_streq(target, "drivers")) {
+        mode = K64_RELOAD_DRIVERS;
+    } else if (k64_streq(target, "kernel")) {
+        mode = K64_RELOAD_KERNEL;
+    } else {
+        svc_print_line("usage: reload <drivers|kernel>");
+        return true;
+    }
+    if (!k64_reload_request(mode)) {
+        svc_print_line("reload request failed");
+        return true;
+    }
+    svc_print_line("reload request submitted");
+    return true;
+}
+
+static bool servicectl_start(k64_service_t* service) {
+    (void)k64_system_register_command(service->name, "servicectl", servicectl_command);
+    k64_term_write("[svc] servicectl started pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+    return true;
+}
+
+static void servicectl_stop(k64_service_t* service) {
+    k64_term_write("[svc] servicectl stopped pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+}
+
+static bool driverctl_start(k64_service_t* service) {
+    (void)k64_system_register_command(service->name, "driverctl", driverctl_command);
+    k64_term_write("[svc] driverctl started pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+    return true;
+}
+
+static void driverctl_stop(k64_service_t* service) {
+    k64_term_write("[svc] driverctl stopped pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+}
+
+static void fsctl_print(const char* text) {
+    k64_term_write(text ? text : "");
+    k64_term_putc('\n');
+}
+
+static bool fsctl_pwd_handler(const char* command, const char* args) {
+    char buf[256];
+    (void)command;
+    (void)args;
+    if (!k64_fs_pwd(buf, sizeof(buf))) {
+        fsctl_print("pwd failed");
+        return true;
+    }
+    fsctl_print(buf);
+    return true;
+}
+
+static bool fsctl_ls_handler(const char* command, const char* args) {
+    char buf[512];
+    (void)command;
+    if (!k64_fs_ls(args && args[0] ? args : NULL, buf, sizeof(buf))) {
+        fsctl_print("ls failed");
+        return true;
+    }
+    k64_term_write(buf);
+    return true;
+}
+
+static bool fsctl_cd_handler(const char* command, const char* args) {
+    (void)command;
+    if (!args || !args[0] || !k64_fs_cd(args)) {
+        fsctl_print("cd failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_mkdir_handler(const char* command, const char* args) {
+    (void)command;
+    if (!args || !args[0] || !k64_fs_mkdir(args)) {
+        fsctl_print("mkdir failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_touch_handler(const char* command, const char* args) {
+    (void)command;
+    if (!args || !args[0] || !k64_fs_touch(args)) {
+        fsctl_print("touch failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_cat_handler(const char* command, const char* args) {
+    char buf[512];
+    (void)command;
+    if (!args || !args[0] || !k64_fs_cat(args, buf, sizeof(buf))) {
+        fsctl_print("cat failed");
+        return true;
+    }
+    fsctl_print(buf);
+    return true;
+}
+
+static bool fsctl_write_handler(const char* command, const char* args) {
+    char path[64];
+    const char* rest;
+    (void)command;
+
+    if (!args || !args[0]) {
+        fsctl_print("write failed");
+        return true;
+    }
+    rest = args;
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    {
+        int i = 0;
+        while (*rest && *rest != ' ' && *rest != '\t' && i + 1 < (int)sizeof(path)) {
+            path[i++] = *rest++;
+        }
+        path[i] = '\0';
+    }
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    if (!path[0] || !k64_fs_write_file(path, rest)) {
+        fsctl_print("write failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_start(k64_service_t* service) {
+    (void)service;
+    if (!k64_modules_is_driver_running("fs")) {
+        fsctl_print("fsctl: fs driver is not running");
+        return false;
+    }
+    (void)k64_system_register_command("fsctl", "pwd", fsctl_pwd_handler);
+    (void)k64_system_register_command("fsctl", "ls", fsctl_ls_handler);
+    (void)k64_system_register_command("fsctl", "cd", fsctl_cd_handler);
+    (void)k64_system_register_command("fsctl", "mkdir", fsctl_mkdir_handler);
+    (void)k64_system_register_command("fsctl", "touch", fsctl_touch_handler);
+    (void)k64_system_register_command("fsctl", "cat", fsctl_cat_handler);
+    (void)k64_system_register_command("fsctl", "write", fsctl_write_handler);
+    k64_term_write("[svc] fsctl started pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+    return true;
+}
+
+static void fsctl_stop(k64_service_t* service) {
+    k64_term_write("[svc] fsctl stopped pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+}
+
+static bool init_start(k64_service_t* service) {
+    k64_service_result_t result;
+
+    k64_term_write("[svc] init started pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+
+    result = k64_system_start_service_by_name("servicectl");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("[svc] init failed to start servicectl: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
+    result = k64_system_start_service_by_name("driverctl");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("[svc] init failed to start driverctl: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
+    result = k64_system_start_service_by_name("fsctl");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("[svc] init failed to start fsctl: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
+    result = k64_system_start_service_by_name("userctl");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("[svc] init failed to start userctl: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
+    result = k64_system_start_service_by_name("shell");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("[svc] init failed to start shell: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
+    return true;
+}
+
+static void init_stop(k64_service_t* service) {
+    k64_term_write("[svc] init stopped pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+}
+
+static bool reload_start(k64_service_t* service) {
+    (void)k64_system_register_command(service->name, "reload", reload_command);
+    k64_term_write("[svc] reload started pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+    return true;
+}
+
+static void reload_stop(k64_service_t* service) {
+    k64_term_write("[svc] reload stopped pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+}
+
+static void reload_poll(k64_service_t* service, uint64_t now_ticks) {
+    k64_reload_mode_t mode;
+
+    (void)now_ticks;
+
+    mode = k64_reload_take_request();
+    if (mode == K64_RELOAD_NONE) {
+        (void)k64_system_stop_service(service->pid);
+        return;
+    }
+
+    if (mode == K64_RELOAD_DRIVERS) {
+        k64_term_write("[svc] reload: reloading drivers\n");
+        k64_modules_reload_all();
+    } else if (mode == K64_RELOAD_KERNEL) {
+        k64_term_write("[svc] reload: hot reloading kernel image\n");
+        if (!k64_hotreload_kernel()) {
+            k64_term_write("[svc] reload: hot reload failed\n");
+        }
+    }
+
+    (void)k64_system_stop_service(service->pid);
+}
+
+void k64s_register_builtin_services(void) {
+    k64_system_register_service("init",
+                                "k64s/init.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                init_start,
+                                init_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("servicectl",
+                                "k64s/servicectl.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                servicectl_start,
+                                servicectl_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("driverctl",
+                                "k64s/driverctl.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                driverctl_start,
+                                driverctl_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("reload",
+                                "k64s/reload.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                K64_SERVICE_FLAG_ASYNC,
+                                1,
+                                0,
+                                true,
+                                reload_start,
+                                reload_stop,
+                                reload_poll,
+                                NULL);
+
+    k64_system_register_service("fsctl",
+                                "k64s/fsctl.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                fsctl_start,
+                                fsctl_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("userctl",
+                                "k64s/userctl.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                k64_user_service_start,
+                                k64_user_service_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("shell",
+                                "k64s/shell.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                K64_SERVICE_FLAG_ASYNC,
+                                1,
+                                0,
+                                true,
+                                k64_shell_service_start,
+                                k64_shell_service_stop,
+                                k64_shell_service_poll,
+                                NULL);
+}

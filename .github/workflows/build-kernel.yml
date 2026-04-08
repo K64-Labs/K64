@@ -1,0 +1,52 @@
+name: K64 Kernel CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          nasm \
+          mtools \
+          xorriso \
+          grub-pc-bin \
+          grub-common \
+          gcc \
+          g++ \
+          make \
+          git \
+          bison \
+          flex
+
+    - name: Build cross-compiler (x86_64-elf-gcc)
+      run: |
+        mkdir -p $HOME/cross
+        cd $HOME/cross
+
+        git clone https://github.com/lordmilko/i686-elf-tools.git
+        # or your own cross compiler instructions
+
+    - name: Build K64 kernel and ISO
+      run: |
+        export PATH="$HOME/cross/bin:$PATH"
+        make clean
+        make -j$(nproc)
+
+    - name: Upload ISO artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: k64-kernel-iso
+        path: k64.iso
