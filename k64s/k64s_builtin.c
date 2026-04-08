@@ -1,3 +1,4 @@
+#include "k64_elf.h"
 #include "k64_config.h"
 #include "k64_fs.h"
 #include "k64_hotreload.h"
@@ -91,6 +92,125 @@ static void svc_print_mib_line(const char* label, uint64_t bytes) {
     k64_term_write(": ");
     k64_term_write_dec(bytes / (1024ULL * 1024ULL));
     k64_term_write(" MiB\n");
+}
+
+static void svc_append(char* dst, int dst_size, const char* src) {
+    int pos = 0;
+
+    while (dst[pos] && pos + 1 < dst_size) {
+        pos++;
+    }
+    for (int i = 0; src && src[i] && pos + 1 < dst_size; ++i) {
+        dst[pos++] = src[i];
+    }
+    dst[pos] = '\0';
+}
+
+static void svc_copy(char* dst, int dst_size, const char* src) {
+    int i = 0;
+
+    if (!dst || dst_size <= 0) {
+        return;
+    }
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    while (src[i] && i + 1 < dst_size) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+static bool svc_contains_char(const char* text, char ch) {
+    for (int i = 0; text && text[i]; ++i) {
+        if (text[i] == ch) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void svc_write_u16le(uint8_t* buf, size_t off, uint16_t value) {
+    buf[off] = (uint8_t)(value & 0xFFu);
+    buf[off + 1] = (uint8_t)((value >> 8) & 0xFFu);
+}
+
+static void svc_write_u32le(uint8_t* buf, size_t off, uint32_t value) {
+    for (size_t i = 0; i < 4; ++i) {
+        buf[off + i] = (uint8_t)((value >> (i * 8u)) & 0xFFu);
+    }
+}
+
+static void svc_write_u64le(uint8_t* buf, size_t off, uint64_t value) {
+    for (size_t i = 0; i < 8; ++i) {
+        buf[off + i] = (uint8_t)((value >> (i * 8u)) & 0xFFu);
+    }
+}
+
+static bool k64cc_build_stub_elf(const char* path) {
+    uint8_t elf[0x7B];
+
+    for (size_t i = 0; i < sizeof(elf); ++i) {
+        elf[i] = 0;
+    }
+
+    elf[0] = 0x7F;
+    elf[1] = 'E';
+    elf[2] = 'L';
+    elf[3] = 'F';
+    elf[4] = 2;
+    elf[5] = 1;
+    elf[6] = 1;
+    svc_write_u16le(elf, 16, 2);
+    svc_write_u16le(elf, 18, 62);
+    svc_write_u32le(elf, 20, 1);
+    svc_write_u64le(elf, 24, 0x400078ULL);
+    svc_write_u64le(elf, 32, 64);
+    svc_write_u64le(elf, 40, 0);
+    svc_write_u32le(elf, 48, 0);
+    svc_write_u16le(elf, 52, 64);
+    svc_write_u16le(elf, 54, 56);
+    svc_write_u16le(elf, 56, 1);
+    svc_write_u16le(elf, 58, 0);
+    svc_write_u16le(elf, 60, 0);
+    svc_write_u16le(elf, 62, 0);
+
+    svc_write_u32le(elf, 64, 1);
+    svc_write_u32le(elf, 68, 5);
+    svc_write_u64le(elf, 72, 0);
+    svc_write_u64le(elf, 80, 0x400000ULL);
+    svc_write_u64le(elf, 88, 0x400000ULL);
+    svc_write_u64le(elf, 96, sizeof(elf));
+    svc_write_u64le(elf, 104, sizeof(elf));
+    svc_write_u64le(elf, 112, 0x1000ULL);
+
+    elf[0x78] = 0x31;
+    elf[0x79] = 0xC0;
+    elf[0x7A] = 0xC3;
+
+    return k64_fs_write_file_raw(path, elf, sizeof(elf));
+}
+
+static void k64cc_usage(void) {
+    svc_print_line("usage: k64cc <elf|k64s|k64m> ...");
+    svc_print_line("  k64cc elf <name|path>");
+    svc_print_line("  k64cc k64s <name> [system|root|user]");
+    svc_print_line("  k64cc k64m <name> [driver|filesystem|service]");
+}
+
+static bool elfctl_command(const char* command, const char* args) {
+    (void)command;
+    if (!args || !args[0]) {
+        svc_print_line("usage: elfrun </path/to/file.elf>");
+        return true;
+    }
+    if (!k64_elf_execute_path(args)) {
+        svc_print_line("elfrun failed");
+        return true;
+    }
+    return true;
 }
 
 static bool svc_get_kernel_identity(char* kernel_name, int kernel_name_size, char* kernel_id, int kernel_id_size) {
@@ -199,6 +319,108 @@ static bool uname_command(const char* command, const char* args) {
     k64_term_write(" ");
     k64_term_write(K64_KERNEL_ARCH);
     k64_term_putc('\n');
+    return true;
+}
+
+static bool k64cc_command(const char* command, const char* args) {
+    char subcmd[16];
+    char name[64];
+    char arg2[32];
+    char path[128];
+    char content[256];
+
+    (void)command;
+    args = svc_next_token(args, subcmd, sizeof(subcmd));
+    if (!subcmd[0]) {
+        k64cc_usage();
+        return true;
+    }
+
+    if (k64_streq(subcmd, "elf")) {
+        args = svc_next_token(args, name, sizeof(name));
+        if (!name[0]) {
+            k64cc_usage();
+            return true;
+        }
+        if (svc_contains_char(name, '/')) {
+            svc_copy(path, sizeof(path), name);
+        } else {
+            path[0] = '\0';
+            svc_append(path, sizeof(path), "/usr/");
+            svc_append(path, sizeof(path), k64_user_effective_name());
+            svc_append(path, sizeof(path), "/");
+            svc_append(path, sizeof(path), name);
+            if (!svc_contains_char(name, '.')) {
+                svc_append(path, sizeof(path), ".elf");
+            }
+        }
+        if (!k64cc_build_stub_elf(path)) {
+            svc_print_line("k64cc: elf build failed");
+            return true;
+        }
+        k64_term_write("k64cc: wrote ");
+        k64_term_write(path);
+        k64_term_putc('\n');
+        return true;
+    }
+
+    if (k64_streq(subcmd, "k64s")) {
+        args = svc_next_token(args, name, sizeof(name));
+        args = svc_next_token(args, arg2, sizeof(arg2));
+        if (!name[0]) {
+            k64cc_usage();
+            return true;
+        }
+        path[0] = '\0';
+        svc_append(path, sizeof(path), "/k64s/");
+        svc_append(path, sizeof(path), name);
+        svc_append(path, sizeof(path), ".k64s");
+
+        content[0] = '\0';
+        svc_append(content, sizeof(content), "name=");
+        svc_append(content, sizeof(content), name);
+        svc_append(content, sizeof(content), "\nclass=");
+        svc_append(content, sizeof(content), arg2[0] ? arg2 : "system");
+        svc_append(content, sizeof(content), "\nsource=compiled\n");
+        if (!k64_fs_write_file(path, content)) {
+            svc_print_line("k64cc: k64s build failed");
+            return true;
+        }
+        k64_term_write("k64cc: wrote ");
+        k64_term_write(path);
+        k64_term_putc('\n');
+        return true;
+    }
+
+    if (k64_streq(subcmd, "k64m")) {
+        args = svc_next_token(args, name, sizeof(name));
+        args = svc_next_token(args, arg2, sizeof(arg2));
+        if (!name[0]) {
+            k64cc_usage();
+            return true;
+        }
+        path[0] = '\0';
+        svc_append(path, sizeof(path), "/k64m/");
+        svc_append(path, sizeof(path), name);
+        svc_append(path, sizeof(path), ".k64m");
+
+        content[0] = '\0';
+        svc_append(content, sizeof(content), "name=");
+        svc_append(content, sizeof(content), name);
+        svc_append(content, sizeof(content), "\ntype=");
+        svc_append(content, sizeof(content), arg2[0] ? arg2 : "driver");
+        svc_append(content, sizeof(content), "\nsource=compiled\n");
+        if (!k64_fs_write_file(path, content)) {
+            svc_print_line("k64cc: k64m build failed");
+            return true;
+        }
+        k64_term_write("k64cc: wrote ");
+        k64_term_write(path);
+        k64_term_putc('\n');
+        return true;
+    }
+
+    k64cc_usage();
     return true;
 }
 
@@ -447,6 +669,34 @@ static void sysfetch_stop(k64_service_t* service) {
     k64_term_putc('\n');
 }
 
+static bool k64cc_start(k64_service_t* service) {
+    (void)k64_system_register_command(service->name, "k64cc", k64cc_command);
+    k64_term_write("[svc] k64cc started pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+    return true;
+}
+
+static void k64cc_stop(k64_service_t* service) {
+    k64_term_write("[svc] k64cc stopped pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+}
+
+static bool elfctl_start(k64_service_t* service) {
+    (void)k64_system_register_command(service->name, "elfrun", elfctl_command);
+    k64_term_write("[svc] elfctl started pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+    return true;
+}
+
+static void elfctl_stop(k64_service_t* service) {
+    k64_term_write("[svc] elfctl stopped pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+}
+
 static bool uname_start(k64_service_t* service) {
     (void)k64_system_register_command(service->name, "uname", uname_command);
     k64_term_write("[svc] uname started pid=");
@@ -637,6 +887,20 @@ static bool init_start(k64_service_t* service) {
         k64_term_putc('\n');
     }
 
+    result = k64_system_start_service_by_name("k64cc");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("[svc] init failed to start k64cc: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
+    result = k64_system_start_service_by_name("elfctl");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("[svc] init failed to start elfctl: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
     result = k64_system_start_service_by_name("shell");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
         k64_term_write("[svc] init failed to start shell: ");
@@ -785,6 +1049,30 @@ void k64s_register_builtin_services(void) {
                                 true,
                                 uname_start,
                                 uname_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("k64cc",
+                                "k64s/k64cc.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                k64cc_start,
+                                k64cc_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("elfctl",
+                                "k64s/elfctl.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                elfctl_start,
+                                elfctl_stop,
                                 NULL,
                                 NULL);
 

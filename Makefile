@@ -32,6 +32,9 @@ K64S_SRCS = $(wildcard k64s/*.c)
 K64S_MANIFESTS = $(wildcard k64s/*.k64s)
 K64M_SRCS = $(wildcard k64m/*.c)
 K64M_MANIFESTS = $(wildcard k64m/*.k64m)
+EX_SRCS = $(wildcard ex/*.S)
+EX_BUILD_DIR := build/ex
+EX_ELFS := $(patsubst ex/%.S,$(EX_BUILD_DIR)/%.elf,$(EX_SRCS))
 K64FS_SRC_ROOT := rootfs
 K64FS_STAGE_ROOT := build/rootfs
 K64FS_STAGE_STAMP := build/rootfs.stamp
@@ -45,6 +48,7 @@ K64_GRUB_K64FS_MOD := $(GRUB_MODDIR)/k64fs.mod
 
 K64_SRCS = \
   k64_kernel.c \
+  k64_elf.c \
   k64_terminal.c \
   k64_serial.c \
   k64_log.c \
@@ -100,6 +104,14 @@ k64_kernel.elf: $(K64_KERNEL_ELF)
 $(K64_KERNEL_ELF): $(K64_OBJS) linker.ld
 	$(LD) $(LDFLAGS) -o $@ $(K64_OBJS)
 	@if [ -n "$(GRUB_FILE)" ]; then $(GRUB_FILE) --is-x86-multiboot $@; fi
+
+$(EX_BUILD_DIR)/%.o: ex/%.S
+	mkdir -p $(EX_BUILD_DIR)
+	$(CC64) $(CFLAGS64) -c -o $@ $<
+
+$(EX_BUILD_DIR)/%.elf: $(EX_BUILD_DIR)/%.o
+	mkdir -p $(EX_BUILD_DIR)
+	$(LD) -nostdlib -static -e _start -Ttext 0x1000 -o $@ $<
 
 $(K64_GRUB_K64FS_MOD): grub/k64fs.c tools/build_grub_k64fs.sh
 	mkdir -p build
@@ -158,17 +170,19 @@ $(K64_GRUB_ISO_CFG): $(K64_KERNEL_ELF) $(K64M_MANIFESTS)
 	@if [ -d k64m ]; then for f in $(K64M_MANIFESTS); do name=$$(basename $$f); echo "  module /k64m/$$name /k64m/$$name" >> $(K64_GRUB_ISO_CFG); done; fi
 	echo '}' >> $(K64_GRUB_ISO_CFG)
 
-$(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(K64_GRUB_ROOT_CFG) tools/mk_k64fs.py $(shell find rootfs -type f 2>/dev/null) $(K64S_MANIFESTS) $(K64M_MANIFESTS)
+$(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(K64_GRUB_ROOT_CFG) tools/mk_k64fs.py $(shell find rootfs -type f 2>/dev/null) $(K64S_MANIFESTS) $(K64M_MANIFESTS)
 	rm -rf $(K64FS_STAGE_ROOT)
 	mkdir -p $(K64FS_STAGE_ROOT)/boot
 	mkdir -p $(K64FS_STAGE_ROOT)/boot/grub
 	mkdir -p $(K64FS_STAGE_ROOT)/k64s
 	mkdir -p $(K64FS_STAGE_ROOT)/k64m
+	mkdir -p $(K64FS_STAGE_ROOT)/ex
 	rsync -a $(K64FS_SRC_ROOT)/ $(K64FS_STAGE_ROOT)/
 	cp $(K64_KERNEL_ELF) $(K64FS_STAGE_ROOT)/boot/$(K64_KERNEL_ELF)
 	cp $(K64_GRUB_ROOT_CFG) $(K64FS_STAGE_ROOT)/boot/grub/grub.cfg
 	if [ -d k64s ]; then cp $(K64S_MANIFESTS) $(K64FS_STAGE_ROOT)/k64s/; fi
 	if [ -d k64m ]; then cp $(K64M_MANIFESTS) $(K64FS_STAGE_ROOT)/k64m/; fi
+	if [ -n "$(EX_ELFS)" ]; then cp $(EX_ELFS) $(K64FS_STAGE_ROOT)/ex/; fi
 	touch $(K64FS_STAGE_STAMP)
 
 $(K64FS_IMAGE): $(K64FS_STAGE_STAMP)

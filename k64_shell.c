@@ -1,5 +1,6 @@
 // k64_shell.c
 #include "k64_shell.h"
+#include "k64_elf.h"
 #include "k64_fs.h"
 #include "k64_keyboard.h"
 #include "k64_log.h"
@@ -110,6 +111,35 @@ static bool shell_parse_u64(const char* s, uint64_t* out) {
     return true;
 }
 
+static bool shell_try_execute_elf(const char* name) {
+    char path[96];
+
+    if (!name || !name[0]) {
+        return false;
+    }
+
+    path[0] = '\0';
+    {
+        const char* prefix = "/ex/";
+        int pos = 0;
+        for (int i = 0; prefix[i] && pos + 1 < (int)sizeof(path); ++i) {
+            path[pos++] = prefix[i];
+        }
+        for (int i = 0; name[i] && pos + 1 < (int)sizeof(path); ++i) {
+            path[pos++] = name[i];
+        }
+        if (!k64_streq(name + (k64_strlen(name) >= 4 ? k64_strlen(name) - 4 : 0), ".elf")) {
+            const char* suffix = ".elf";
+            for (int i = 0; suffix[i] && pos + 1 < (int)sizeof(path); ++i) {
+                path[pos++] = suffix[i];
+            }
+        }
+        path[pos] = '\0';
+    }
+
+    return k64_elf_execute_path(path);
+}
+
 static const char* shell_next_token(const char* s, char* token, int token_size) {
     int i = 0;
 
@@ -144,6 +174,8 @@ static void shell_print_help(void) {
     k64_term_write("  clear            - clear the console\n");
     k64_term_write("  sysfetch         - show system summary and splash\n");
     k64_term_write("  uname            - show kernel identity\n");
+    k64_term_write("  k64cc            - build stub ELF files and K64 manifests\n");
+    k64_term_write("  elfrun <path>    - execute an ELF file directly\n");
     k64_term_write("  ticks            - show PIT tick counter\n");
     k64_term_write("  task             - print current task id\n");
     k64_term_write("  serial           - print serial availability\n");
@@ -771,6 +803,10 @@ static void shell_handle_command(const char* cmd) {
                     k64_term_putc('\n');
                     return;
                 }
+            }
+
+            if (shell_try_execute_elf(unknown_cmd)) {
+                return;
             }
 
             k64_term_write("Unknown command: ");

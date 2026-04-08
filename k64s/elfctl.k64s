@@ -1,0 +1,3 @@
+name=elfctl
+class=system
+description=Native ELF execution service for /ex and explicit elfrun requests.

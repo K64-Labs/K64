@@ -644,6 +644,30 @@ bool k64_fs_write_file(const char* path, const char* text) {
     return fs_writeback_image();
 }
 
+bool k64_fs_write_file_raw(const char* path, const uint8_t* data, size_t size) {
+    char leaf[K64_FS_NAME_MAX];
+    int parent = fs_resolve(path, true, leaf);
+    int idx;
+
+    if (parent < 0 || !leaf[0] || size > 0x7FFFFFFF) {
+        return false;
+    }
+    idx = fs_find_child(parent, leaf);
+    if (idx < 0) {
+        if (!k64_fs_touch(path)) {
+            return false;
+        }
+        idx = fs_find_child(parent, leaf);
+    }
+    if (idx < 0 || nodes[idx].is_dir) {
+        return false;
+    }
+    if (!fs_store_mutable(&nodes[idx], data, (int)size)) {
+        return false;
+    }
+    return fs_writeback_image();
+}
+
 bool k64_fs_cat(const char* path, char* out, int out_size) {
     int idx = fs_resolve(path, false, NULL);
     const uint8_t* data;

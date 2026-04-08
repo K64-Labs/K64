@@ -1,0 +1,3 @@
+name=k64cc
+class=system
+description=On-system builder for K64 manifests and stub ELF binaries.
