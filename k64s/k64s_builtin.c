@@ -1,12 +1,16 @@
+#include "k64_config.h"
 #include "k64_fs.h"
 #include "k64_hotreload.h"
 #include "k64_modules.h"
+#include "k64_pit.h"
+#include "k64_pmm.h"
 #include "k64_reload.h"
 #include "k64_shell.h"
 #include "k64_string.h"
 #include "k64_system.h"
 #include "k64_terminal.h"
 #include "k64_user.h"
+#include "k64_version.h"
 
 static void svc_print_line(const char* text) {
     k64_term_write(text ? text : "");
@@ -54,6 +58,148 @@ static void servicectl_usage(void) {
 
 static void driverctl_usage(void) {
     svc_print_line("usage: driverctl <list|stopped|start|stop|restart> [id]");
+}
+
+static void svc_print_uptime_line(void) {
+    uint64_t ticks = k64_pit_get_ticks();
+    uint64_t hz = k64_config.pit_hz ? k64_config.pit_hz : 1000;
+    uint64_t total_seconds = ticks / hz;
+    uint64_t days = total_seconds / 86400;
+    uint64_t hours = (total_seconds % 86400) / 3600;
+    uint64_t minutes = (total_seconds % 3600) / 60;
+    uint64_t seconds = total_seconds % 60;
+
+    k64_term_write("Uptime: ");
+    if (days) {
+        k64_term_write_dec(days);
+        k64_term_write("d ");
+    }
+    if (days || hours) {
+        k64_term_write_dec(hours);
+        k64_term_write("h ");
+    }
+    if (days || hours || minutes) {
+        k64_term_write_dec(minutes);
+        k64_term_write("m ");
+    }
+    k64_term_write_dec(seconds);
+    k64_term_write("s\n");
+}
+
+static void svc_print_mib_line(const char* label, uint64_t bytes) {
+    k64_term_write(label);
+    k64_term_write(": ");
+    k64_term_write_dec(bytes / (1024ULL * 1024ULL));
+    k64_term_write(" MiB\n");
+}
+
+static bool svc_get_kernel_identity(char* kernel_name, int kernel_name_size, char* kernel_id, int kernel_id_size) {
+    int len;
+
+    if (!k64_fs_find_boot_kernel(kernel_name, kernel_name_size)) {
+        return false;
+    }
+
+    len = (int)k64_strlen(kernel_name);
+    if (len >= 4 && k64_strcmp(kernel_name + len - 4, ".elf") == 0) {
+        int copy_len = len - 4;
+        if (copy_len >= kernel_id_size) {
+            copy_len = kernel_id_size - 1;
+        }
+        for (int i = 0; i < copy_len; ++i) {
+            kernel_id[i] = kernel_name[i];
+        }
+        kernel_id[copy_len] = '\0';
+    } else {
+        int copy_len = len;
+        if (copy_len >= kernel_id_size) {
+            copy_len = kernel_id_size - 1;
+        }
+        for (int i = 0; i < copy_len; ++i) {
+            kernel_id[i] = kernel_name[i];
+        }
+        kernel_id[copy_len] = '\0';
+    }
+    return true;
+}
+
+static bool sysfetch_command(const char* command, const char* args) {
+    char kernel_name[64];
+    char kernel_id[64];
+    uint64_t total_mem = (uint64_t)k64_pmm_total_frames() * 4096ULL;
+    uint64_t used_mem = (uint64_t)k64_pmm_used_frames() * 4096ULL;
+    uint64_t free_mem = total_mem > used_mem ? (total_mem - used_mem) : 0;
+    uint64_t disk_total = (uint64_t)k64_fs_capacity_bytes();
+    uint64_t disk_used = (uint64_t)k64_fs_used_bytes();
+    uint64_t disk_free = disk_total > disk_used ? (disk_total - disk_used) : 0;
+
+    (void)command;
+    (void)args;
+
+    if (!svc_get_kernel_identity(kernel_name, sizeof(kernel_name), kernel_id, sizeof(kernel_id))) {
+        kernel_id[0] = '\0';
+    }
+
+    k64_term_setcolor(K64_COLOR_LIGHT_CYAN, K64_COLOR_BLACK);
+    k64_term_write("                                _____      \n");
+    k64_term_write("                               /    /      \n");
+    k64_term_write("     .                        /    /       \n");
+    k64_term_write("   .'|          .-''''-.     /    /        \n");
+    k64_term_write(" .'  |         /  .--.  \\   /    /         \n");
+    k64_term_write("<    |        /  /    '-'  /    /  __      \n");
+    k64_term_write(" |   | ____  /  /.--.     /    /  |  |     \n");
+    k64_term_write(" |   | \\ .' /  ' _   \\   /    '   |  |     \n");
+    k64_term_write(" |   |/  . /   .' )   | /    '----|  |---. \n");
+    k64_term_write(" |    /\\  \\|   (_.'   //          |  |   | \n");
+    k64_term_write(" |   |  \\  \\\\       '  '----------|  |---' \n");
+    k64_term_write(" '    \\  \\  \\ `----'              |  |     \n");
+    k64_term_write("'------'  '---'                  /____\\    \n");
+    k64_term_setcolor(K64_COLOR_LIGHT_GREY, K64_COLOR_BLACK);
+    k64_term_putc('\n');
+
+    k64_term_write("User: ");
+    k64_term_write(k64_user_effective_name());
+    k64_term_putc('\n');
+    k64_term_write("Kernel: ");
+    if (kernel_id[0]) {
+        k64_term_write(kernel_id);
+    } else {
+        k64_term_write("unknown");
+    }
+    k64_term_putc('\n');
+    k64_term_write("Arch: " K64_KERNEL_ARCH "\n");
+    svc_print_uptime_line();
+    svc_print_mib_line("Memory Free", free_mem);
+    svc_print_mib_line("Memory Total", total_mem);
+    svc_print_mib_line("Disk Free", disk_free);
+    svc_print_mib_line("Disk Total", disk_total);
+    k64_term_write("Drivers Loaded: ");
+    k64_term_write_dec(k64_modules_driver_count());
+    k64_term_putc('\n');
+    k64_term_write("Services Loaded: ");
+    k64_term_write_dec(k64_system_service_count());
+    k64_term_putc('\n');
+    return true;
+}
+
+static bool uname_command(const char* command, const char* args) {
+    char kernel_name[64];
+    char kernel_id[64];
+
+    (void)command;
+    (void)args;
+
+    if (!svc_get_kernel_identity(kernel_name, sizeof(kernel_name), kernel_id, sizeof(kernel_id))) {
+        svc_print_line("K64 unknown");
+        return true;
+    }
+
+    k64_term_write("K64 ");
+    k64_term_write(kernel_id);
+    k64_term_write(" ");
+    k64_term_write(K64_KERNEL_ARCH);
+    k64_term_putc('\n');
+    return true;
 }
 
 static void servicectl_list(bool stopped_only) {
@@ -287,6 +433,34 @@ static bool driverctl_start(k64_service_t* service) {
     return true;
 }
 
+static bool sysfetch_start(k64_service_t* service) {
+    (void)k64_system_register_command(service->name, "sysfetch", sysfetch_command);
+    k64_term_write("[svc] sysfetch started pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+    return true;
+}
+
+static void sysfetch_stop(k64_service_t* service) {
+    k64_term_write("[svc] sysfetch stopped pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+}
+
+static bool uname_start(k64_service_t* service) {
+    (void)k64_system_register_command(service->name, "uname", uname_command);
+    k64_term_write("[svc] uname started pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+    return true;
+}
+
+static void uname_stop(k64_service_t* service) {
+    k64_term_write("[svc] uname stopped pid=");
+    k64_term_write_dec(service->pid);
+    k64_term_putc('\n');
+}
+
 static void driverctl_stop(k64_service_t* service) {
     k64_term_write("[svc] driverctl stopped pid=");
     k64_term_write_dec(service->pid);
@@ -449,6 +623,20 @@ static bool init_start(k64_service_t* service) {
         k64_term_putc('\n');
     }
 
+    result = k64_system_start_service_by_name("sysfetch");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("[svc] init failed to start sysfetch: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
+    result = k64_system_start_service_by_name("uname");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("[svc] init failed to start uname: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
     result = k64_system_start_service_by_name("shell");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
         k64_term_write("[svc] init failed to start shell: ");
@@ -573,6 +761,30 @@ void k64s_register_builtin_services(void) {
                                 true,
                                 k64_user_service_start,
                                 k64_user_service_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("sysfetch",
+                                "k64s/sysfetch.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                sysfetch_start,
+                                sysfetch_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("uname",
+                                "k64s/uname.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                uname_start,
+                                uname_stop,
                                 NULL,
                                 NULL);
 

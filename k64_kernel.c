@@ -13,13 +13,14 @@
 #include "k64_modules.h"
 #include "k64_system.h"
 #include "k64_serial.h"
+#include "k64_version.h"
 
 extern uint32_t k64_mb_magic;
 extern uint32_t k64_mb_info;
 
 static void k64_banner(void) {
     k64_term_setcolor(K64_COLOR_LIGHT_GREEN, K64_COLOR_BLACK);
-    k64_term_write("K64 Kernel 0.2.0 (x86_64)\n");
+    k64_term_write("K64 Kernel " K64_KERNEL_VERSION " (" K64_KERNEL_ARCH ")\n");
     k64_term_setcolor(K64_COLOR_LIGHT_GREY, K64_COLOR_BLACK);
     k64_term_write("Copyright (c) 2025 K64 Labs.\n\n");
 }

@@ -5,7 +5,7 @@
 
 #define K64_USER_MAX_ACCOUNTS 8
 #define K64_USER_NAME_MAX 16
-#define K64_USER_PASS_MAX 24
+#define K64_USER_PASS_MAX 40
 #define K64_GROUP_MAX 16
 #define K64_GROUP_NAME_MAX 16
 #define K64_USER_DB_PATH "/etc/users.k64"
@@ -35,6 +35,80 @@ typedef struct {
 } k64_user_state_t;
 
 static k64_user_state_t user_state;
+static void user_copy(char* dst, int dst_size, const char* src);
+static int user_len(const char* s);
+
+static bool user_hash_is_encoded(const char* value) {
+    return value && k64_strncmp(value, "k64$", 4) == 0;
+}
+
+static void user_hash_password(const char* user_name, const char* password, char* out, int out_size) {
+    static const char* hex = "0123456789abcdef";
+    uint64_t hash = 1469598103934665603ULL;
+    const char* pepper = "K64:userctl:v1";
+    int pos = 0;
+
+    if (!out || out_size <= 0) {
+        return;
+    }
+
+    for (int i = 0; pepper[i]; ++i) {
+        hash ^= (uint64_t)(unsigned char)pepper[i];
+        hash *= 1099511628211ULL;
+    }
+    for (int i = 0; user_name && user_name[i]; ++i) {
+        hash ^= (uint64_t)(unsigned char)user_name[i];
+        hash *= 1099511628211ULL;
+    }
+    hash ^= (uint64_t)':';
+    hash *= 1099511628211ULL;
+    for (int i = 0; password && password[i]; ++i) {
+        hash ^= (uint64_t)(unsigned char)password[i];
+        hash *= 1099511628211ULL;
+    }
+
+    if (out_size < 5) {
+        if (out_size > 0) {
+            out[0] = '\0';
+        }
+        return;
+    }
+    out[0] = 'k';
+    out[1] = '6';
+    out[2] = '4';
+    out[3] = '$';
+    pos = 4;
+    for (int shift = 60; shift >= 0 && pos + 1 < out_size; shift -= 4) {
+        out[pos++] = hex[(hash >> shift) & 0xFULL];
+    }
+    out[pos] = '\0';
+}
+
+static void user_store_password(char* dst,
+                                int dst_size,
+                                const char* user_name,
+                                const char* password_value,
+                                bool already_hashed) {
+    if (already_hashed && user_hash_is_encoded(password_value)) {
+        user_copy(dst, dst_size, password_value);
+        return;
+    }
+    user_hash_password(user_name ? user_name : "", password_value ? password_value : "", dst, dst_size);
+}
+
+static bool user_password_matches(const k64_user_account_t* account, const char* candidate) {
+    char encoded[K64_USER_PASS_MAX];
+
+    if (!account || !candidate) {
+        return false;
+    }
+    if (!user_hash_is_encoded(account->password)) {
+        return k64_streq(account->password, candidate);
+    }
+
+    user_hash_password(account->name, candidate, encoded, sizeof(encoded));
+    return k64_streq(account->password, encoded);
+}
 
 static void user_copy(char* dst, int dst_size, const char* src) {
     int i = 0;
@@ -284,7 +358,8 @@ static bool user_add_account(const char* name,
                              const char* password,
                              bool is_root,
                              bool sudoer,
-                             const char* primary_group) {
+                             const char* primary_group,
+                             bool password_is_hashed) {
     int idx;
 
     if (!name || !name[0] || !password || !password[0]) {
@@ -296,7 +371,11 @@ static bool user_add_account(const char* name,
 
     idx = user_find(name);
     if (idx >= 0) {
-        user_copy(user_state.accounts[idx].password, K64_USER_PASS_MAX, password);
+        user_store_password(user_state.accounts[idx].password,
+                            K64_USER_PASS_MAX,
+                            name,
+                            password,
+                            password_is_hashed);
         user_state.accounts[idx].is_root = is_root;
         user_state.accounts[idx].sudoer = sudoer || is_root;
         user_copy(user_state.accounts[idx].primary_group,
@@ -310,7 +389,11 @@ static bool user_add_account(const char* name,
 
     idx = user_state.count++;
     user_copy(user_state.accounts[idx].name, K64_USER_NAME_MAX, name);
-    user_copy(user_state.accounts[idx].password, K64_USER_PASS_MAX, password);
+    user_store_password(user_state.accounts[idx].password,
+                        K64_USER_PASS_MAX,
+                        name,
+                        password,
+                        password_is_hashed);
     user_state.accounts[idx].is_root = is_root;
     user_state.accounts[idx].sudoer = sudoer || is_root;
     user_copy(user_state.accounts[idx].primary_group,
@@ -358,8 +441,8 @@ static void user_seed_defaults(void) {
     user_reset_state();
     (void)group_add_internal("root");
     (void)group_add_internal("sudo");
-    (void)user_add_account("root", "root", true, true, "root");
-    (void)user_add_account("guest", "guest", false, true, "guest");
+    (void)user_add_account("root", "root", true, true, "root", false);
+    (void)user_add_account("guest", "guest", false, true, "guest", false);
     user_ensure_primary_groups();
     user_sync_role_groups();
     user_state.current_index = user_find("guest");
@@ -428,7 +511,8 @@ static bool user_load_db(void) {
                                fields[1],
                                k64_streq(fields[2], "root"),
                                fields[3][0] == '1',
-                               fields[4][0] ? fields[4] : fields[0]);
+                               fields[4][0] ? fields[4] : fields[0],
+                               user_hash_is_encoded(fields[1]));
     }
 
     if (user_state.count == 0) {
@@ -683,7 +767,7 @@ static bool user_command_login_like(const char* args) {
     }
 
     idx = user_find(name);
-    if (idx < 0 || !k64_streq(user_state.accounts[idx].password, password)) {
+    if (idx < 0 || !user_password_matches(&user_state.accounts[idx], password)) {
         user_print_line("authentication failed");
         return true;
     }
@@ -737,7 +821,12 @@ static bool user_command_sudo(const char* command, const char* args) {
         user_print_line("permission denied: account is not in sudo");
         return true;
     }
-    if (!token[0] || !k64_streq(token, user_state.accounts[user_state.current_index].password)) {
+    if (!token[0] || k64_streq(token, "on")) {
+        user_state.sudo_active = true;
+        user_print_line("sudo enabled");
+        return true;
+    }
+    if (!user_password_matches(&user_state.accounts[user_state.current_index], token)) {
         user_print_line("authentication failed");
         return true;
     }
@@ -768,7 +857,11 @@ static bool user_command_passwd(const char* command, const char* args) {
         user_print_line("permission denied");
         return true;
     }
-    user_copy(user_state.accounts[idx].password, K64_USER_PASS_MAX, password);
+    user_store_password(user_state.accounts[idx].password,
+                        K64_USER_PASS_MAX,
+                        user_state.accounts[idx].name,
+                        password,
+                        false);
     (void)user_save_db();
     user_print_line("password updated");
     return true;
@@ -805,7 +898,7 @@ static bool user_command_useradd(const char* command, const char* args) {
     if (!primary_group[0]) {
         user_copy(primary_group, sizeof(primary_group), name);
     }
-    if (!user_add_account(name, password, is_root, sudoer, primary_group)) {
+    if (!user_add_account(name, password, is_root, sudoer, primary_group, false)) {
         user_print_line("useradd failed");
         return true;
     }

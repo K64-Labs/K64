@@ -658,7 +658,7 @@ The user model is implemented as a service, `userctl`, not as a special kernel-o
 Accounts are stored in `/etc/users.k64` with this line format:
 
 ```text
-name:password:role:sudo:primary-group
+name:password-hash:role:sudo:primary-group
 ```
 
 Groups are stored separately in `/etc/groups.k64`:
@@ -670,8 +670,8 @@ group:user1,user2,user3
 Examples:
 
 ```text
-root:root:root:1:root
-guest:guest:user:1:guest
+root:k64$6d6216943f2b4f6b:root:1:root
+guest:k64$99cd30e2c16823eb:user:1:guest
 ```
 
 ```text
@@ -683,14 +683,16 @@ guest:guest
 `/etc/users.k64` fields mean:
 
 - `name`: account name
-- `password`: plaintext password
+- `password-hash`: encoded password hash string
 - `role`: `root` or `user`
 - `sudo`: `1` or `0`
 - `primary-group`: default group for the account
 
 `/etc/groups.k64` maps each group name to its member list.
 
-This is intentionally simple and not secure by production standards. Passwords are stored in plaintext and there is no hardened authentication stack.
+K64 no longer stores passwords in clear text. `userctl` writes hashed password strings with a `k64$...` prefix and verifies login/sudo attempts against that hash. Older plaintext entries are still accepted as a compatibility path when loading an existing `users.k64`, but they are rewritten into hashed form on the next save.
+
+This is still intentionally simple and not secure by production standards. The current hash is a lightweight built-in scheme so the system can avoid clear-text storage without pulling in a full cryptographic stack.
 
 ### Default behavior
 
@@ -723,7 +725,7 @@ Privilege rules currently include:
 - root can manage all services
 - non-root can only manage user-class services
 - only root can manage drivers
-- a sudo-capable user can elevate by providing their own password
+- a sudo-capable user can elevate through `sudo`, `sudo on`, or `sudo <password>`
 - root and sudo membership are reflected into the `root` and `sudo` groups
 
 ### Session, account, and group commands
@@ -762,7 +764,9 @@ What they do:
 - `groupdel <group>`: delete a group if it is not essential and not used as a primary group
 - `gpasswd add <group> <user>`: add a user to a group
 - `gpasswd del <group> <user>`: remove a user from a group
-- `sudo <password>`: enable effective root for the current session
+- `sudo`: enable effective root for the current session
+- `sudo on`: explicit form of `sudo`
+- `sudo <password>`: password-checked form of `sudo`
 - `sudo off`: drop effective root again
 
 Examples:
@@ -1096,7 +1100,7 @@ That is appropriate for QEMU and some older real hardware, but not yet for moder
 
 ### 5. User security is intentionally simple
 
-Passwords are plaintext, session state is simple, and privilege elevation is a service-level model rather than a hardened security architecture.
+Passwords are hashed rather than stored in clear text, but the scheme is still lightweight, session state is simple, and privilege elevation is a service-level model rather than a hardened security architecture.
 
 ### 6. Services and drivers are registry-based, not full on-disk executables
 

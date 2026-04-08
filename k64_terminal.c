@@ -123,15 +123,21 @@ void k64_term_write(const char* s) {
 
 void k64_term_draw_boot_screen(void) {
     k64_term_setcolor(K64_COLOR_LIGHT_CYAN, K64_COLOR_BLACK);
-    k64_term_write("==============================================================\n");
-    k64_term_write("  _  __  __  _  _      ____              _    \n");
-    k64_term_write(" | |/ / / /_| || |    / ___| _   _ _ __ | |__ \n");
-    k64_term_write(" | ' / | '_ \\ || |_   \\___ \\| | | | '_ \\| '_ \\\n");
-    k64_term_write(" | . \\ | (_) |__   _|   ___) | |_| | |_) | | | |\n");
-    k64_term_write(" |_|\\_\\ \\___/   |_|    |____/ \\__,_| .__/|_| |_|\n");
-    k64_term_write("                                      |_|          \n");
-    k64_term_write("==============================================================\n");
+    k64_term_write("                                _____      \n");
+    k64_term_write("                               /    /      \n");
+    k64_term_write("     .                        /    /       \n");
+    k64_term_write("   .'|          .-''''-.     /    /        \n");
+    k64_term_write(" .'  |         /  .--.  \\   /    /         \n");
+    k64_term_write("<    |        /  /    '-'  /    /  __      \n");
+    k64_term_write(" |   | ____  /  /.--.     /    /  |  |     \n");
+    k64_term_write(" |   | \\ .' /  ' _   \\   /    '   |  |     \n");
+    k64_term_write(" |   |/  . /   .' )   | /    '----|  |---. \n");
+    k64_term_write(" |    /\\  \\|   (_.'   //          |  |   | \n");
+    k64_term_write(" |   |  \\  \\\\       '  '----------|  |---' \n");
+    k64_term_write(" '    \\  \\  \\ `----'              |  |     \n");
+    k64_term_write("'------'  '---'                  /____\\    \n");
     k64_term_setcolor(K64_COLOR_LIGHT_GREY, K64_COLOR_BLACK);
+    k64_term_putc('\n');
 }
 
 void k64_term_init(void) {

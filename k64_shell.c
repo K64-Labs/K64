@@ -1,5 +1,6 @@
 // k64_shell.c
 #include "k64_shell.h"
+#include "k64_fs.h"
 #include "k64_keyboard.h"
 #include "k64_log.h"
 #include "k64_modules.h"
@@ -17,8 +18,6 @@
 #define SHELL_MAX_LINE 128
 #define SHELL_HISTORY_MAX 16
 #define SHELL_EVENTS_PER_POLL 32
-
-static const char* SHELL_PROMPT = "k64> ";
 
 typedef struct {
     char line[SHELL_MAX_LINE];
@@ -42,11 +41,21 @@ static char shell_saved_line[SHELL_MAX_LINE];
 static bool shell_saved_line_valid = false;
 
 static void shell_prompt(void) {
+    char cwd[128];
+
+    k64_term_write("[");
     k64_term_write(k64_user_effective_name());
-    k64_term_write("@");
+    k64_term_write("]@");
     k64_term_setcolor(K64_COLOR_LIGHT_GREEN, K64_COLOR_BLACK);
-    k64_term_write(SHELL_PROMPT);
+    k64_term_write("K64");
     k64_term_setcolor(K64_COLOR_LIGHT_GREY, K64_COLOR_BLACK);
+    k64_term_write(" ~");
+    if (k64_fs_pwd(cwd, sizeof(cwd))) {
+        k64_term_write(cwd);
+    } else {
+        k64_term_write("/");
+    }
+    k64_term_write(" >>> ");
 }
 
 static int shell_line_len(const char* s) {
@@ -133,6 +142,8 @@ static void shell_print_help(void) {
     k64_term_write("Commands:\n");
     k64_term_write("  help             - show this help\n");
     k64_term_write("  clear            - clear the console\n");
+    k64_term_write("  sysfetch         - show system summary and splash\n");
+    k64_term_write("  uname            - show kernel identity\n");
     k64_term_write("  ticks            - show PIT tick counter\n");
     k64_term_write("  task             - print current task id\n");
     k64_term_write("  serial           - print serial availability\n");

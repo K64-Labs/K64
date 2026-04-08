@@ -12,6 +12,9 @@ GRUB_MKRESCUE := $(call detect_tool,grub-mkrescue,$(call detect_tool,grub2-mkres
 GRUB_FILE     := $(call detect_tool,grub-file,$(call detect_tool,grub2-file,))
 QEMU ?= qemu-system-x86_64
 PYTHON ?= python3
+K64_VERSION := $(strip $(shell awk -F'"' '/K64_KERNEL_VERSION/ {print $$2}' k64_version.h))
+K64_KERNEL_BASENAME := k64-kernel-v$(K64_VERSION)
+K64_KERNEL_ELF := $(K64_KERNEL_BASENAME).elf
 
 ifeq ($(CC64),)
 $(error No suitable 64-bit compiler found. Please install x86_64-elf-gcc or set CC64)
@@ -92,7 +95,9 @@ k64_hotreload_asm.o: k64_hotreload.S
 %.o: %.c
 	$(CC64) $(CFLAGS64) -c -o $@ $<
 
-k64_kernel.elf: $(K64_OBJS) linker.ld
+k64_kernel.elf: $(K64_KERNEL_ELF)
+
+$(K64_KERNEL_ELF): $(K64_OBJS) linker.ld
 	$(LD) $(LDFLAGS) -o $@ $(K64_OBJS)
 	@if [ -n "$(GRUB_FILE)" ]; then $(GRUB_FILE) --is-x86-multiboot $@; fi
 
@@ -120,7 +125,7 @@ $(K64_GRUB_BOOTSTRAP_CFG): $(K64_GRUB_K64FS_MOD)
 	echo 'set root=(loop)' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'configfile (loop)/boot/grub/grub.cfg' >> $(K64_GRUB_BOOTSTRAP_CFG)
 
-$(K64_GRUB_ROOT_CFG): k64_kernel.elf $(K64M_MANIFESTS)
+$(K64_GRUB_ROOT_CFG): $(K64_KERNEL_ELF) $(K64M_MANIFESTS)
 	mkdir -p build
 	echo 'set timeout=0' > $(K64_GRUB_ROOT_CFG)
 	echo 'set default=0' >> $(K64_GRUB_ROOT_CFG)
@@ -131,14 +136,14 @@ $(K64_GRUB_ROOT_CFG): k64_kernel.elf $(K64M_MANIFESTS)
 	echo '' >> $(K64_GRUB_ROOT_CFG)
 	echo 'menuentry "K64 Kernel" {' >> $(K64_GRUB_ROOT_CFG)
 	echo '  set root=(loop)' >> $(K64_GRUB_ROOT_CFG)
-	echo '  multiboot /boot/k64_kernel.elf pit_hz=1000 log_level=debug' >> $(K64_GRUB_ROOT_CFG)
+	echo '  multiboot /boot/$(K64_KERNEL_ELF) pit_hz=1000 log_level=debug' >> $(K64_GRUB_ROOT_CFG)
 	echo '  set root=$${k64_iso_root}' >> $(K64_GRUB_ROOT_CFG)
 	echo '  module /k64fs/root.k64fs /k64fs/root.k64fs' >> $(K64_GRUB_ROOT_CFG)
 	echo '  set root=(loop)' >> $(K64_GRUB_ROOT_CFG)
 	@if [ -d k64m ]; then for f in $(K64M_MANIFESTS); do name=$$(basename $$f); echo "  module /k64m/$$name /k64m/$$name" >> $(K64_GRUB_ROOT_CFG); done; fi
 	echo '}' >> $(K64_GRUB_ROOT_CFG)
 
-$(K64_GRUB_ISO_CFG): k64_kernel.elf $(K64M_MANIFESTS)
+$(K64_GRUB_ISO_CFG): $(K64_KERNEL_ELF) $(K64M_MANIFESTS)
 	mkdir -p build
 	echo 'set timeout=0' > $(K64_GRUB_ISO_CFG)
 	echo 'set default=0' >> $(K64_GRUB_ISO_CFG)
@@ -148,19 +153,19 @@ $(K64_GRUB_ISO_CFG): k64_kernel.elf $(K64M_MANIFESTS)
 	echo 'terminal_output console' >> $(K64_GRUB_ISO_CFG)
 	echo '' >> $(K64_GRUB_ISO_CFG)
 	echo 'menuentry "K64 Kernel" {' >> $(K64_GRUB_ISO_CFG)
-	echo '  multiboot /boot/k64_kernel.elf pit_hz=1000 log_level=debug' >> $(K64_GRUB_ISO_CFG)
+	echo '  multiboot /boot/$(K64_KERNEL_ELF) pit_hz=1000 log_level=debug' >> $(K64_GRUB_ISO_CFG)
 	echo '  module /k64fs/root.k64fs /k64fs/root.k64fs' >> $(K64_GRUB_ISO_CFG)
 	@if [ -d k64m ]; then for f in $(K64M_MANIFESTS); do name=$$(basename $$f); echo "  module /k64m/$$name /k64m/$$name" >> $(K64_GRUB_ISO_CFG); done; fi
 	echo '}' >> $(K64_GRUB_ISO_CFG)
 
-$(K64FS_STAGE_STAMP): k64_kernel.elf $(K64_GRUB_ROOT_CFG) tools/mk_k64fs.py $(shell find rootfs -type f 2>/dev/null) $(K64S_MANIFESTS) $(K64M_MANIFESTS)
+$(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(K64_GRUB_ROOT_CFG) tools/mk_k64fs.py $(shell find rootfs -type f 2>/dev/null) $(K64S_MANIFESTS) $(K64M_MANIFESTS)
 	rm -rf $(K64FS_STAGE_ROOT)
 	mkdir -p $(K64FS_STAGE_ROOT)/boot
 	mkdir -p $(K64FS_STAGE_ROOT)/boot/grub
 	mkdir -p $(K64FS_STAGE_ROOT)/k64s
 	mkdir -p $(K64FS_STAGE_ROOT)/k64m
 	rsync -a $(K64FS_SRC_ROOT)/ $(K64FS_STAGE_ROOT)/
-	cp k64_kernel.elf $(K64FS_STAGE_ROOT)/boot/k64_kernel.elf
+	cp $(K64_KERNEL_ELF) $(K64FS_STAGE_ROOT)/boot/$(K64_KERNEL_ELF)
 	cp $(K64_GRUB_ROOT_CFG) $(K64FS_STAGE_ROOT)/boot/grub/grub.cfg
 	if [ -d k64s ]; then cp $(K64S_MANIFESTS) $(K64FS_STAGE_ROOT)/k64s/; fi
 	if [ -d k64m ]; then cp $(K64M_MANIFESTS) $(K64FS_STAGE_ROOT)/k64m/; fi
@@ -170,7 +175,7 @@ $(K64FS_IMAGE): $(K64FS_STAGE_STAMP)
 	mkdir -p build
 	$(PYTHON) tools/mk_k64fs.py $(K64FS_STAGE_ROOT) $(K64FS_IMAGE)
 
-k64.iso: k64_kernel.elf $(K64FS_IMAGE) $(K64_GRUB_BOOTSTRAP_CFG) $(K64_GRUB_K64FS_MOD) $(K64_GRUB_ROOT_CFG) $(K64_GRUB_ISO_CFG)
+k64.iso: $(K64_KERNEL_ELF) $(K64FS_IMAGE) $(K64_GRUB_BOOTSTRAP_CFG) $(K64_GRUB_K64FS_MOD) $(K64_GRUB_ROOT_CFG) $(K64_GRUB_ISO_CFG)
 	@if [ -z "$(GRUB_MKRESCUE)" ]; then \
 		echo "Missing GRUB ISO builder. Install grub-mkrescue/grub2-mkrescue."; \
 		exit 1; \
@@ -179,7 +184,7 @@ k64.iso: k64_kernel.elf $(K64FS_IMAGE) $(K64_GRUB_BOOTSTRAP_CFG) $(K64_GRUB_K64F
 	mkdir -p iso/k64m
 	mkdir -p iso/k64s
 	mkdir -p iso/k64fs
-	cp k64_kernel.elf iso/boot/k64_kernel.elf
+	cp $(K64_KERNEL_ELF) iso/boot/$(K64_KERNEL_ELF)
 	cp $(K64FS_IMAGE) iso/k64fs/root.k64fs
 	cp $(K64_GRUB_BOOTSTRAP_CFG) iso/boot/grub/grub.cfg
 	if [ -d k64m ]; then for f in $(K64M_MANIFESTS); do cp $$f iso/k64m/; done; fi
@@ -199,7 +204,7 @@ test: k64.iso
 	bash tests/boot_smoke_test.sh
 
 clean:
-	rm -rf *.o k64_kernel.elf iso build k64.iso .k64_boot.log
+	rm -rf *.o k64_kernel.elf k64-kernel-v*.elf iso build k64.iso .k64_boot.log
 
 .PHONY: all iso run run-headless test clean
 .NOTPARALLEL: k64.iso $(K64FS_STAGE_STAMP)

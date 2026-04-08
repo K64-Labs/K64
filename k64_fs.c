@@ -143,6 +143,16 @@ static int fs_find_child(int parent, const char* name) {
     return -1;
 }
 
+static bool fs_name_has_prefix(const char* value, const char* prefix) {
+    size_t prefix_len;
+
+    if (!value || !prefix) {
+        return false;
+    }
+    prefix_len = k64_strlen(prefix);
+    return k64_strncmp(value, prefix, prefix_len) == 0;
+}
+
 static bool fs_path_has_suffix(const char* path, const char* suffix) {
     size_t path_len;
     size_t suffix_len;
@@ -673,4 +683,37 @@ bool k64_fs_read_file_raw(const char* path, const uint8_t** data, size_t* size) 
     *data = bytes;
     *size = (size_t)nodes[idx].data_size;
     return true;
+}
+
+bool k64_fs_find_boot_kernel(char* out, int out_size) {
+    int boot_idx;
+
+    if (!out || out_size <= 0) {
+        return false;
+    }
+
+    boot_idx = fs_resolve("/boot", false, NULL);
+    if (boot_idx < 0 || !nodes[boot_idx].is_dir) {
+        return false;
+    }
+
+    for (int i = 1; i < K64_FS_MAX_NODES; ++i) {
+        if (!nodes[i].used || nodes[i].parent != boot_idx || nodes[i].is_dir) {
+            continue;
+        }
+        if (fs_name_has_prefix(nodes[i].name, "k64-kernel-v") && fs_path_has_suffix(nodes[i].name, ".elf")) {
+            fs_copy(out, out_size, nodes[i].name);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+size_t k64_fs_used_bytes(void) {
+    return fs_image_size;
+}
+
+size_t k64_fs_capacity_bytes(void) {
+    return K64_FS_IMAGE_MAX;
 }

@@ -264,6 +264,8 @@ static bool hotreload_parse_plan(const uint8_t* file_data,
 }
 
 bool k64_hotreload_kernel(void) {
+    char kernel_name[64];
+    char kernel_path[96];
     const uint8_t* kernel_file;
     size_t kernel_size;
     size_t stage_size;
@@ -282,8 +284,26 @@ bool k64_hotreload_kernel(void) {
     uint64_t mb_info_addr = 0;
     void (*trampoline)(k64_hotreload_plan_t*) = NULL;
 
-    if (!k64_fs_read_file_raw("/boot/k64_kernel.elf", &kernel_file, &kernel_size) || !kernel_file || kernel_size == 0) {
-        K64_LOG_ERROR("Hotreload: /boot/k64_kernel.elf is unavailable.");
+    if (!k64_fs_find_boot_kernel(kernel_name, sizeof(kernel_name))) {
+        K64_LOG_ERROR("Hotreload: no versioned kernel binary found in /boot.");
+        return false;
+    }
+
+    kernel_path[0] = '\0';
+    {
+        const char* prefix = "/boot/";
+        int pos = 0;
+        for (int i = 0; prefix[i] && pos + 1 < (int)sizeof(kernel_path); ++i) {
+            kernel_path[pos++] = prefix[i];
+        }
+        for (int i = 0; kernel_name[i] && pos + 1 < (int)sizeof(kernel_path); ++i) {
+            kernel_path[pos++] = kernel_name[i];
+        }
+        kernel_path[pos] = '\0';
+    }
+
+    if (!k64_fs_read_file_raw(kernel_path, &kernel_file, &kernel_size) || !kernel_file || kernel_size == 0) {
+        K64_LOG_ERROR("Hotreload: versioned kernel binary is unavailable.");
         return false;
     }
 
@@ -337,7 +357,9 @@ bool k64_hotreload_kernel(void) {
     plan->stack_top = (uint64_t)(uintptr_t)((uint8_t*)tramp_stack + stack_frames * 4096u - 16u);
 
     trampoline = (void (*)(k64_hotreload_plan_t*))(uintptr_t)tramp_buf;
-    k64_term_write("Hotreload: loading /boot/k64_kernel.elf\n");
+    k64_term_write("Hotreload: loading ");
+    k64_term_write(kernel_path);
+    k64_term_putc('\n');
     k64_term_write("Hotreload: entering new kernel image\n");
     __asm__ __volatile__("cli");
     trampoline(plan);
