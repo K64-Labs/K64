@@ -12,6 +12,7 @@
 #include "k64_terminal.h"
 #include "k64_user.h"
 #include "k64_version.h"
+#include "k64_autoversion.h"
 
 static void svc_print_line(const char* text) {
     k64_term_write(text ? text : "");
@@ -287,7 +288,6 @@ static bool sysfetch_command(const char* command, const char* args) {
         k64_term_write("unknown");
     }
     k64_term_putc('\n');
-    k64_term_write("Arch: " K64_KERNEL_ARCH "\n");
     svc_print_uptime_line();
     svc_print_mib_line("Memory Free", free_mem);
     svc_print_mib_line("Memory Total", total_mem);

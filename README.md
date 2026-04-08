@@ -1135,9 +1135,33 @@ These are machine-level power-control commands, primarily useful in QEMU or on c
 Files:
 
 - `k64_version.h`
+- `build/k64_autoversion.h`
+- `tools/gen_k64_version.py`
 - `Makefile`
 
-The kernel version is defined in `k64_version.h` and the build uses it to name the kernel image automatically:
+K64 now splits versioning into:
+
+- a manually controlled major/minor series in `k64_version.h`
+- an automatically generated patch version in `build/k64_autoversion.h`
+
+`k64_version.h` now defines:
+
+- `K64_VERSION_MAJOR`
+- `K64_VERSION_MINOR`
+- `K64_VERSION_PATCH_BASE_COUNT`
+
+The build script `tools/gen_k64_version.py` computes the patch number as:
+
+- `git rev-list --count HEAD`
+- minus `K64_VERSION_PATCH_BASE_COUNT`
+- plus `1` when the working tree is dirty
+
+That means:
+
+- normal ongoing work in the `0.2.x` line advances automatically
+- a deliberate series jump like `0.3.0` is done by changing `K64_VERSION_MAJOR` / `K64_VERSION_MINOR` and resetting `K64_VERSION_PATCH_BASE_COUNT` to the current commit count
+
+The generated full version is then used to name the kernel image automatically:
 
 ```text
 k64-kernel-v<version>.elf
@@ -1147,6 +1171,8 @@ Examples:
 
 - `k64-kernel-v0.2.1.elf`
 - `k64-kernel-v0.2.2.elf`
+
+This also means an uncommitted local change can temporarily produce the next patch version during builds, which keeps the built artifact aligned with the actual repository state.
 
 That name is propagated through:
 

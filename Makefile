@@ -12,7 +12,8 @@ GRUB_MKRESCUE := $(call detect_tool,grub-mkrescue,$(call detect_tool,grub2-mkres
 GRUB_FILE     := $(call detect_tool,grub-file,$(call detect_tool,grub2-file,))
 QEMU ?= qemu-system-x86_64
 PYTHON ?= python3
-K64_VERSION := $(strip $(shell awk -F'"' '/K64_KERNEL_VERSION/ {print $$2}' k64_version.h))
+K64_AUTOVERSION_HDR := build/k64_autoversion.h
+K64_VERSION := $(strip $(shell $(PYTHON) tools/gen_k64_version.py print))
 K64_KERNEL_BASENAME := k64-kernel-v$(K64_VERSION)
 K64_KERNEL_ELF := $(K64_KERNEL_BASENAME).elf
 
@@ -24,8 +25,8 @@ ifeq ($(CC32),)
 $(error No suitable 32-bit compiler found. Please install i686-elf-gcc or set CC32)
 endif
 
-CFLAGS32 = -I. -m32 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-pic -mno-mmx -mno-sse -mno-sse2
-CFLAGS64 = -I. -m64 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-pic -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -mno-mmx -mno-sse -mno-sse2
+CFLAGS32 = -I. -Ibuild -m32 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-pic -mno-mmx -mno-sse -mno-sse2
+CFLAGS64 = -I. -Ibuild -m64 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-pic -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -mno-mmx -mno-sse -mno-sse2
 LDFLAGS  = -T linker.ld -nostdlib
 
 K64S_SRCS = $(wildcard k64s/*.c)
@@ -81,6 +82,10 @@ ifeq ($(GRUB_MKRESCUE),)
 $(warning No GRUB ISO builder found. Install grub-mkrescue or grub2-mkrescue to build k64.iso.)
 endif
 
+$(K64_AUTOVERSION_HDR): k64_version.h tools/gen_k64_version.py
+	mkdir -p build
+	$(PYTHON) tools/gen_k64_version.py header $(K64_AUTOVERSION_HDR)
+
 boot.o: boot.s
 	$(CC64) $(CFLAGS64) -c -o $@ $<
 
@@ -96,7 +101,7 @@ k64_irq.o: k64_irq.S
 k64_hotreload_asm.o: k64_hotreload.S
 	$(CC64) $(CFLAGS64) -c -o $@ $<
 
-$(filter %.o,$(K64_OBJS)): k64_version.h
+$(filter %.o,$(K64_OBJS)): k64_version.h $(K64_AUTOVERSION_HDR)
 
 %.o: %.c
 	$(CC64) $(CFLAGS64) -c -o $@ $<

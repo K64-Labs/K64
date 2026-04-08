@@ -14,6 +14,7 @@
 #include "k64_system.h"
 #include "k64_serial.h"
 #include "k64_version.h"
+#include "k64_autoversion.h"
 
 extern uint32_t k64_mb_magic;
 extern uint32_t k64_mb_info;
