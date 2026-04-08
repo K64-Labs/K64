@@ -66,6 +66,7 @@ typedef struct k64_driver {
 void k64_modules_registry_init(void);
 void k64_modules_init(void);
 void k64_modules_bootstrap(void);
+void k64_modules_load_rootfs(void);
 void k64_modules_poll_async(void);
 void k64_modules_reload_all(void);
 

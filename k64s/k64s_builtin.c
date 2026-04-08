@@ -381,7 +381,10 @@ static bool k64cc_command(const char* command, const char* args) {
         svc_append(content, sizeof(content), name);
         svc_append(content, sizeof(content), "\nclass=");
         svc_append(content, sizeof(content), arg2[0] ? arg2 : "system");
-        svc_append(content, sizeof(content), "\nsource=compiled\n");
+        svc_append(content, sizeof(content), "\nsource=elf");
+        svc_append(content, sizeof(content), "\nentry=/ex/");
+        svc_append(content, sizeof(content), name);
+        svc_append(content, sizeof(content), ".elf\n");
         if (!k64_fs_write_file(path, content)) {
             svc_print_line("k64cc: k64s build failed");
             return true;
@@ -409,7 +412,10 @@ static bool k64cc_command(const char* command, const char* args) {
         svc_append(content, sizeof(content), name);
         svc_append(content, sizeof(content), "\ntype=");
         svc_append(content, sizeof(content), arg2[0] ? arg2 : "driver");
-        svc_append(content, sizeof(content), "\nsource=compiled\n");
+        svc_append(content, sizeof(content), "\nsource=elf");
+        svc_append(content, sizeof(content), "\nentry=/ex/");
+        svc_append(content, sizeof(content), name);
+        svc_append(content, sizeof(content), ".elf\n");
         if (!k64_fs_write_file(path, content)) {
             svc_print_line("k64cc: k64m build failed");
             return true;

@@ -578,6 +578,23 @@ bool k64_fs_ls(const char* path, char* out, int out_size) {
     return true;
 }
 
+bool k64_fs_iter_dir(const char* path, k64_fs_iter_fn fn, void* ctx) {
+    int idx = path && path[0] ? fs_resolve(path, false, NULL) : cwd_index;
+
+    if (!fn || idx < 0 || !nodes[idx].is_dir) {
+        return false;
+    }
+
+    for (int i = 1; i < K64_FS_MAX_NODES; ++i) {
+        if (nodes[i].used && nodes[i].parent == idx) {
+            if (!fn(nodes[i].name, nodes[i].is_dir, ctx)) {
+                break;
+            }
+        }
+    }
+    return true;
+}
+
 bool k64_fs_mkdir(const char* path) {
     char leaf[K64_FS_NAME_MAX];
     int parent = fs_resolve(path, true, leaf);

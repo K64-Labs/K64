@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+typedef bool (*k64_fs_iter_fn)(const char* name, bool is_dir, void* ctx);
+
 bool k64_fs_driver_start(void);
 void k64_fs_driver_stop(void);
 bool k64_fs_driver_running(void);
@@ -10,6 +12,7 @@ bool k64_fs_driver_running(void);
 bool k64_fs_pwd(char* out, int out_size);
 bool k64_fs_cd(const char* path);
 bool k64_fs_ls(const char* path, char* out, int out_size);
+bool k64_fs_iter_dir(const char* path, k64_fs_iter_fn fn, void* ctx);
 bool k64_fs_mkdir(const char* path);
 bool k64_fs_touch(const char* path);
 bool k64_fs_write_file(const char* path, const char* text);

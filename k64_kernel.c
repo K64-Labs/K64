@@ -76,6 +76,8 @@ void k64_kernel_main(void) {
     K64_LOG_INFO("Scanning driver modules...");
     k64_modules_init();
     k64_modules_bootstrap();
+    k64_modules_load_rootfs();
+    k64_modules_bootstrap();
 
     K64_LOG_INFO("Initializing system services...");
     k64_system_init();

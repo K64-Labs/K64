@@ -96,6 +96,8 @@ k64_irq.o: k64_irq.S
 k64_hotreload_asm.o: k64_hotreload.S
 	$(CC64) $(CFLAGS64) -c -o $@ $<
 
+$(filter %.o,$(K64_OBJS)): k64_version.h
+
 %.o: %.c
 	$(CC64) $(CFLAGS64) -c -o $@ $<
 
@@ -137,7 +139,7 @@ $(K64_GRUB_BOOTSTRAP_CFG): $(K64_GRUB_K64FS_MOD)
 	echo 'set root=(loop)' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'configfile (loop)/boot/grub/grub.cfg' >> $(K64_GRUB_BOOTSTRAP_CFG)
 
-$(K64_GRUB_ROOT_CFG): $(K64_KERNEL_ELF) $(K64M_MANIFESTS)
+$(K64_GRUB_ROOT_CFG): $(K64_KERNEL_ELF)
 	mkdir -p build
 	echo 'set timeout=0' > $(K64_GRUB_ROOT_CFG)
 	echo 'set default=0' >> $(K64_GRUB_ROOT_CFG)
@@ -151,11 +153,9 @@ $(K64_GRUB_ROOT_CFG): $(K64_KERNEL_ELF) $(K64M_MANIFESTS)
 	echo '  multiboot /boot/$(K64_KERNEL_ELF) pit_hz=1000 log_level=debug' >> $(K64_GRUB_ROOT_CFG)
 	echo '  set root=$${k64_iso_root}' >> $(K64_GRUB_ROOT_CFG)
 	echo '  module /k64fs/root.k64fs /k64fs/root.k64fs' >> $(K64_GRUB_ROOT_CFG)
-	echo '  set root=(loop)' >> $(K64_GRUB_ROOT_CFG)
-	@if [ -d k64m ]; then for f in $(K64M_MANIFESTS); do name=$$(basename $$f); echo "  module /k64m/$$name /k64m/$$name" >> $(K64_GRUB_ROOT_CFG); done; fi
 	echo '}' >> $(K64_GRUB_ROOT_CFG)
 
-$(K64_GRUB_ISO_CFG): $(K64_KERNEL_ELF) $(K64M_MANIFESTS)
+$(K64_GRUB_ISO_CFG): $(K64_KERNEL_ELF)
 	mkdir -p build
 	echo 'set timeout=0' > $(K64_GRUB_ISO_CFG)
 	echo 'set default=0' >> $(K64_GRUB_ISO_CFG)
@@ -167,7 +167,6 @@ $(K64_GRUB_ISO_CFG): $(K64_KERNEL_ELF) $(K64M_MANIFESTS)
 	echo 'menuentry "K64 Kernel" {' >> $(K64_GRUB_ISO_CFG)
 	echo '  multiboot /boot/$(K64_KERNEL_ELF) pit_hz=1000 log_level=debug' >> $(K64_GRUB_ISO_CFG)
 	echo '  module /k64fs/root.k64fs /k64fs/root.k64fs' >> $(K64_GRUB_ISO_CFG)
-	@if [ -d k64m ]; then for f in $(K64M_MANIFESTS); do name=$$(basename $$f); echo "  module /k64m/$$name /k64m/$$name" >> $(K64_GRUB_ISO_CFG); done; fi
 	echo '}' >> $(K64_GRUB_ISO_CFG)
 
 $(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(K64_GRUB_ROOT_CFG) tools/mk_k64fs.py $(shell find rootfs -type f 2>/dev/null) $(K64S_MANIFESTS) $(K64M_MANIFESTS)
@@ -195,14 +194,10 @@ k64.iso: $(K64_KERNEL_ELF) $(K64FS_IMAGE) $(K64_GRUB_BOOTSTRAP_CFG) $(K64_GRUB_K
 		exit 1; \
 	fi
 	mkdir -p iso/boot/grub
-	mkdir -p iso/k64m
-	mkdir -p iso/k64s
 	mkdir -p iso/k64fs
 	cp $(K64_KERNEL_ELF) iso/boot/$(K64_KERNEL_ELF)
 	cp $(K64FS_IMAGE) iso/k64fs/root.k64fs
 	cp $(K64_GRUB_BOOTSTRAP_CFG) iso/boot/grub/grub.cfg
-	if [ -d k64m ]; then for f in $(K64M_MANIFESTS); do cp $$f iso/k64m/; done; fi
-	if [ -d k64s ]; then for f in $(K64S_MANIFESTS); do cp $$f iso/k64s/; done; fi
 	$(GRUB_MKRESCUE) -d $(GRUB_MODDIR) -o k64.iso iso
 
 iso: k64.iso

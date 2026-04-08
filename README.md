@@ -112,10 +112,11 @@ The built-in kernel code registers internal implementations for several of them,
 
 The running system mounts a `K64FS` image from a Multiboot module. The root filesystem contains normal user-visible paths plus system artifacts such as:
 
-- `/boot/k64_kernel.elf`
+- `/boot/k64-kernel-v<version>.elf`
 - `/boot/grub/grub.cfg`
 - `/k64s/*.k64s`
 - `/k64m/*.k64m`
+- `/ex/*.elf`
 
 GRUB itself also understands `K64FS` through the custom module in `grub/k64fs.c`, so the ISO boot path can load the boot configuration from inside the root filesystem.
 
@@ -144,13 +145,11 @@ The “real” GRUB config is generated into `build/grub-root.cfg` and copied in
 The default menu entry does:
 
 - `set root=(loop)`
-- `multiboot /boot/k64_kernel.elf pit_hz=1000 log_level=debug`
+- `multiboot /boot/k64-kernel-v<version>.elf pit_hz=1000 log_level=debug`
 - `set root=${k64_iso_root}`
 - `module /k64fs/root.k64fs /k64fs/root.k64fs`
-- `set root=(loop)`
-- `module /k64m/<manifest> /k64m/<manifest>` for all shipped `.k64m`
 
-That means the kernel is loaded from the loop-mounted root filesystem, but the rootfs image itself is also passed into the kernel again as a Multiboot module so that `fs.k64m` can mount it at runtime.
+That means the kernel is loaded from the loop-mounted root filesystem, and the rootfs image itself is also passed into the kernel again as a Multiboot module so that `fs.k64m` can mount it at runtime. The `.k64s` and `.k64m` manifests are no longer passed as separate GRUB modules; they are discovered from the mounted rootfs by the native loaders.
 
 ### Step 3: Kernel-side mount
 
@@ -327,6 +326,7 @@ The current built-in drivers are:
 - `screen`
 - `keyboard`
 - `fs`
+- any rootfs-native `.k64m` entries discovered under `/k64m`
 
 Driver lifecycle:
 
@@ -336,7 +336,16 @@ Driver lifecycle:
 4. autostart drivers are started during bootstrap
 5. async drivers are polled in the dispatcher loop
 
-### External `.k64m` format
+### Built-in vs native-loaded `.k64m`
+
+There are now two distinct driver-loading paths in the codebase:
+
+- legacy external modules with a packed `K64M` header passed in through Multiboot
+- native rootfs manifests in `/k64m/*.k64m` that point at ELF files under the mounted filesystem
+
+The native path is the one K64 now uses for normal on-disk extensibility.
+
+### Legacy external `.k64m` format
 
 External drivers are recognized by a packed header:
 
@@ -355,7 +364,23 @@ Important details:
 
 - `magic` must match `K64_MODULE_MAGIC`
 - the module’s entry point is interpreted as `module_base + entry_offset`
-- external modules are currently loaded from Multiboot modules, not from a disk-backed executable loader
+- this path still exists for compatibility, but it is no longer the primary loader model
+
+### Native rootfs `.k64m` format
+
+The native driver loader scans `/k64m` after the filesystem driver has mounted `K64FS`.
+
+Recognized manifest keys today:
+
+- `name=<driver-name>`
+- `type=driver|filesystem|service`
+- `source=elf`
+- `entry=/ex/<program>.elf`
+- `autostart=1` (optional)
+
+`source=builtin` manifests are treated as metadata only and skipped by the native loader because the built-in implementation is already registered in code.
+
+When a native driver is started, K64 resolves its `entry=` path through the ELF loader and calls the executable entrypoint. This is a real filesystem-backed load path, but it is not yet a separate process model with persistent driver tasks or killable execution contexts.
 
 ### Driver control plane
 
@@ -443,6 +468,10 @@ The built-in service registration in `k64s/k64s_builtin.c` currently creates:
 - `reload`
 - `fsctl`
 - `userctl`
+- `sysfetch`
+- `uname`
+- `k64cc`
+- `elfctl`
 - `shell`
 
 What they do:
@@ -453,9 +482,22 @@ What they do:
 - `reload`: runtime reload request surface
 - `fsctl`: filesystem command surface
 - `userctl`: user/session/privilege command surface
+- `sysfetch`: system information surface
+- `uname`: kernel identity surface
+- `k64cc`: in-system builder for simple ELF and manifest scaffolds
+- `elfctl`: explicit ELF execution service
 - `shell`: interactive command-line service
 
-### External `.k64s` format
+### Built-in vs native-loaded `.k64s`
+
+Like drivers, services now have two loading paths:
+
+- legacy external `K64S` modules delivered by Multiboot
+- native rootfs manifests in `/k64s/*.k64s` that point at ELF files on the mounted filesystem
+
+The rootfs-native path is the main extensibility model now.
+
+### Legacy external `.k64s` format
 
 External services are recognized by:
 
@@ -470,7 +512,34 @@ typedef struct {
 } __attribute__((packed)) k64_system_header_t;
 ```
 
-Current external-service behavior is registration-oriented rather than a full program loader. Like the driver path, this uses Multiboot modules and entry offsets, not a general executable runtime loaded from disk.
+Current legacy external-service behavior is registration-oriented rather than a full program loader. It remains in the tree, but it is no longer the preferred way to extend the system.
+
+### Native rootfs `.k64s` format
+
+The native service loader scans `/k64s` after the filesystem has been mounted and after the built-in services have registered.
+
+Recognized manifest keys today:
+
+- `name=<service-name>`
+- `class=system|root|user`
+- `source=elf`
+- `entry=/ex/<program>.elf`
+- `autostart=1` (optional)
+- `async=1` (optional flag registration only)
+
+`source=builtin` manifests are skipped because the service implementation already lives in the kernel image.
+
+If the shell does not recognize a command as a built-in or a registered service command, it tries:
+
+1. starting a service with that name
+2. starting a driver with that name
+3. running `/ex/<name>.elf`
+
+That means:
+
+- typing `hello` can start `/k64s/hello.k64s` if such a manifest exists
+- typing `hello-driver` can start `/k64m/hello-driver.k64m`
+- typing an executable name with no matching manifest can fall back to `/ex/<name>.elf`
 
 ### Service command dispatch
 
@@ -618,6 +687,7 @@ Static source content currently includes:
 - `/etc/groups.k64`
 - `/etc/motd`
 - `/etc/users.k64`
+- `/ex`
 - `/home/root`
 - `/lib`
 - `/mnt`
@@ -631,16 +701,37 @@ Static source content currently includes:
 
 The build then stages in:
 
-- `/boot/k64_kernel.elf`
+- `/boot/k64-kernel-v<version>.elf`
 - `/boot/grub/grub.cfg`
 - `/k64s/*.k64s`
 - `/k64m/*.k64m`
+- `/ex/*.elf`
 
 So the root filesystem visible from inside the running system is a mix of:
 
 - source-controlled rootfs content
 - generated boot content
 - staged manifests
+- staged native executables
+
+### `/ex`: executable ELF store
+
+`/ex` is the conventional executable directory for K64-native ELF files.
+
+Current behavior:
+
+- every assembled sample ELF from `ex/*.S` is staged into `/ex`
+- `elfrun /ex/<file>.elf` executes a file explicitly
+- typing `<name>` in the shell will try `/ex/<name>.elf` automatically if no built-in command, service command, service name, or driver name matches first
+
+The repository currently ships one sample executable:
+
+- `/ex/hello.elf`
+
+and two native manifests that consume it:
+
+- `/k64s/hello.k64s`
+- `/k64m/hello-driver.k64m`
 
 ## User and Privilege System
 
@@ -803,14 +894,14 @@ The shell is a managed async service. It is not a hard-coded foreground loop in 
 The shell prompt format is:
 
 ```text
-<effective-user>@k64>
+[user]@K64 ~[path] >>>
 ```
 
 Examples:
 
 ```text
-guest@k64>
-root@k64>
+[guest]@K64 ~/ >>>
+[root]@K64 ~/usr/root >>>
 ```
 
 ### Input sources
@@ -858,6 +949,10 @@ It also exposes service-owned commands, including:
 - `servicectl`
 - `driverctl`
 - `reload`
+- `sysfetch`
+- `uname`
+- `k64cc`
+- `elfrun`
 - `pwd`
 - `ls`
 - `cd`
@@ -889,8 +984,67 @@ When you enter a command, the shell:
 1. parses built-ins it owns directly
 2. asks the service command registry whether a running service owns the command
 3. if still unresolved, tries to start a service or driver by that name
+4. if still unresolved, tries `/ex/<command>.elf`
 
-That last step is what lets names like `servicectl` or `driverctl` act as both executable service names and command surfaces.
+That last chain is what lets names like `servicectl` or `driverctl` act as both executable service names and command surfaces, while still allowing direct ELF execution from `/ex`.
+
+## ELF Loader and Native Executables
+
+Files:
+
+- `k64_elf.c`
+- `k64_elf.h`
+- `ex/hello.S`
+- `k64s/elfctl.k64s`
+
+K64 now has a real minimal ELF64 loader for filesystem-backed executables.
+
+What it supports today:
+
+- ELF64
+- little-endian images
+- `ET_EXEC` and `ET_DYN`
+- x86_64 machine type
+- `PT_LOAD` program headers
+- loading all PT_LOAD segments into one contiguous PMM-backed image
+- zero-filling BSS tails
+- calling the entrypoint as `int (*)(void)`
+
+How execution works:
+
+1. `k64_fs_read_file_raw()` exposes the file bytes from `K64FS`
+2. `k64_elf_execute_path()` validates the ELF header and program-header table
+3. the loader computes the minimal virtual span across PT_LOAD segments
+4. it allocates contiguous frames from the PMM
+5. it copies each segment into the in-memory image
+6. it computes the entrypoint relative to the loaded image base
+7. it calls the entrypoint directly
+8. when the function returns, the loader prints the exit code and frees the image
+
+Important limits:
+
+- no relocations beyond simple PT_LOAD copying
+- no dynamic linker
+- no symbol resolution
+- no user-mode transition
+- no separate address space
+- no argv/envp
+- execution happens inside the kernel runtime context, not as a fully isolated process
+
+So this is a real ELF loader, but it is still a minimal kernel-internal execution model rather than a complete Unix-style process runtime.
+
+### `elfctl` and shell execution
+
+The `elfctl` service registers:
+
+- `elfrun <path>`
+
+The shell also auto-executes `/ex/<name>.elf` as its last fallback, so both of these are valid:
+
+```text
+elfrun /ex/hello.elf
+hello
+```
 
 ## Service and Driver Control
 
@@ -948,7 +1102,7 @@ There are two distinct reload concepts in the tree:
 
 ### `reload drivers`
 
-This path is implemented and intended to work. It asks the module layer to stop controllable running drivers and then re-bootstrap autostart drivers.
+This path is implemented and intended to work. It asks the module layer to stop controllable running drivers, rescan `/k64m` from the mounted rootfs, and then re-bootstrap autostart drivers.
 
 ### `reload kernel`
 
@@ -975,6 +1129,32 @@ The shell exposes:
 - `shutdown`
 
 These are machine-level power-control commands, primarily useful in QEMU or on compatible legacy hardware paths.
+
+## Versioning and Kernel Image Naming
+
+Files:
+
+- `k64_version.h`
+- `Makefile`
+
+The kernel version is defined in `k64_version.h` and the build uses it to name the kernel image automatically:
+
+```text
+k64-kernel-v<version>.elf
+```
+
+Examples:
+
+- `k64-kernel-v0.2.1.elf`
+- `k64-kernel-v0.2.2.elf`
+
+That name is propagated through:
+
+- the staged `/boot` directory in the rootfs
+- the GRUB rootfs config
+- `sysfetch`
+- `uname`
+- the hot-reload loader’s kernel-file discovery path
 
 ## Build System
 
