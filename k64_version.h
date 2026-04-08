@@ -1,0 +1,7 @@
+#pragma once
+
+#define K64_VERSION_MAJOR 0
+#define K64_VERSION_MINOR 2
+#define K64_VERSION_PATCH_BASE_COUNT 2
+
+#define K64_KERNEL_ARCH "x86_64"

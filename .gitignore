@@ -1,0 +1,8 @@
+*.o
+k64_kernel.elf
+k64-kernel-v*.elf
+k64.iso
+iso/
+build/
+*.log
+tests/.shell_cmd_test

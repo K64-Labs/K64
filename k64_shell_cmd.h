@@ -1,0 +1,23 @@
+#pragma once
+
+typedef enum {
+    K64_SHELL_CMD_EMPTY = 0,
+    K64_SHELL_CMD_HELP,
+    K64_SHELL_CMD_CLEAR,
+    K64_SHELL_CMD_TICKS,
+    K64_SHELL_CMD_TASK,
+    K64_SHELL_CMD_SERIAL,
+    K64_SHELL_CMD_SCHED,
+    K64_SHELL_CMD_PANIC,
+    K64_SHELL_CMD_ECHO,
+    K64_SHELL_CMD_YIELD,
+    K64_SHELL_CMD_LAYOUT,
+    K64_SHELL_CMD_SERVICECTL,
+    K64_SHELL_CMD_DRIVERCTL,
+    K64_SHELL_CMD_RELOAD,
+    K64_SHELL_CMD_REBOOT,
+    K64_SHELL_CMD_SHUTDOWN,
+    K64_SHELL_CMD_UNKNOWN,
+} k64_shell_cmd_t;
+
+k64_shell_cmd_t k64_shell_parse_command(const char* line, const char** arg_out);

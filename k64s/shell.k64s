@@ -1,0 +1,4 @@
+name=shell
+class=system
+source=builtin
+description=Interactive command shell service.

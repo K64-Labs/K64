@@ -1,0 +1,4 @@
+name=userctl
+class=system
+source=builtin
+description=Account, login, sudo, and privilege management service.

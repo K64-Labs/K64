@@ -1,0 +1,4 @@
+name=init
+class=system
+source=builtin
+description=Root service that boots the OS userspace on K64.

@@ -1,0 +1,3 @@
+name=sysfetch
+class=system
+source=builtin
