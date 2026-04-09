@@ -1,4 +1,5 @@
 // k64_system.c – service registry and built-in service management
+#include "k64_artifact.h"
 #include "k64_system.h"
 #include "k64_elf.h"
 #include "k64_fs.h"
@@ -68,63 +69,20 @@ static bool has_suffix(const char* text, const char* suffix) {
     return k64_streq(text + text_len - suffix_len, suffix);
 }
 
-static void append_string(char* dst, size_t dst_size, const char* src) {
+static void build_rootfs_path(char* dst, size_t dst_size, const char* dir, const char* name) {
     size_t pos = 0;
-    size_t i = 0;
 
     if (!dst || dst_size == 0) {
         return;
     }
 
-    while (dst[pos] && pos + 1 < dst_size) {
-        pos++;
+    while (dir && *dir && pos + 1 < dst_size) {
+        dst[pos++] = *dir++;
     }
-    while (src && src[i] && pos + 1 < dst_size) {
-        dst[pos++] = src[i++];
+    while (name && *name && pos + 1 < dst_size) {
+        dst[pos++] = *name++;
     }
     dst[pos] = '\0';
-}
-
-static bool manifest_get_value(const char* text, const char* key, char* out, int out_size) {
-    int key_len = 0;
-    const char* p = text;
-
-    if (!text || !key || !out || out_size <= 0) {
-        return false;
-    }
-    while (key[key_len]) {
-        key_len++;
-    }
-
-    while (*p) {
-        int i = 0;
-
-        while (p[i] && p[i] != '\n' && i < key_len) {
-            if (p[i] != key[i]) {
-                break;
-            }
-            i++;
-        }
-        if (i == key_len && p[i] == '=') {
-            int j = 0;
-            p += i + 1;
-            while (p[j] && p[j] != '\n' && j + 1 < out_size) {
-                out[j] = p[j];
-                j++;
-            }
-            out[j] = '\0';
-            return true;
-        }
-        while (*p && *p != '\n') {
-            p++;
-        }
-        if (*p == '\n') {
-            p++;
-        }
-    }
-
-    out[0] = '\0';
-    return false;
 }
 
 static bool rootfs_service_start(k64_service_t* service) {
@@ -136,26 +94,11 @@ static bool rootfs_service_start(k64_service_t* service) {
     return k64_elf_execute_path(ctx->entry_path);
 }
 
-static k64_service_class_t parse_service_class(const char* text) {
-    if (k64_streq(text, "root")) {
-        return K64_SERVICE_CLASS_ROOT;
-    }
-    if (k64_streq(text, "user")) {
-        return K64_SERVICE_CLASS_USER;
-    }
-    return K64_SERVICE_CLASS_SYSTEM;
-}
-
 static bool rootfs_k64s_cb(const char* name, bool is_dir, void* ctx) {
     char path[96];
-    char manifest[512];
-    char manifest_name[32];
-    char manifest_class[24];
-    char manifest_source[24];
-    char manifest_entry[64];
-    char manifest_autostart[8];
-    char manifest_async[8];
-    uint32_t flags = 0;
+    const uint8_t* data = NULL;
+    size_t size = 0;
+    const k64_service_file_t* file;
     k64_rootfs_service_ctx_t* slot;
 
     (void)ctx;
@@ -166,34 +109,22 @@ static bool rootfs_k64s_cb(const char* name, bool is_dir, void* ctx) {
         return true;
     }
 
-    copy_string(path, sizeof(path), "/k64s/");
-    append_string(path, sizeof(path), name);
-    if (!k64_fs_cat(path, manifest, sizeof(manifest))) {
+    build_rootfs_path(path, sizeof(path), "/k64s/", name);
+    if (!k64_fs_read_file_raw(path, &data, &size) || !data || size < sizeof(k64_service_file_t)) {
         return true;
     }
-    manifest_get_value(manifest, "source", manifest_source, sizeof(manifest_source));
-    if (k64_streq(manifest_source, "builtin")) {
+    file = (const k64_service_file_t*)data;
+    if (file->magic != K64_SYSTEM_MAGIC || file->version != K64_ARTIFACT_VERSION) {
         return true;
     }
-    if (!manifest_get_value(manifest, "entry", manifest_entry, sizeof(manifest_entry)) || !manifest_entry[0]) {
+    if (file->exec_kind == K64_ARTIFACT_EXEC_BUILTIN) {
         return true;
     }
-    if (!manifest_get_value(manifest, "name", manifest_name, sizeof(manifest_name)) || !manifest_name[0]) {
+    if (file->exec_kind != K64_ARTIFACT_EXEC_ELF || !file->name[0] || !file->entry_path[0]) {
         return true;
     }
-    if (k64_system_find_service_by_name(manifest_name)) {
+    if (k64_system_find_service_by_name(file->name)) {
         return true;
-    }
-
-    manifest_get_value(manifest, "class", manifest_class, sizeof(manifest_class));
-    manifest_get_value(manifest, "autostart", manifest_autostart, sizeof(manifest_autostart));
-    manifest_get_value(manifest, "async", manifest_async, sizeof(manifest_async));
-
-    if (manifest_autostart[0] == '1') {
-        flags |= K64_SERVICE_FLAG_AUTOSTART;
-    }
-    if (manifest_async[0] == '1') {
-        flags |= K64_SERVICE_FLAG_ASYNC;
     }
 
     if (rootfs_ctx_count >= K64_MAX_SERVICES) {
@@ -201,20 +132,20 @@ static bool rootfs_k64s_cb(const char* name, bool is_dir, void* ctx) {
     }
 
     slot = &rootfs_ctx[rootfs_ctx_count++];
-    copy_string(slot->entry_path, sizeof(slot->entry_path), manifest_entry);
-    if (k64_system_register_service(manifest_name,
+    copy_string(slot->entry_path, sizeof(slot->entry_path), file->entry_path);
+    if (k64_system_register_service(file->name,
                                     path,
-                                    parse_service_class(manifest_class),
-                                    flags,
-                                    1,
-                                    0,
+                                    (k64_service_class_t)file->class_id,
+                                    file->flags,
+                                    file->priority,
+                                    file->poll_interval_ticks,
                                     true,
                                     rootfs_service_start,
                                     default_stop,
                                     NULL,
                                     slot)) {
         k64_term_write("  Rootfs K64S service registered: ");
-        k64_term_write(manifest_name);
+        k64_term_write(file->name);
         k64_term_putc('\n');
     }
     return true;

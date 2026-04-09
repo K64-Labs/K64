@@ -39,8 +39,10 @@ Important directories and files:
 - `longmode.s`: 64-bit entry stub that calls `k64_kernel_main`
 - `linker.ld`: linker script for the kernel image
 - `k64_*.c` / `k64_*.h`: core subsystems
-- `k64m/`: driver manifests and built-in driver registration
-- `k64s/`: service manifests and built-in service registration
+- `k64m/`: built-in driver registration code
+- `k64s/`: built-in service registration code
+- `k64m_def/`: source definitions compiled into binary `.k64m` driver files
+- `k64s_def/`: source definitions compiled into binary `.k64s` service files
 - `grub/k64fs.c`: custom GRUB filesystem module for `K64FS`
 - `rootfs/`: host-side source tree used to build `root.k64fs`
 - `tools/mk_k64fs.py`: image builder for the `K64FS` format
@@ -149,7 +151,7 @@ The default menu entry does:
 - `set root=${k64_iso_root}`
 - `module /k64fs/root.k64fs /k64fs/root.k64fs`
 
-That means the kernel is loaded from the loop-mounted root filesystem, and the rootfs image itself is also passed into the kernel again as a Multiboot module so that `fs.k64m` can mount it at runtime. The `.k64s` and `.k64m` manifests are no longer passed as separate GRUB modules; they are discovered from the mounted rootfs by the native loaders.
+That means the kernel is loaded from the loop-mounted root filesystem, and the rootfs image itself is also passed into the kernel again as a Multiboot module so that `fs.k64m` can mount it at runtime. The binary `.k64s` and `.k64m` files are discovered from the mounted rootfs by the native loaders.
 
 ### Step 3: Kernel-side mount
 
@@ -204,7 +206,7 @@ Defaults:
 Example:
 
 ```text
-multiboot /boot/k64_kernel.elf pit_hz=500 log_level=info
+multiboot /boot/k64-kernel-v<version>.elf pit_hz=500 log_level=info
 ```
 
 ### Interrupts and legacy platform support
@@ -341,7 +343,7 @@ Driver lifecycle:
 There are now two distinct driver-loading paths in the codebase:
 
 - legacy external modules with a packed `K64M` header passed in through Multiboot
-- native rootfs manifests in `/k64m/*.k64m` that point at ELF files under the mounted filesystem
+- native rootfs binary `.k64m` files in `/k64m`
 
 The native path is the one K64 now uses for normal on-disk extensibility.
 
@@ -370,17 +372,20 @@ Important details:
 
 The native driver loader scans `/k64m` after the filesystem driver has mounted `K64FS`.
 
-Recognized manifest keys today:
+At runtime, `.k64m` is a packed binary module file, not a text config. The binary stores:
 
-- `name=<driver-name>`
-- `type=driver|filesystem|service`
-- `source=elf`
-- `entry=/ex/<program>.elf`
-- `autostart=1` (optional)
+- `K64M` magic
+- artifact version
+- execution kind: `builtin` or `elf`
+- module type
+- flags
+- priority
+- name
+- optional ELF entry path
 
-`source=builtin` manifests are treated as metadata only and skipped by the native loader because the built-in implementation is already registered in code.
+These runtime binaries are generated from source definitions in `k64m_def/*.drv`.
 
-When a native driver is started, K64 resolves its `entry=` path through the ELF loader and calls the executable entrypoint. This is a real filesystem-backed load path, but it is not yet a separate process model with persistent driver tasks or killable execution contexts.
+Built-in `.k64m` files are metadata stubs and are skipped by the rootfs loader because the implementation is already compiled into the kernel image. ELF-backed `.k64m` files carry an `entry_path` such as `/ex/hello.elf`, which is resolved through the ELF loader when the driver starts.
 
 ### Driver control plane
 
@@ -484,7 +489,7 @@ What they do:
 - `userctl`: user/session/privilege command surface
 - `sysfetch`: system information surface
 - `uname`: kernel identity surface
-- `k64cc`: in-system builder for simple ELF and manifest scaffolds
+- `k64cc`: in-system builder for simple ELF and binary K64 module scaffolds
 - `elfctl`: explicit ELF execution service
 - `shell`: interactive command-line service
 
@@ -493,7 +498,7 @@ What they do:
 Like drivers, services now have two loading paths:
 
 - legacy external `K64S` modules delivered by Multiboot
-- native rootfs manifests in `/k64s/*.k64s` that point at ELF files on the mounted filesystem
+- native rootfs binary `.k64s` files in `/k64s`
 
 The rootfs-native path is the main extensibility model now.
 
@@ -518,16 +523,20 @@ Current legacy external-service behavior is registration-oriented rather than a 
 
 The native service loader scans `/k64s` after the filesystem has been mounted and after the built-in services have registered.
 
-Recognized manifest keys today:
+At runtime, `.k64s` is a packed binary module file, not a text config. The binary stores:
 
-- `name=<service-name>`
-- `class=system|root|user`
-- `source=elf`
-- `entry=/ex/<program>.elf`
-- `autostart=1` (optional)
-- `async=1` (optional flag registration only)
+- `K64S` magic
+- artifact version
+- execution kind: `builtin` or `elf`
+- service class
+- flags such as `autostart` and `async`
+- priority and poll interval
+- name
+- optional ELF entry path
 
-`source=builtin` manifests are skipped because the service implementation already lives in the kernel image.
+These runtime binaries are generated from source definitions in `k64s_def/*.svc`.
+
+Built-in `.k64s` files are metadata stubs and are skipped by the rootfs loader because the service implementation is already compiled into the kernel image. ELF-backed `.k64s` files carry an `entry_path` such as `/ex/hello.elf`.
 
 If the shell does not recognize a command as a built-in or a registered service command, it tries:
 
@@ -537,9 +546,9 @@ If the shell does not recognize a command as a built-in or a registered service 
 
 That means:
 
-- typing `hello` can start `/k64s/hello.k64s` if such a manifest exists
+- typing `hello` can start `/k64s/hello.k64s` if such a binary service module exists
 - typing `hello-driver` can start `/k64m/hello-driver.k64m`
-- typing an executable name with no matching manifest can fall back to `/ex/<name>.elf`
+- typing an executable name with no matching module can fall back to `/ex/<name>.elf`
 
 ### Service command dispatch
 
@@ -711,7 +720,7 @@ So the root filesystem visible from inside the running system is a mix of:
 
 - source-controlled rootfs content
 - generated boot content
-- staged manifests
+- staged binary `.k64s` / `.k64m` modules
 - staged native executables
 
 ### `/ex`: executable ELF store
@@ -728,7 +737,7 @@ The repository currently ships one sample executable:
 
 - `/ex/hello.elf`
 
-and two native manifests that consume it:
+and two native binary modules that consume it:
 
 - `/k64s/hello.k64s`
 - `/k64m/hello-driver.k64m`
@@ -1087,7 +1096,7 @@ The list view includes:
 - driver ID
 - state
 - name
-- source manifest/path
+- source binary path
 
 ## Reload Paths
 
@@ -1236,11 +1245,12 @@ The rootfs build process is:
 
 1. copy `rootfs/` into `build/rootfs/`
 2. create `build/rootfs/boot`, `boot/grub`, `k64s`, `k64m`
-3. copy in `k64_kernel.elf`
+3. copy in the versioned kernel ELF
 4. copy in generated `grub.cfg`
-5. copy service manifests
-6. copy driver manifests
-7. run `tools/mk_k64fs.py` to create `build/root.k64fs`
+5. compile `k64s_def/*.svc` into binary `.k64s` files
+6. compile `k64m_def/*.drv` into binary `.k64m` files
+7. copy the compiled binary modules into the staged rootfs
+8. run `tools/mk_k64fs.py` to create `build/root.k64fs`
 
 ### ISO creation flow
 
@@ -1288,8 +1298,8 @@ If you want to understand how to extend K64, the main rule is:
 In practical terms:
 
 - add a low-level platform mechanism in `k64_*.c` if it truly belongs in the core
-- add a driver in `k64m/` when it models hardware or a low-level runtime provider
-- add a service in `k64s/` when it models commands, control planes, sessions, or long-lived system functionality
+- add a driver source definition in `k64m_def/` when it models hardware or a low-level runtime provider
+- add a service source definition in `k64s_def/` when it models commands, control planes, sessions, or long-lived system functionality
 - add staged content under `rootfs/` when it should exist in the mounted root image
 
 ## Current Limits and Honest Boundaries
@@ -1326,7 +1336,7 @@ Passwords are hashed rather than stored in clear text, but the scheme is still l
 
 ### 6. Services and drivers are registry-based, not full on-disk executables
 
-The `.k64s` and `.k64m` naming and packaging are real, but the runtime still depends heavily on compiled-in built-ins and Multiboot-loaded payloads rather than a general on-disk program loader.
+The `.k64s` and `.k64m` naming and packaging are real binary module formats now, but the runtime still depends heavily on compiled-in built-ins and a minimal ELF loader rather than a full isolated process/runtime model.
 
 ## Quick Runtime Walkthrough
 
@@ -1336,8 +1346,8 @@ A typical boot looks like this:
 2. GRUB loads `k64fs.mod`
 3. GRUB loop-mounts `root.k64fs`
 4. GRUB loads `/boot/grub/grub.cfg` from inside `root.k64fs`
-5. GRUB loads the kernel from `/boot/k64_kernel.elf`
-6. GRUB passes `root.k64fs` and `.k64m` manifests as Multiboot modules
+5. GRUB loads the kernel from `/boot/k64-kernel-v<version>.elf`
+6. GRUB passes `root.k64fs` as a Multiboot module
 7. the kernel initializes its core subsystems
 8. the driver registry autostarts built-in drivers such as `screen`, `keyboard`, and `fs`
 9. the service registry starts `init`

@@ -1,4 +1,4 @@
 name=hello
+kind=elf
 class=user
-source=elf
 entry=/ex/hello.elf

@@ -1,4 +1,5 @@
 // k64_modules.c
+#include "k64_artifact.h"
 #include "k64_modules.h"
 #include "k64_elf.h"
 #include "k64_fs.h"
@@ -68,23 +69,6 @@ static bool has_suffix(const char* text, const char* suffix) {
     return k64_streq(text + text_len - suffix_len, suffix);
 }
 
-static void append_string(char* dst, size_t dst_size, const char* src) {
-    size_t pos = 0;
-    size_t i = 0;
-
-    if (!dst || dst_size == 0) {
-        return;
-    }
-
-    while (dst[pos] && pos + 1 < dst_size) {
-        pos++;
-    }
-    while (src && src[i] && pos + 1 < dst_size) {
-        dst[pos++] = src[i++];
-    }
-    dst[pos] = '\0';
-}
-
 static bool default_driver_start(k64_driver_t* driver) {
     (void)driver;
     return true;
@@ -115,58 +99,27 @@ static bool rootfs_driver_start(k64_driver_t* driver) {
     return k64_elf_execute_path(ctx->entry_path);
 }
 
-static bool manifest_get_value(const char* text, const char* key, char* out, int out_size) {
-    int key_len = 0;
-    const char* p = text;
+static void build_rootfs_path(char* dst, size_t dst_size, const char* dir, const char* name) {
+    size_t pos = 0;
 
-    while (key[key_len]) {
-        key_len++;
-    }
-    if (!text || !key || !out || out_size <= 0) {
-        return false;
+    if (!dst || dst_size == 0) {
+        return;
     }
 
-    while (*p) {
-        int i = 0;
-
-        while (p[i] && p[i] != '\n' && i < key_len) {
-            if (p[i] != key[i]) {
-                break;
-            }
-            i++;
-        }
-        if (i == key_len && p[i] == '=') {
-            int j = 0;
-            p += i + 1;
-            while (p[j] && p[j] != '\n' && j + 1 < out_size) {
-                out[j] = p[j];
-                j++;
-            }
-            out[j] = '\0';
-            return true;
-        }
-        while (*p && *p != '\n') {
-            p++;
-        }
-        if (*p == '\n') {
-            p++;
-        }
+    while (dir && *dir && pos + 1 < dst_size) {
+        dst[pos++] = *dir++;
     }
-
-    out[0] = '\0';
-    return false;
+    while (name && *name && pos + 1 < dst_size) {
+        dst[pos++] = *name++;
+    }
+    dst[pos] = '\0';
 }
 
 static bool rootfs_k64m_cb(const char* name, bool is_dir, void* ctx) {
     char path[96];
-    char manifest[512];
-    char manifest_name[32];
-    char manifest_type[24];
-    char manifest_source[24];
-    char manifest_entry[64];
-    char manifest_autostart[8];
-    uint8_t type = K64_MODULE_TYPE_DRIVER;
-    uint32_t flags = 0;
+    const uint8_t* data = NULL;
+    size_t size = 0;
+    const k64_driver_file_t* file;
     k64_rootfs_driver_ctx_t* slot;
 
     (void)ctx;
@@ -177,53 +130,41 @@ static bool rootfs_k64m_cb(const char* name, bool is_dir, void* ctx) {
         return true;
     }
 
-    copy_string(path, sizeof(path), "/k64m/");
-    append_string(path, sizeof(path), name);
-    if (!k64_fs_cat(path, manifest, sizeof(manifest))) {
+    build_rootfs_path(path, sizeof(path), "/k64m/", name);
+    if (!k64_fs_read_file_raw(path, &data, &size) || !data || size < sizeof(k64_driver_file_t)) {
         return true;
     }
-    manifest_get_value(manifest, "source", manifest_source, sizeof(manifest_source));
-    if (k64_streq(manifest_source, "builtin")) {
+    file = (const k64_driver_file_t*)data;
+    if (file->magic != K64_MODULE_MAGIC || file->version != K64_ARTIFACT_VERSION) {
         return true;
     }
-    if (!manifest_get_value(manifest, "entry", manifest_entry, sizeof(manifest_entry)) || !manifest_entry[0]) {
+    if (file->exec_kind == K64_ARTIFACT_EXEC_BUILTIN) {
         return true;
     }
-    if (!manifest_get_value(manifest, "name", manifest_name, sizeof(manifest_name)) || !manifest_name[0]) {
+    if (file->exec_kind != K64_ARTIFACT_EXEC_ELF || !file->name[0] || !file->entry_path[0]) {
         return true;
     }
-    if (k64_modules_find_driver_by_name(manifest_name)) {
+    if (k64_modules_find_driver_by_name(file->name)) {
         return true;
-    }
-
-    manifest_get_value(manifest, "type", manifest_type, sizeof(manifest_type));
-    if (k64_streq(manifest_type, "filesystem")) {
-        type = K64_MODULE_TYPE_FS;
-    } else if (k64_streq(manifest_type, "service")) {
-        type = K64_MODULE_TYPE_SERVICE;
-    }
-    manifest_get_value(manifest, "autostart", manifest_autostart, sizeof(manifest_autostart));
-    if (manifest_autostart[0] == '1') {
-        flags |= K64_MODULE_FLAG_AUTOSTART;
     }
 
     if (rootfs_ctx_count >= K64_MAX_DRIVERS) {
         return true;
     }
     slot = &rootfs_ctx[rootfs_ctx_count++];
-    copy_string(slot->entry_path, sizeof(slot->entry_path), manifest_entry);
-    if (k64_modules_register_driver(manifest_name,
+    copy_string(slot->entry_path, sizeof(slot->entry_path), file->entry_path);
+    if (k64_modules_register_driver(file->name,
                                     path,
-                                    type,
-                                    flags,
-                                    1,
+                                    file->type,
+                                    file->flags,
+                                    file->priority,
                                     true,
                                     rootfs_driver_start,
                                     default_driver_stop,
                                     NULL,
                                     slot)) {
         k64_term_write("  Rootfs K64M driver registered: ");
-        k64_term_write(manifest_name);
+        k64_term_write(file->name);
         k64_term_putc('\n');
     }
     return true;

@@ -1,3 +1,0 @@
-name=driverctl
-type=service
-source=builtin

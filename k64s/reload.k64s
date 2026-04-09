@@ -1,3 +1,0 @@
-name=reload
-type=service
-source=builtin

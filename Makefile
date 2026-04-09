@@ -30,9 +30,13 @@ CFLAGS64 = -I. -Ibuild -m64 -ffreestanding -O2 -Wall -Wextra -fno-stack-protecto
 LDFLAGS  = -T linker.ld -nostdlib
 
 K64S_SRCS = $(wildcard k64s/*.c)
-K64S_MANIFESTS = $(wildcard k64s/*.k64s)
+K64S_DEF_SRCS = $(wildcard k64s_def/*.svc)
+K64S_BUILD_DIR := build/k64s
+K64S_BINS := $(patsubst k64s_def/%.svc,$(K64S_BUILD_DIR)/%.k64s,$(K64S_DEF_SRCS))
 K64M_SRCS = $(wildcard k64m/*.c)
-K64M_MANIFESTS = $(wildcard k64m/*.k64m)
+K64M_DEF_SRCS = $(wildcard k64m_def/*.drv)
+K64M_BUILD_DIR := build/k64m
+K64M_BINS := $(patsubst k64m_def/%.drv,$(K64M_BUILD_DIR)/%.k64m,$(K64M_DEF_SRCS))
 EX_SRCS = $(wildcard ex/*.S)
 EX_BUILD_DIR := build/ex
 EX_ELFS := $(patsubst ex/%.S,$(EX_BUILD_DIR)/%.elf,$(EX_SRCS))
@@ -82,7 +86,7 @@ ifeq ($(GRUB_MKRESCUE),)
 $(warning No GRUB ISO builder found. Install grub-mkrescue or grub2-mkrescue to build k64.iso.)
 endif
 
-$(K64_AUTOVERSION_HDR): k64_version.h tools/gen_k64_version.py
+$(K64_AUTOVERSION_HDR): FORCE k64_version.h tools/gen_k64_version.py
 	mkdir -p build
 	$(PYTHON) tools/gen_k64_version.py header $(K64_AUTOVERSION_HDR)
 
@@ -174,7 +178,15 @@ $(K64_GRUB_ISO_CFG): $(K64_KERNEL_ELF)
 	echo '  module /k64fs/root.k64fs /k64fs/root.k64fs' >> $(K64_GRUB_ISO_CFG)
 	echo '}' >> $(K64_GRUB_ISO_CFG)
 
-$(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(K64_GRUB_ROOT_CFG) tools/mk_k64fs.py $(shell find rootfs -type f 2>/dev/null) $(K64S_MANIFESTS) $(K64M_MANIFESTS)
+$(K64S_BUILD_DIR)/%.k64s: k64s_def/%.svc tools/build_k64x.py
+	mkdir -p $(K64S_BUILD_DIR)
+	$(PYTHON) tools/build_k64x.py service $< $@
+
+$(K64M_BUILD_DIR)/%.k64m: k64m_def/%.drv tools/build_k64x.py
+	mkdir -p $(K64M_BUILD_DIR)
+	$(PYTHON) tools/build_k64x.py driver $< $@
+
+$(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(K64_GRUB_ROOT_CFG) tools/mk_k64fs.py tools/build_k64x.py $(shell find rootfs -type f 2>/dev/null) $(K64S_DEF_SRCS) $(K64M_DEF_SRCS) $(K64S_BINS) $(K64M_BINS)
 	rm -rf $(K64FS_STAGE_ROOT)
 	mkdir -p $(K64FS_STAGE_ROOT)/boot
 	mkdir -p $(K64FS_STAGE_ROOT)/boot/grub
@@ -184,8 +196,8 @@ $(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(K64_GRUB_ROOT_CFG) tools/mk
 	rsync -a $(K64FS_SRC_ROOT)/ $(K64FS_STAGE_ROOT)/
 	cp $(K64_KERNEL_ELF) $(K64FS_STAGE_ROOT)/boot/$(K64_KERNEL_ELF)
 	cp $(K64_GRUB_ROOT_CFG) $(K64FS_STAGE_ROOT)/boot/grub/grub.cfg
-	if [ -d k64s ]; then cp $(K64S_MANIFESTS) $(K64FS_STAGE_ROOT)/k64s/; fi
-	if [ -d k64m ]; then cp $(K64M_MANIFESTS) $(K64FS_STAGE_ROOT)/k64m/; fi
+	if [ -n "$(K64S_BINS)" ]; then cp $(K64S_BINS) $(K64FS_STAGE_ROOT)/k64s/; fi
+	if [ -n "$(K64M_BINS)" ]; then cp $(K64M_BINS) $(K64FS_STAGE_ROOT)/k64m/; fi
 	if [ -n "$(EX_ELFS)" ]; then cp $(EX_ELFS) $(K64FS_STAGE_ROOT)/ex/; fi
 	touch $(K64FS_STAGE_STAMP)
 
@@ -220,5 +232,5 @@ test: k64.iso
 clean:
 	rm -rf *.o k64_kernel.elf k64-kernel-v*.elf iso build k64.iso .k64_boot.log
 
-.PHONY: all iso run run-headless test clean
+.PHONY: all iso run run-headless test clean FORCE
 .NOTPARALLEL: k64.iso $(K64FS_STAGE_STAMP)

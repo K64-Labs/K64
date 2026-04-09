@@ -1,3 +1,0 @@
-name=fsctl
-type=service
-source=builtin

@@ -1,3 +1,4 @@
+#include "k64_artifact.h"
 #include "k64_elf.h"
 #include "k64_config.h"
 #include "k64_fs.h"
@@ -150,6 +151,13 @@ static void svc_write_u64le(uint8_t* buf, size_t off, uint64_t value) {
     }
 }
 
+static void svc_zero(void* ptr, size_t size) {
+    uint8_t* bytes = (uint8_t*)ptr;
+    for (size_t i = 0; i < size; ++i) {
+        bytes[i] = 0;
+    }
+}
+
 static bool k64cc_build_stub_elf(const char* path) {
     uint8_t elf[0x7B];
 
@@ -192,6 +200,40 @@ static bool k64cc_build_stub_elf(const char* path) {
     elf[0x7A] = 0xC3;
 
     return k64_fs_write_file_raw(path, elf, sizeof(elf));
+}
+
+static bool k64cc_build_service_module(const char* path,
+                                       const char* name,
+                                       k64_service_class_t class_id,
+                                       const char* entry_path) {
+    k64_service_file_t file;
+
+    svc_zero(&file, sizeof(file));
+    file.magic = K64_SYSTEM_MAGIC;
+    file.version = K64_ARTIFACT_VERSION;
+    file.exec_kind = K64_ARTIFACT_EXEC_ELF;
+    file.class_id = (uint8_t)class_id;
+    file.priority = 1;
+    svc_copy(file.name, sizeof(file.name), name);
+    svc_copy(file.entry_path, sizeof(file.entry_path), entry_path);
+    return k64_fs_write_file_raw(path, (const uint8_t*)&file, sizeof(file));
+}
+
+static bool k64cc_build_driver_module(const char* path,
+                                      const char* name,
+                                      uint8_t type,
+                                      const char* entry_path) {
+    k64_driver_file_t file;
+
+    svc_zero(&file, sizeof(file));
+    file.magic = K64_MODULE_MAGIC;
+    file.version = K64_ARTIFACT_VERSION;
+    file.exec_kind = K64_ARTIFACT_EXEC_ELF;
+    file.type = type;
+    file.priority = 1;
+    svc_copy(file.name, sizeof(file.name), name);
+    svc_copy(file.entry_path, sizeof(file.entry_path), entry_path);
+    return k64_fs_write_file_raw(path, (const uint8_t*)&file, sizeof(file));
 }
 
 static void k64cc_usage(void) {
@@ -327,7 +369,9 @@ static bool k64cc_command(const char* command, const char* args) {
     char name[64];
     char arg2[32];
     char path[128];
-    char content[256];
+    char entry_path[128];
+    k64_service_class_t class_id;
+    uint8_t driver_type;
 
     (void)command;
     args = svc_next_token(args, subcmd, sizeof(subcmd));
@@ -375,17 +419,17 @@ static bool k64cc_command(const char* command, const char* args) {
         svc_append(path, sizeof(path), "/k64s/");
         svc_append(path, sizeof(path), name);
         svc_append(path, sizeof(path), ".k64s");
-
-        content[0] = '\0';
-        svc_append(content, sizeof(content), "name=");
-        svc_append(content, sizeof(content), name);
-        svc_append(content, sizeof(content), "\nclass=");
-        svc_append(content, sizeof(content), arg2[0] ? arg2 : "system");
-        svc_append(content, sizeof(content), "\nsource=elf");
-        svc_append(content, sizeof(content), "\nentry=/ex/");
-        svc_append(content, sizeof(content), name);
-        svc_append(content, sizeof(content), ".elf\n");
-        if (!k64_fs_write_file(path, content)) {
+        entry_path[0] = '\0';
+        svc_append(entry_path, sizeof(entry_path), "/ex/");
+        svc_append(entry_path, sizeof(entry_path), name);
+        svc_append(entry_path, sizeof(entry_path), ".elf");
+        class_id = K64_SERVICE_CLASS_SYSTEM;
+        if (k64_streq(arg2, "root")) {
+            class_id = K64_SERVICE_CLASS_ROOT;
+        } else if (k64_streq(arg2, "user")) {
+            class_id = K64_SERVICE_CLASS_USER;
+        }
+        if (!k64cc_build_service_module(path, name, class_id, entry_path)) {
             svc_print_line("k64cc: k64s build failed");
             return true;
         }
@@ -406,17 +450,17 @@ static bool k64cc_command(const char* command, const char* args) {
         svc_append(path, sizeof(path), "/k64m/");
         svc_append(path, sizeof(path), name);
         svc_append(path, sizeof(path), ".k64m");
-
-        content[0] = '\0';
-        svc_append(content, sizeof(content), "name=");
-        svc_append(content, sizeof(content), name);
-        svc_append(content, sizeof(content), "\ntype=");
-        svc_append(content, sizeof(content), arg2[0] ? arg2 : "driver");
-        svc_append(content, sizeof(content), "\nsource=elf");
-        svc_append(content, sizeof(content), "\nentry=/ex/");
-        svc_append(content, sizeof(content), name);
-        svc_append(content, sizeof(content), ".elf\n");
-        if (!k64_fs_write_file(path, content)) {
+        entry_path[0] = '\0';
+        svc_append(entry_path, sizeof(entry_path), "/ex/");
+        svc_append(entry_path, sizeof(entry_path), name);
+        svc_append(entry_path, sizeof(entry_path), ".elf");
+        driver_type = K64_MODULE_TYPE_DRIVER;
+        if (k64_streq(arg2, "filesystem")) {
+            driver_type = K64_MODULE_TYPE_FS;
+        } else if (k64_streq(arg2, "service")) {
+            driver_type = K64_MODULE_TYPE_SERVICE;
+        }
+        if (!k64cc_build_driver_module(path, name, driver_type, entry_path)) {
             svc_print_line("k64cc: k64m build failed");
             return true;
         }
