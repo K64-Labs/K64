@@ -1,5 +1,6 @@
 // k64_shell.h
 #pragma once
+#include <stdbool.h>
 #include <stdint.h>
 
 struct k64_service;
