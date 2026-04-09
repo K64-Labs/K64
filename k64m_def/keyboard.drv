@@ -1,3 +1,4 @@
 name=keyboard
+kind=builtin
 type=driver
-source=builtin
+autostart=1

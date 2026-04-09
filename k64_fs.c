@@ -212,6 +212,99 @@ static bool fs_store_mutable(k64_fs_node_t* node, const uint8_t* data, int size)
     return true;
 }
 
+static bool fs_dir_empty(int index) {
+    if (index <= 0 || index >= K64_FS_MAX_NODES || !nodes[index].used || !nodes[index].is_dir) {
+        return false;
+    }
+    for (int i = 1; i < K64_FS_MAX_NODES; ++i) {
+        if (nodes[i].used && nodes[i].parent == index) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool fs_is_descendant(int ancestor, int child) {
+    if (ancestor < 0 || child < 0) {
+        return false;
+    }
+    while (child != 0 && child != ancestor) {
+        child = nodes[child].parent;
+    }
+    return child == ancestor;
+}
+
+static void fs_remove_node(int index) {
+    if (index <= 0 || index >= K64_FS_MAX_NODES) {
+        return;
+    }
+    nodes[index].used = false;
+    nodes[index].is_dir = false;
+    nodes[index].parent = -1;
+    nodes[index].name[0] = '\0';
+    nodes[index].dirty = false;
+    nodes[index].data_offset = 0;
+    nodes[index].data_size = 0;
+    nodes[index].dirty_offset = -1;
+}
+
+static bool fs_compact_nodes(void) {
+    k64_fs_node_t compacted[K64_FS_MAX_NODES];
+    int remap[K64_FS_MAX_NODES];
+
+    for (int i = 0; i < K64_FS_MAX_NODES; ++i) {
+        remap[i] = -1;
+        compacted[i].used = false;
+        compacted[i].is_dir = false;
+        compacted[i].parent = -1;
+        compacted[i].name[0] = '\0';
+        compacted[i].dirty = false;
+        compacted[i].data_offset = 0;
+        compacted[i].data_size = 0;
+        compacted[i].dirty_offset = -1;
+    }
+
+    remap[0] = 0;
+    compacted[0] = nodes[0];
+
+    {
+        int next = 1;
+        for (int i = 1; i < K64_FS_MAX_NODES; ++i) {
+            if (!nodes[i].used) {
+                continue;
+            }
+            if (next >= K64_FS_MAX_NODES) {
+                return false;
+            }
+            remap[i] = next;
+            compacted[next] = nodes[i];
+            next++;
+        }
+    }
+
+    for (int i = 0; i < K64_FS_MAX_NODES; ++i) {
+        if (!compacted[i].used) {
+            continue;
+        }
+        if (compacted[i].parent < 0 || compacted[i].parent >= K64_FS_MAX_NODES ||
+            remap[compacted[i].parent] < 0) {
+            return false;
+        }
+        compacted[i].parent = remap[compacted[i].parent];
+    }
+
+    if (cwd_index < 0 || cwd_index >= K64_FS_MAX_NODES || remap[cwd_index] < 0) {
+        cwd_index = 0;
+    } else {
+        cwd_index = remap[cwd_index];
+    }
+
+    for (int i = 0; i < K64_FS_MAX_NODES; ++i) {
+        nodes[i] = compacted[i];
+    }
+    return true;
+}
+
 static bool fs_parse_loaded_image(size_t size) {
     const k64fs_header_t* hdr = (const k64fs_header_t*)fs_image;
     const k64fs_entry_t* entries;
@@ -432,7 +525,7 @@ static int fs_used_count(void) {
 static bool fs_writeback_image(void) {
     k64fs_header_t* hdr;
     k64fs_entry_t* entries;
-    int entry_count = fs_used_count();
+    int entry_count;
     size_t strings_size = 0;
     size_t data_size = 0;
     size_t strings_offset;
@@ -441,6 +534,12 @@ static bool fs_writeback_image(void) {
     size_t string_cursor;
     size_t data_cursor;
 
+    if (!fs_compact_nodes()) {
+        K64_LOG_WARN("K64FS: failed to compact nodes before writeback.");
+        return false;
+    }
+
+    entry_count = fs_used_count();
     if (entry_count <= 0) {
         return false;
     }
@@ -685,6 +784,116 @@ bool k64_fs_write_file_raw(const char* path, const uint8_t* data, size_t size) {
     return fs_writeback_image();
 }
 
+bool k64_fs_append_file(const char* path, const char* text) {
+    char leaf[K64_FS_NAME_MAX];
+    int parent = fs_resolve(path, true, leaf);
+    int idx;
+    const uint8_t* current;
+    int current_size;
+    int extra_size = fs_len(text ? text : "");
+    uint8_t combined[K64_FS_MUTABLE_MAX];
+
+    if (parent < 0 || !leaf[0] || extra_size < 0) {
+        return false;
+    }
+    idx = fs_find_child(parent, leaf);
+    if (idx < 0) {
+        return k64_fs_write_file(path, text ? text : "");
+    }
+    if (nodes[idx].is_dir) {
+        return false;
+    }
+    current = fs_node_bytes(&nodes[idx]);
+    current_size = nodes[idx].data_size;
+    if (current_size < 0 || current_size + extra_size > K64_FS_MUTABLE_MAX) {
+        return false;
+    }
+    for (int i = 0; i < current_size; ++i) {
+        combined[i] = current ? current[i] : 0;
+    }
+    for (int i = 0; i < extra_size; ++i) {
+        combined[current_size + i] = (uint8_t)text[i];
+    }
+    if (!fs_store_mutable(&nodes[idx], combined, current_size + extra_size)) {
+        return false;
+    }
+    return fs_writeback_image();
+}
+
+bool k64_fs_remove(const char* path) {
+    int idx = fs_resolve(path, false, NULL);
+
+    if (idx <= 0 || nodes[idx].is_dir) {
+        return false;
+    }
+    fs_remove_node(idx);
+    return fs_writeback_image();
+}
+
+bool k64_fs_rmdir(const char* path) {
+    int idx = fs_resolve(path, false, NULL);
+
+    if (idx <= 0 || !nodes[idx].is_dir || !fs_dir_empty(idx)) {
+        return false;
+    }
+    if (cwd_index == idx) {
+        cwd_index = nodes[idx].parent;
+    }
+    fs_remove_node(idx);
+    return fs_writeback_image();
+}
+
+bool k64_fs_move(const char* src_path, const char* dst_path) {
+    char leaf[K64_FS_NAME_MAX];
+    int src_idx = fs_resolve(src_path, false, NULL);
+    int dst_parent;
+    int existing;
+
+    if (src_idx <= 0 || !dst_path || !dst_path[0]) {
+        return false;
+    }
+    dst_parent = fs_resolve(dst_path, true, leaf);
+    if (dst_parent < 0 || !leaf[0]) {
+        return false;
+    }
+    if (nodes[src_idx].is_dir && (dst_parent == src_idx || fs_is_descendant(src_idx, dst_parent))) {
+        return false;
+    }
+    existing = fs_find_child(dst_parent, leaf);
+    if (existing >= 0 && existing != src_idx) {
+        return false;
+    }
+    nodes[src_idx].parent = dst_parent;
+    fs_copy(nodes[src_idx].name, K64_FS_NAME_MAX, leaf);
+    return fs_writeback_image();
+}
+
+bool k64_fs_copy(const char* src_path, const char* dst_path) {
+    int src_idx = fs_resolve(src_path, false, NULL);
+    char leaf[K64_FS_NAME_MAX];
+    int dst_parent;
+    int dst_idx;
+    const uint8_t* bytes;
+
+    if (src_idx <= 0 || nodes[src_idx].is_dir) {
+        return false;
+    }
+    dst_parent = fs_resolve(dst_path, true, leaf);
+    if (dst_parent < 0 || !leaf[0]) {
+        return false;
+    }
+    dst_idx = fs_find_child(dst_parent, leaf);
+    if (dst_idx < 0 && !k64_fs_touch(dst_path)) {
+        return false;
+    }
+    src_idx = fs_resolve(src_path, false, NULL);
+    if (src_idx <= 0 || nodes[src_idx].is_dir) {
+        return false;
+    }
+    bytes = fs_node_bytes(&nodes[src_idx]);
+    return k64_fs_write_file_raw(dst_path, bytes, (size_t)nodes[src_idx].data_size);
+}
+
 bool k64_fs_cat(const char* path, char* out, int out_size) {
     int idx = fs_resolve(path, false, NULL);
     const uint8_t* data;
@@ -723,6 +932,29 @@ bool k64_fs_read_file_raw(const char* path, const uint8_t** data, size_t* size) 
 
     *data = bytes;
     *size = (size_t)nodes[idx].data_size;
+    return true;
+}
+
+bool k64_fs_stat(const char* path, k64_fs_stat_t* out) {
+    int idx;
+
+    if (!out) {
+        return false;
+    }
+    out->exists = false;
+    out->is_dir = false;
+    out->size = 0;
+    out->path[0] = '\0';
+
+    idx = fs_resolve(path && path[0] ? path : ".", false, NULL);
+    if (idx < 0) {
+        return false;
+    }
+
+    out->exists = true;
+    out->is_dir = nodes[idx].is_dir;
+    out->size = nodes[idx].is_dir ? 0u : (size_t)nodes[idx].data_size;
+    (void)fs_build_path(idx, out->path, (int)sizeof(out->path));
     return true;
 }
 

@@ -1,0 +1,4 @@
+name=fs
+kind=builtin
+type=filesystem
+autostart=1

@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "k64_multiboot.h"
+#include "k64_sched.h"
 
 #define K64_MODULE_MAGIC 0x4B36344D  /* "K64M" */
 #define K64_MODULE_FLAG_ASYNC     (1u << 0)
@@ -60,6 +61,7 @@ typedef struct k64_driver {
     k64_driver_start_fn  start;
     k64_driver_stop_fn   stop;
     k64_driver_poll_fn   poll;
+    k64_task_t*          task;
     void*                context;
 } k64_driver_t;
 

@@ -1,4 +1,0 @@
-name=elfctl
-class=system
-source=builtin
-description=Native ELF execution service for /ex and explicit elfrun requests.

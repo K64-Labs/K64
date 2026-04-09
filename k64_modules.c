@@ -1,4 +1,5 @@
 // k64_modules.c
+#include "k64_artifact.h"
 #include "k64_modules.h"
 #include "k64_elf.h"
 #include "k64_fs.h"
@@ -32,6 +33,7 @@ static k64_rootfs_driver_ctx_t rootfs_ctx[K64_MAX_DRIVERS];
 static size_t rootfs_ctx_count = 0;
 
 static void default_driver_stop(k64_driver_t* driver);
+static void driver_worker_main(void* arg);
 
 static void copy_string(char* dst, size_t dst_size, const char* src) {
     size_t i = 0;
@@ -68,23 +70,6 @@ static bool has_suffix(const char* text, const char* suffix) {
     return k64_streq(text + text_len - suffix_len, suffix);
 }
 
-static void append_string(char* dst, size_t dst_size, const char* src) {
-    size_t pos = 0;
-    size_t i = 0;
-
-    if (!dst || dst_size == 0) {
-        return;
-    }
-
-    while (dst[pos] && pos + 1 < dst_size) {
-        pos++;
-    }
-    while (src && src[i] && pos + 1 < dst_size) {
-        dst[pos++] = src[i++];
-    }
-    dst[pos] = '\0';
-}
-
 static bool default_driver_start(k64_driver_t* driver) {
     (void)driver;
     return true;
@@ -92,6 +77,30 @@ static bool default_driver_start(k64_driver_t* driver) {
 
 static void default_driver_stop(k64_driver_t* driver) {
     (void)driver;
+}
+
+static void driver_worker_main(void* arg) {
+    k64_driver_t* driver = (k64_driver_t*)arg;
+
+    if (!driver) {
+        return;
+    }
+
+    for (;;) {
+        uint64_t now;
+        if (driver->state != K64_DRIVER_STATE_RUNNING) {
+            return;
+        }
+        now = k64_pit_get_ticks();
+        if (driver->poll) {
+            driver->last_poll_tick = now;
+            driver->poll(driver, now);
+        }
+        if (driver->state != K64_DRIVER_STATE_RUNNING) {
+            return;
+        }
+        k64_sched_sleep(1);
+    }
 }
 
 static bool external_driver_start(k64_driver_t* driver) {
@@ -115,58 +124,27 @@ static bool rootfs_driver_start(k64_driver_t* driver) {
     return k64_elf_execute_path(ctx->entry_path);
 }
 
-static bool manifest_get_value(const char* text, const char* key, char* out, int out_size) {
-    int key_len = 0;
-    const char* p = text;
+static void build_rootfs_path(char* dst, size_t dst_size, const char* dir, const char* name) {
+    size_t pos = 0;
 
-    while (key[key_len]) {
-        key_len++;
-    }
-    if (!text || !key || !out || out_size <= 0) {
-        return false;
+    if (!dst || dst_size == 0) {
+        return;
     }
 
-    while (*p) {
-        int i = 0;
-
-        while (p[i] && p[i] != '\n' && i < key_len) {
-            if (p[i] != key[i]) {
-                break;
-            }
-            i++;
-        }
-        if (i == key_len && p[i] == '=') {
-            int j = 0;
-            p += i + 1;
-            while (p[j] && p[j] != '\n' && j + 1 < out_size) {
-                out[j] = p[j];
-                j++;
-            }
-            out[j] = '\0';
-            return true;
-        }
-        while (*p && *p != '\n') {
-            p++;
-        }
-        if (*p == '\n') {
-            p++;
-        }
+    while (dir && *dir && pos + 1 < dst_size) {
+        dst[pos++] = *dir++;
     }
-
-    out[0] = '\0';
-    return false;
+    while (name && *name && pos + 1 < dst_size) {
+        dst[pos++] = *name++;
+    }
+    dst[pos] = '\0';
 }
 
 static bool rootfs_k64m_cb(const char* name, bool is_dir, void* ctx) {
     char path[96];
-    char manifest[512];
-    char manifest_name[32];
-    char manifest_type[24];
-    char manifest_source[24];
-    char manifest_entry[64];
-    char manifest_autostart[8];
-    uint8_t type = K64_MODULE_TYPE_DRIVER;
-    uint32_t flags = 0;
+    const uint8_t* data = NULL;
+    size_t size = 0;
+    const k64_driver_file_t* file;
     k64_rootfs_driver_ctx_t* slot;
 
     (void)ctx;
@@ -177,59 +155,49 @@ static bool rootfs_k64m_cb(const char* name, bool is_dir, void* ctx) {
         return true;
     }
 
-    copy_string(path, sizeof(path), "/k64m/");
-    append_string(path, sizeof(path), name);
-    if (!k64_fs_cat(path, manifest, sizeof(manifest))) {
+    build_rootfs_path(path, sizeof(path), "/k64m/", name);
+    if (!k64_fs_read_file_raw(path, &data, &size) || !data || size < sizeof(k64_driver_file_t)) {
         return true;
     }
-    manifest_get_value(manifest, "source", manifest_source, sizeof(manifest_source));
-    if (k64_streq(manifest_source, "builtin")) {
+    file = (const k64_driver_file_t*)data;
+    if (file->magic != K64_MODULE_MAGIC || file->version != K64_ARTIFACT_VERSION) {
         return true;
     }
-    if (!manifest_get_value(manifest, "entry", manifest_entry, sizeof(manifest_entry)) || !manifest_entry[0]) {
+    if (file->exec_kind == K64_ARTIFACT_EXEC_BUILTIN) {
         return true;
     }
-    if (!manifest_get_value(manifest, "name", manifest_name, sizeof(manifest_name)) || !manifest_name[0]) {
+    if (file->exec_kind != K64_ARTIFACT_EXEC_ELF || !file->name[0] || !file->entry_path[0]) {
         return true;
     }
-    if (k64_modules_find_driver_by_name(manifest_name)) {
+    if (k64_modules_find_driver_by_name(file->name)) {
         return true;
-    }
-
-    manifest_get_value(manifest, "type", manifest_type, sizeof(manifest_type));
-    if (k64_streq(manifest_type, "filesystem")) {
-        type = K64_MODULE_TYPE_FS;
-    } else if (k64_streq(manifest_type, "service")) {
-        type = K64_MODULE_TYPE_SERVICE;
-    }
-    manifest_get_value(manifest, "autostart", manifest_autostart, sizeof(manifest_autostart));
-    if (manifest_autostart[0] == '1') {
-        flags |= K64_MODULE_FLAG_AUTOSTART;
     }
 
     if (rootfs_ctx_count >= K64_MAX_DRIVERS) {
         return true;
     }
     slot = &rootfs_ctx[rootfs_ctx_count++];
-    copy_string(slot->entry_path, sizeof(slot->entry_path), manifest_entry);
-    if (k64_modules_register_driver(manifest_name,
+    copy_string(slot->entry_path, sizeof(slot->entry_path), file->entry_path);
+    if (k64_modules_register_driver(file->name,
                                     path,
-                                    type,
-                                    flags,
-                                    1,
+                                    file->type,
+                                    file->flags,
+                                    file->priority,
                                     true,
                                     rootfs_driver_start,
                                     default_driver_stop,
                                     NULL,
                                     slot)) {
         k64_term_write("  Rootfs K64M driver registered: ");
-        k64_term_write(manifest_name);
+        k64_term_write(file->name);
         k64_term_putc('\n');
     }
     return true;
 }
 
 static bool perform_driver_start(k64_driver_t* driver) {
+    k64_task_t* task = NULL;
+
     if (!driver || !driver->start) {
         return false;
     }
@@ -241,12 +209,25 @@ static bool perform_driver_start(k64_driver_t* driver) {
     driver->start_count++;
     driver->last_start_tick = k64_pit_get_ticks();
     driver->last_poll_tick = driver->last_start_tick;
+    driver->task = NULL;
+    if ((driver->flags & K64_MODULE_FLAG_ASYNC) != 0 && driver->poll) {
+        task = k64_task_create_arg(driver_worker_main, driver, (int)driver->priority, 0);
+        if (!task) {
+            driver->state = K64_DRIVER_STATE_STOPPED;
+            return false;
+        }
+        driver->task = task;
+    }
     return true;
 }
 
 static void perform_driver_stop(k64_driver_t* driver) {
     if (!driver) {
         return;
+    }
+    if (driver->task) {
+        k64_task_stop(driver->task);
+        driver->task = NULL;
     }
     if (driver->stop) {
         driver->stop(driver);
@@ -338,6 +319,7 @@ void k64_modules_registry_init(void) {
         drivers[i].start = NULL;
         drivers[i].stop = NULL;
         drivers[i].poll = NULL;
+        drivers[i].task = NULL;
         drivers[i].context = NULL;
         external_ctx[i].entry_addr = 0;
         rootfs_ctx[i].entry_path[0] = '\0';
@@ -381,6 +363,7 @@ k64_driver_t* k64_modules_register_driver(const char* name,
     driver->start = start ? start : default_driver_start;
     driver->stop = stop ? stop : default_driver_stop;
     driver->poll = poll;
+    driver->task = NULL;
     driver->context = context;
 
     return driver;
@@ -422,19 +405,7 @@ void k64_modules_load_rootfs(void) {
 }
 
 void k64_modules_poll_async(void) {
-    uint64_t now = k64_pit_get_ticks();
-
-    for (size_t i = 0; i < driver_count; ++i) {
-        k64_driver_t* driver = &drivers[i];
-        if (driver->state != K64_DRIVER_STATE_RUNNING) {
-            continue;
-        }
-        if ((driver->flags & K64_MODULE_FLAG_ASYNC) == 0 || !driver->poll) {
-            continue;
-        }
-        driver->last_poll_tick = now;
-        driver->poll(driver, now);
-    }
+    /* Async drivers are scheduled as worker tasks now. */
 }
 
 void k64_modules_reload_all(void) {

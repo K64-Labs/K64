@@ -1,0 +1,4 @@
+name=shell
+kind=builtin
+class=system
+async=1

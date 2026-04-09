@@ -1,3 +1,4 @@
+#include "k64_artifact.h"
 #include "k64_elf.h"
 #include "k64_config.h"
 #include "k64_fs.h"
@@ -150,6 +151,13 @@ static void svc_write_u64le(uint8_t* buf, size_t off, uint64_t value) {
     }
 }
 
+static void svc_zero(void* ptr, size_t size) {
+    uint8_t* bytes = (uint8_t*)ptr;
+    for (size_t i = 0; i < size; ++i) {
+        bytes[i] = 0;
+    }
+}
+
 static bool k64cc_build_stub_elf(const char* path) {
     uint8_t elf[0x7B];
 
@@ -167,7 +175,7 @@ static bool k64cc_build_stub_elf(const char* path) {
     svc_write_u16le(elf, 16, 2);
     svc_write_u16le(elf, 18, 62);
     svc_write_u32le(elf, 20, 1);
-    svc_write_u64le(elf, 24, 0x400078ULL);
+    svc_write_u64le(elf, 24, 0x50000078ULL);
     svc_write_u64le(elf, 32, 64);
     svc_write_u64le(elf, 40, 0);
     svc_write_u32le(elf, 48, 0);
@@ -181,8 +189,8 @@ static bool k64cc_build_stub_elf(const char* path) {
     svc_write_u32le(elf, 64, 1);
     svc_write_u32le(elf, 68, 5);
     svc_write_u64le(elf, 72, 0);
-    svc_write_u64le(elf, 80, 0x400000ULL);
-    svc_write_u64le(elf, 88, 0x400000ULL);
+    svc_write_u64le(elf, 80, 0x50000000ULL);
+    svc_write_u64le(elf, 88, 0x50000000ULL);
     svc_write_u64le(elf, 96, sizeof(elf));
     svc_write_u64le(elf, 104, sizeof(elf));
     svc_write_u64le(elf, 112, 0x1000ULL);
@@ -192,6 +200,40 @@ static bool k64cc_build_stub_elf(const char* path) {
     elf[0x7A] = 0xC3;
 
     return k64_fs_write_file_raw(path, elf, sizeof(elf));
+}
+
+static bool k64cc_build_service_module(const char* path,
+                                       const char* name,
+                                       k64_service_class_t class_id,
+                                       const char* entry_path) {
+    k64_service_file_t file;
+
+    svc_zero(&file, sizeof(file));
+    file.magic = K64_SYSTEM_MAGIC;
+    file.version = K64_ARTIFACT_VERSION;
+    file.exec_kind = K64_ARTIFACT_EXEC_ELF;
+    file.class_id = (uint8_t)class_id;
+    file.priority = 1;
+    svc_copy(file.name, sizeof(file.name), name);
+    svc_copy(file.entry_path, sizeof(file.entry_path), entry_path);
+    return k64_fs_write_file_raw(path, (const uint8_t*)&file, sizeof(file));
+}
+
+static bool k64cc_build_driver_module(const char* path,
+                                      const char* name,
+                                      uint8_t type,
+                                      const char* entry_path) {
+    k64_driver_file_t file;
+
+    svc_zero(&file, sizeof(file));
+    file.magic = K64_MODULE_MAGIC;
+    file.version = K64_ARTIFACT_VERSION;
+    file.exec_kind = K64_ARTIFACT_EXEC_ELF;
+    file.type = type;
+    file.priority = 1;
+    svc_copy(file.name, sizeof(file.name), name);
+    svc_copy(file.entry_path, sizeof(file.entry_path), entry_path);
+    return k64_fs_write_file_raw(path, (const uint8_t*)&file, sizeof(file));
 }
 
 static void k64cc_usage(void) {
@@ -327,7 +369,9 @@ static bool k64cc_command(const char* command, const char* args) {
     char name[64];
     char arg2[32];
     char path[128];
-    char content[256];
+    char entry_path[128];
+    k64_service_class_t class_id;
+    uint8_t driver_type;
 
     (void)command;
     args = svc_next_token(args, subcmd, sizeof(subcmd));
@@ -375,17 +419,17 @@ static bool k64cc_command(const char* command, const char* args) {
         svc_append(path, sizeof(path), "/k64s/");
         svc_append(path, sizeof(path), name);
         svc_append(path, sizeof(path), ".k64s");
-
-        content[0] = '\0';
-        svc_append(content, sizeof(content), "name=");
-        svc_append(content, sizeof(content), name);
-        svc_append(content, sizeof(content), "\nclass=");
-        svc_append(content, sizeof(content), arg2[0] ? arg2 : "system");
-        svc_append(content, sizeof(content), "\nsource=elf");
-        svc_append(content, sizeof(content), "\nentry=/ex/");
-        svc_append(content, sizeof(content), name);
-        svc_append(content, sizeof(content), ".elf\n");
-        if (!k64_fs_write_file(path, content)) {
+        entry_path[0] = '\0';
+        svc_append(entry_path, sizeof(entry_path), "/ex/");
+        svc_append(entry_path, sizeof(entry_path), name);
+        svc_append(entry_path, sizeof(entry_path), ".elf");
+        class_id = K64_SERVICE_CLASS_SYSTEM;
+        if (k64_streq(arg2, "root")) {
+            class_id = K64_SERVICE_CLASS_ROOT;
+        } else if (k64_streq(arg2, "user")) {
+            class_id = K64_SERVICE_CLASS_USER;
+        }
+        if (!k64cc_build_service_module(path, name, class_id, entry_path)) {
             svc_print_line("k64cc: k64s build failed");
             return true;
         }
@@ -406,17 +450,17 @@ static bool k64cc_command(const char* command, const char* args) {
         svc_append(path, sizeof(path), "/k64m/");
         svc_append(path, sizeof(path), name);
         svc_append(path, sizeof(path), ".k64m");
-
-        content[0] = '\0';
-        svc_append(content, sizeof(content), "name=");
-        svc_append(content, sizeof(content), name);
-        svc_append(content, sizeof(content), "\ntype=");
-        svc_append(content, sizeof(content), arg2[0] ? arg2 : "driver");
-        svc_append(content, sizeof(content), "\nsource=elf");
-        svc_append(content, sizeof(content), "\nentry=/ex/");
-        svc_append(content, sizeof(content), name);
-        svc_append(content, sizeof(content), ".elf\n");
-        if (!k64_fs_write_file(path, content)) {
+        entry_path[0] = '\0';
+        svc_append(entry_path, sizeof(entry_path), "/ex/");
+        svc_append(entry_path, sizeof(entry_path), name);
+        svc_append(entry_path, sizeof(entry_path), ".elf");
+        driver_type = K64_MODULE_TYPE_DRIVER;
+        if (k64_streq(arg2, "filesystem")) {
+            driver_type = K64_MODULE_TYPE_FS;
+        } else if (k64_streq(arg2, "service")) {
+            driver_type = K64_MODULE_TYPE_SERVICE;
+        }
+        if (!k64cc_build_driver_module(path, name, driver_type, entry_path)) {
             svc_print_line("k64cc: k64m build failed");
             return true;
         }
@@ -819,6 +863,147 @@ static bool fsctl_write_handler(const char* command, const char* args) {
     return true;
 }
 
+static bool fsctl_append_handler(const char* command, const char* args) {
+    char path[64];
+    const char* rest;
+    (void)command;
+
+    if (!args || !args[0]) {
+        fsctl_print("append failed");
+        return true;
+    }
+    rest = args;
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    {
+        int i = 0;
+        while (*rest && *rest != ' ' && *rest != '\t' && i + 1 < (int)sizeof(path)) {
+            path[i++] = *rest++;
+        }
+        path[i] = '\0';
+    }
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    if (!path[0] || !k64_fs_append_file(path, rest)) {
+        fsctl_print("append failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_rm_handler(const char* command, const char* args) {
+    (void)command;
+    if (!args || !args[0] || !k64_fs_remove(args)) {
+        fsctl_print("rm failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_rmdir_handler(const char* command, const char* args) {
+    (void)command;
+    if (!args || !args[0] || !k64_fs_rmdir(args)) {
+        fsctl_print("rmdir failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_mv_handler(const char* command, const char* args) {
+    char src[64];
+    char dst[64];
+    const char* rest;
+    (void)command;
+
+    if (!args || !args[0]) {
+        fsctl_print("mv failed");
+        return true;
+    }
+    rest = args;
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    {
+        int i = 0;
+        while (*rest && *rest != ' ' && *rest != '\t' && i + 1 < (int)sizeof(src)) {
+            src[i++] = *rest++;
+        }
+        src[i] = '\0';
+    }
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    {
+        int i = 0;
+        while (*rest && *rest != ' ' && *rest != '\t' && i + 1 < (int)sizeof(dst)) {
+            dst[i++] = *rest++;
+        }
+        dst[i] = '\0';
+    }
+    if (!src[0] || !dst[0] || !k64_fs_move(src, dst)) {
+        fsctl_print("mv failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_cp_handler(const char* command, const char* args) {
+    char src[64];
+    char dst[64];
+    const char* rest;
+    (void)command;
+
+    if (!args || !args[0]) {
+        fsctl_print("cp failed");
+        return true;
+    }
+    rest = args;
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    {
+        int i = 0;
+        while (*rest && *rest != ' ' && *rest != '\t' && i + 1 < (int)sizeof(src)) {
+            src[i++] = *rest++;
+        }
+        src[i] = '\0';
+    }
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    {
+        int i = 0;
+        while (*rest && *rest != ' ' && *rest != '\t' && i + 1 < (int)sizeof(dst)) {
+            dst[i++] = *rest++;
+        }
+        dst[i] = '\0';
+    }
+    if (!src[0] || !dst[0] || !k64_fs_copy(src, dst)) {
+        fsctl_print("cp failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_stat_handler(const char* command, const char* args) {
+    k64_fs_stat_t st;
+    (void)command;
+
+    if (!k64_fs_stat(args && args[0] ? args : ".", &st)) {
+        fsctl_print("stat failed");
+        return true;
+    }
+
+    k64_term_write(st.is_dir ? "dir  " : "file ");
+    k64_term_write(st.path);
+    k64_term_write(" size=");
+    k64_term_write_dec(st.size);
+    k64_term_putc('\n');
+    return true;
+}
+
 static bool fsctl_start(k64_service_t* service) {
     (void)service;
     if (!k64_modules_is_driver_running("fs")) {
@@ -832,6 +1017,12 @@ static bool fsctl_start(k64_service_t* service) {
     (void)k64_system_register_command("fsctl", "touch", fsctl_touch_handler);
     (void)k64_system_register_command("fsctl", "cat", fsctl_cat_handler);
     (void)k64_system_register_command("fsctl", "write", fsctl_write_handler);
+    (void)k64_system_register_command("fsctl", "append", fsctl_append_handler);
+    (void)k64_system_register_command("fsctl", "rm", fsctl_rm_handler);
+    (void)k64_system_register_command("fsctl", "rmdir", fsctl_rmdir_handler);
+    (void)k64_system_register_command("fsctl", "mv", fsctl_mv_handler);
+    (void)k64_system_register_command("fsctl", "cp", fsctl_cp_handler);
+    (void)k64_system_register_command("fsctl", "stat", fsctl_stat_handler);
     k64_term_write("[svc] fsctl started pid=");
     k64_term_write_dec(service->pid);
     k64_term_putc('\n');

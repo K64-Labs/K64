@@ -14,8 +14,9 @@ static k64_task_t* current_task = NULL;
 static k64_task_t* task_list    = NULL;
 static uint64_t    next_task_id = 1;
 
-static void k64_task_trampoline(void (*entry)(void));
+static void k64_task_trampoline(void (*entry)(void*), void* arg);
 static void on_tick_accounting(void);
+static uint64_t read_cr3(void);
 
 static uint32_t timeslice_for_priority(int priority) {
     if (priority < 0) {
@@ -27,7 +28,7 @@ static uint32_t timeslice_for_priority(int priority) {
     return K64_DEFAULT_TIMESLICE + (uint32_t)priority;
 }
 
-static int build_initial_stack(k64_task_t* t, void (*entry)(void)) {
+static int build_initial_stack(k64_task_t* t, void (*entry)(void*), void* arg) {
     void* stack_base = k64_pmm_alloc_frame();
     if (!stack_base) {
         K64_LOG_ERROR("Scheduler: failed to allocate stack frame for task.");
@@ -46,7 +47,7 @@ static int build_initial_stack(k64_task_t* t, void (*entry)(void)) {
     *--sp = 0; // RDX
     *--sp = 0; // RBX
     *--sp = 0; // RBP
-    *--sp = 0; // RSI
+    *--sp = (uint64_t)arg; // RSI
     *--sp = (uint64_t)entry; // RDI -> task entry for SysV ABI
     *--sp = 0; // R8
     *--sp = 0; // R9
@@ -58,16 +59,24 @@ static int build_initial_stack(k64_task_t* t, void (*entry)(void)) {
     *--sp = 0; // R15
 
     t->rsp = (uint64_t)sp;
+    t->stack_frame = (uint64_t)(uintptr_t)stack_base;
     return 1;
 }
 
 static void on_tick_accounting(void) {
+    uint64_t now = k64_pit_get_ticks();
+
     if (!task_list) {
         return;
     }
 
     k64_task_t* task = task_list;
     do {
+        if (task->state == K64_TASK_STATE_BLOCKED && task->sleep_until_tick != 0 &&
+            task->sleep_until_tick <= now) {
+            task->state = K64_TASK_STATE_READY;
+            task->sleep_until_tick = 0;
+        }
         if (task == current_task && task->state == K64_TASK_STATE_RUNNING) {
             task->runtime_ticks++;
         } else if (task->state == K64_TASK_STATE_READY) {
@@ -78,23 +87,40 @@ static void on_tick_accounting(void) {
 }
 
 __attribute__((noreturn))
-static void task_entry_trampoline(void (*entry)(void)) {
-    entry();
-    K64_LOG_INFO("Task finished, entering idle loop.");
+static void task_entry_trampoline(void (*entry)(void*), void* arg) {
+    entry(arg);
+    if (current_task) {
+        current_task->state = K64_TASK_STATE_ZOMBIE;
+    }
+    K64_LOG_INFO("Task finished, parking task.");
     for (;;) {
+        k64_sched_yield();
         __asm__ __volatile__("hlt");
     }
 }
 
 __attribute__((noreturn))
-static void k64_task_trampoline(void (*entry)(void)) {
-    task_entry_trampoline(entry);
+static void k64_task_trampoline(void (*entry)(void*), void* arg) {
+    task_entry_trampoline(entry, arg);
+}
+
+static uint64_t read_cr3(void) {
+    uint64_t value;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r"(value));
+    return value;
+}
+
+static void write_cr3(uint64_t value) {
+    __asm__ __volatile__("mov %0, %%cr3" :: "r"(value) : "memory");
 }
 
 void k64_sched_init(void) {
     static k64_task_t bootstrap;
     bootstrap.id              = 0;
     bootstrap.rsp             = 0;
+    bootstrap.cr3             = read_cr3();
+    bootstrap.sleep_until_tick = 0;
+    bootstrap.stack_frame     = 0;
     bootstrap.state           = K64_TASK_STATE_RUNNING;
     bootstrap.priority        = 0;
     bootstrap.base_timeslice  = K64_DEFAULT_TIMESLICE;
@@ -109,7 +135,7 @@ void k64_sched_init(void) {
     K64_LOG_INFO("Scheduler initialized with bootstrap task.");
 }
 
-k64_task_t* k64_task_create_ex(void (*entry)(void), int priority) {
+k64_task_t* k64_task_create_arg(void (*entry)(void*), void* arg, int priority, uint64_t cr3) {
     k64_task_t* t = (k64_task_t*)k64_pmm_alloc_frame();
     if (!t) {
         K64_LOG_ERROR("Scheduler: failed to allocate TCB.");
@@ -118,6 +144,9 @@ k64_task_t* k64_task_create_ex(void (*entry)(void), int priority) {
 
     t->id             = next_task_id++;
     t->state          = K64_TASK_STATE_READY;
+    t->cr3            = cr3 ? cr3 : read_cr3();
+    t->sleep_until_tick = 0;
+    t->stack_frame    = 0;
     if (priority < 0) {
         priority = 0;
     }
@@ -133,7 +162,7 @@ k64_task_t* k64_task_create_ex(void (*entry)(void), int priority) {
     t->next           = NULL;
     t->rsp            = 0;
 
-    if (!build_initial_stack(t, entry)) {
+    if (!build_initial_stack(t, entry, arg)) {
         k64_pmm_free_frame(t);
         return NULL;
     }
@@ -145,11 +174,17 @@ k64_task_t* k64_task_create_ex(void (*entry)(void), int priority) {
     return t;
 }
 
+k64_task_t* k64_task_create_ex(void (*entry)(void), int priority) {
+    return k64_task_create_arg((void (*)(void*))entry, NULL, priority, 0);
+}
+
 k64_task_t* k64_task_create(void (*entry)(void)) {
     return k64_task_create_ex(entry, 1);
 }
 
 static uint64_t pick_next_rsp(void) {
+    uint64_t target_cr3;
+
     if (!current_task || !current_task->next) {
         return current_task ? current_task->rsp : 0;
     }
@@ -167,10 +202,19 @@ static uint64_t pick_next_rsp(void) {
             break;
         }
         if (candidate == current_task) {
+            if (current_task->state != K64_TASK_STATE_RUNNING) {
+                current_task = task_list;
+                current_task->state = K64_TASK_STATE_RUNNING;
+                current_task->remaining_ticks = current_task->base_timeslice;
+            }
             break;
         }
     }
 
+    target_cr3 = current_task->cr3 ? current_task->cr3 : read_cr3();
+    if (target_cr3 != read_cr3()) {
+        write_cr3(target_cr3);
+    }
     return current_task->rsp;
 }
 
@@ -206,6 +250,23 @@ void k64_sched_yield(void) {
     if (current_task) {
         current_task->remaining_ticks = 0;
     }
+}
+
+void k64_sched_sleep(uint64_t ticks) {
+    if (!current_task || current_task->id == 0) {
+        return;
+    }
+    current_task->sleep_until_tick = k64_pit_get_ticks() + (ticks ? ticks : 1);
+    current_task->state = K64_TASK_STATE_BLOCKED;
+    current_task->remaining_ticks = 0;
+}
+
+void k64_task_stop(k64_task_t* task) {
+    if (!task || task->id == 0) {
+        return;
+    }
+    task->state = K64_TASK_STATE_ZOMBIE;
+    task->remaining_ticks = 0;
 }
 
 k64_task_t* k64_sched_current_task(void) {

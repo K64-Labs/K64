@@ -1,4 +1,4 @@
 name=hello-driver
+kind=elf
 type=driver
-source=elf
 entry=/ex/hello.elf

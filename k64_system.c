@@ -1,4 +1,5 @@
 // k64_system.c – service registry and built-in service management
+#include "k64_artifact.h"
 #include "k64_system.h"
 #include "k64_elf.h"
 #include "k64_fs.h"
@@ -32,6 +33,31 @@ static k64_rootfs_service_ctx_t rootfs_ctx[K64_MAX_SERVICES];
 static size_t rootfs_ctx_count = 0;
 
 static void default_stop(k64_service_t* service);
+static void service_worker_main(void* arg);
+
+static bool service_runs_unisolated(k64_service_t* service) {
+    return service && k64_streq(service->name, "init");
+}
+
+static uint64_t call_in_service_space(k64_service_t* service,
+                                      void* fn,
+                                      uint64_t arg0,
+                                      uint64_t arg1,
+                                      uint64_t arg2) {
+    typedef uint64_t (*k64_call3_fn)(uint64_t, uint64_t, uint64_t);
+
+    if (!service || !fn) {
+        return 0;
+    }
+    if (!service->vm_space.present || service->managed_pid == 0 || service_runs_unisolated(service)) {
+        return ((k64_call3_fn)fn)(arg0, arg1, arg2);
+    }
+    return k64_vmm_call_isolated(&service->vm_space,
+                                 (uint64_t)(uintptr_t)fn,
+                                 arg0,
+                                 arg1,
+                                 arg2);
+}
 
 static void copy_string(char* dst, size_t dst_size, const char* src) {
     size_t i = 0;
@@ -68,63 +94,20 @@ static bool has_suffix(const char* text, const char* suffix) {
     return k64_streq(text + text_len - suffix_len, suffix);
 }
 
-static void append_string(char* dst, size_t dst_size, const char* src) {
+static void build_rootfs_path(char* dst, size_t dst_size, const char* dir, const char* name) {
     size_t pos = 0;
-    size_t i = 0;
 
     if (!dst || dst_size == 0) {
         return;
     }
 
-    while (dst[pos] && pos + 1 < dst_size) {
-        pos++;
+    while (dir && *dir && pos + 1 < dst_size) {
+        dst[pos++] = *dir++;
     }
-    while (src && src[i] && pos + 1 < dst_size) {
-        dst[pos++] = src[i++];
+    while (name && *name && pos + 1 < dst_size) {
+        dst[pos++] = *name++;
     }
     dst[pos] = '\0';
-}
-
-static bool manifest_get_value(const char* text, const char* key, char* out, int out_size) {
-    int key_len = 0;
-    const char* p = text;
-
-    if (!text || !key || !out || out_size <= 0) {
-        return false;
-    }
-    while (key[key_len]) {
-        key_len++;
-    }
-
-    while (*p) {
-        int i = 0;
-
-        while (p[i] && p[i] != '\n' && i < key_len) {
-            if (p[i] != key[i]) {
-                break;
-            }
-            i++;
-        }
-        if (i == key_len && p[i] == '=') {
-            int j = 0;
-            p += i + 1;
-            while (p[j] && p[j] != '\n' && j + 1 < out_size) {
-                out[j] = p[j];
-                j++;
-            }
-            out[j] = '\0';
-            return true;
-        }
-        while (*p && *p != '\n') {
-            p++;
-        }
-        if (*p == '\n') {
-            p++;
-        }
-    }
-
-    out[0] = '\0';
-    return false;
 }
 
 static bool rootfs_service_start(k64_service_t* service) {
@@ -136,26 +119,11 @@ static bool rootfs_service_start(k64_service_t* service) {
     return k64_elf_execute_path(ctx->entry_path);
 }
 
-static k64_service_class_t parse_service_class(const char* text) {
-    if (k64_streq(text, "root")) {
-        return K64_SERVICE_CLASS_ROOT;
-    }
-    if (k64_streq(text, "user")) {
-        return K64_SERVICE_CLASS_USER;
-    }
-    return K64_SERVICE_CLASS_SYSTEM;
-}
-
 static bool rootfs_k64s_cb(const char* name, bool is_dir, void* ctx) {
     char path[96];
-    char manifest[512];
-    char manifest_name[32];
-    char manifest_class[24];
-    char manifest_source[24];
-    char manifest_entry[64];
-    char manifest_autostart[8];
-    char manifest_async[8];
-    uint32_t flags = 0;
+    const uint8_t* data = NULL;
+    size_t size = 0;
+    const k64_service_file_t* file;
     k64_rootfs_service_ctx_t* slot;
 
     (void)ctx;
@@ -166,34 +134,22 @@ static bool rootfs_k64s_cb(const char* name, bool is_dir, void* ctx) {
         return true;
     }
 
-    copy_string(path, sizeof(path), "/k64s/");
-    append_string(path, sizeof(path), name);
-    if (!k64_fs_cat(path, manifest, sizeof(manifest))) {
+    build_rootfs_path(path, sizeof(path), "/k64s/", name);
+    if (!k64_fs_read_file_raw(path, &data, &size) || !data || size < sizeof(k64_service_file_t)) {
         return true;
     }
-    manifest_get_value(manifest, "source", manifest_source, sizeof(manifest_source));
-    if (k64_streq(manifest_source, "builtin")) {
+    file = (const k64_service_file_t*)data;
+    if (file->magic != K64_SYSTEM_MAGIC || file->version != K64_ARTIFACT_VERSION) {
         return true;
     }
-    if (!manifest_get_value(manifest, "entry", manifest_entry, sizeof(manifest_entry)) || !manifest_entry[0]) {
+    if (file->exec_kind == K64_ARTIFACT_EXEC_BUILTIN) {
         return true;
     }
-    if (!manifest_get_value(manifest, "name", manifest_name, sizeof(manifest_name)) || !manifest_name[0]) {
+    if (file->exec_kind != K64_ARTIFACT_EXEC_ELF || !file->name[0] || !file->entry_path[0]) {
         return true;
     }
-    if (k64_system_find_service_by_name(manifest_name)) {
+    if (k64_system_find_service_by_name(file->name)) {
         return true;
-    }
-
-    manifest_get_value(manifest, "class", manifest_class, sizeof(manifest_class));
-    manifest_get_value(manifest, "autostart", manifest_autostart, sizeof(manifest_autostart));
-    manifest_get_value(manifest, "async", manifest_async, sizeof(manifest_async));
-
-    if (manifest_autostart[0] == '1') {
-        flags |= K64_SERVICE_FLAG_AUTOSTART;
-    }
-    if (manifest_async[0] == '1') {
-        flags |= K64_SERVICE_FLAG_ASYNC;
     }
 
     if (rootfs_ctx_count >= K64_MAX_SERVICES) {
@@ -201,20 +157,20 @@ static bool rootfs_k64s_cb(const char* name, bool is_dir, void* ctx) {
     }
 
     slot = &rootfs_ctx[rootfs_ctx_count++];
-    copy_string(slot->entry_path, sizeof(slot->entry_path), manifest_entry);
-    if (k64_system_register_service(manifest_name,
+    copy_string(slot->entry_path, sizeof(slot->entry_path), file->entry_path);
+    if (k64_system_register_service(file->name,
                                     path,
-                                    parse_service_class(manifest_class),
-                                    flags,
-                                    1,
-                                    0,
+                                    (k64_service_class_t)file->class_id,
+                                    file->flags,
+                                    file->priority,
+                                    file->poll_interval_ticks,
                                     true,
                                     rootfs_service_start,
                                     default_stop,
                                     NULL,
                                     slot)) {
         k64_term_write("  Rootfs K64S service registered: ");
-        k64_term_write(manifest_name);
+        k64_term_write(file->name);
         k64_term_putc('\n');
     }
     return true;
@@ -249,14 +205,46 @@ static void default_stop(k64_service_t* service) {
     (void)service;
 }
 
+static void service_worker_main(void* arg) {
+    k64_service_t* service = (k64_service_t*)arg;
+
+    if (!service) {
+        return;
+    }
+
+    for (;;) {
+        uint64_t now;
+        uint64_t sleep_ticks;
+
+        if (service->state != K64_SERVICE_STATE_RUNNING) {
+            return;
+        }
+
+        now = k64_pit_get_ticks();
+        if (service->poll) {
+            service->last_poll_tick = now;
+            service->poll(service, now);
+        }
+
+        if (service->state != K64_SERVICE_STATE_RUNNING) {
+            return;
+        }
+
+        sleep_ticks = service->poll_interval_ticks ? service->poll_interval_ticks : 1;
+        k64_sched_sleep(sleep_ticks);
+    }
+}
+
 static bool perform_start(k64_service_t* service) {
+    k64_task_t* task = NULL;
+
     if (!service->start) {
         return false;
     }
     if (!service->vm_space.present && !k64_vmm_alloc_service_space(service->managed_pid, &service->vm_space)) {
         return false;
     }
-    if (!service->start(service)) {
+    if (call_in_service_space(service, (void*)service->start, (uint64_t)(uintptr_t)service, 0, 0) == 0) {
         k64_vmm_release_service_space(&service->vm_space);
         return false;
     }
@@ -264,6 +252,21 @@ static bool perform_start(k64_service_t* service) {
     service->start_count++;
     service->last_start_tick = k64_pit_get_ticks();
     service->last_poll_tick = service->last_start_tick;
+    service->task = NULL;
+
+    if ((service->flags & K64_SERVICE_FLAG_ASYNC) != 0 && service->poll) {
+        task = k64_task_create_arg(service_worker_main,
+                                   service,
+                                   (int)service->priority,
+                                   service->vm_space.cr3);
+        if (!task) {
+            service->state = K64_SERVICE_STATE_STOPPED;
+            k64_system_unregister_commands(service->name);
+            k64_vmm_release_service_space(&service->vm_space);
+            return false;
+        }
+        service->task = task;
+    }
     return true;
 }
 
@@ -273,7 +276,11 @@ static void perform_stop(k64_service_t* service) {
     }
 
     if (service->stop) {
-        service->stop(service);
+        (void)call_in_service_space(service, (void*)service->stop, (uint64_t)(uintptr_t)service, 0, 0);
+    }
+    if (service->task) {
+        k64_task_stop(service->task);
+        service->task = NULL;
     }
     service->state = K64_SERVICE_STATE_STOPPED;
     service->stop_count++;
@@ -363,6 +370,7 @@ void k64_system_registry_init(void) {
         services[i].stop = NULL;
         services[i].poll = NULL;
         services[i].vm_space.present = false;
+        services[i].task = NULL;
         services[i].context = NULL;
         rootfs_ctx[i].entry_path[0] = '\0';
     }
@@ -416,6 +424,7 @@ k64_service_t* k64_system_register_service(const char* name,
     service->stop = stop ? stop : default_stop;
     service->poll = poll;
     service->vm_space.present = false;
+    service->task = NULL;
     service->context = context;
 
     return service;
@@ -501,27 +510,7 @@ void k64_system_soft_reload_runtime(uint64_t preserve_pid) {
 }
 
 void k64_system_poll_async(void) {
-    uint64_t now = k64_pit_get_ticks();
-
-    for (size_t i = 0; i < service_count; ++i) {
-        k64_service_t* service = &services[i];
-        if (service->state != K64_SERVICE_STATE_RUNNING) {
-            continue;
-        }
-        if ((service->flags & K64_SERVICE_FLAG_ASYNC) == 0) {
-            continue;
-        }
-        if (!service->poll) {
-            continue;
-        }
-        if (service->poll_interval_ticks != 0 &&
-            (now - service->last_poll_tick) < service->poll_interval_ticks) {
-            continue;
-        }
-
-        service->last_poll_tick = now;
-        service->poll(service, now);
-    }
+    /* Async services are scheduled as worker tasks now. */
 }
 
 size_t k64_system_service_count(void) {
@@ -676,10 +665,20 @@ void k64_system_unregister_commands(const char* owner) {
 
 bool k64_system_dispatch_command(const char* command, const char* args) {
     for (size_t i = 0; i < K64_MAX_SERVICE_COMMANDS; ++i) {
+        k64_service_t* owner;
+
         if (!service_commands[i].active || !service_commands[i].handler) {
             continue;
         }
         if (k64_streq(service_commands[i].name, command)) {
+            owner = k64_system_find_service_by_name(service_commands[i].owner);
+            if (owner && owner->state == K64_SERVICE_STATE_RUNNING) {
+                return call_in_service_space(owner,
+                                             (void*)service_commands[i].handler,
+                                             (uint64_t)(uintptr_t)command,
+                                             (uint64_t)(uintptr_t)args,
+                                             0) != 0;
+            }
             return service_commands[i].handler(command, args);
         }
     }

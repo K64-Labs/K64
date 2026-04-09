@@ -1,3 +1,0 @@
-name=servicectl
-type=service
-source=builtin

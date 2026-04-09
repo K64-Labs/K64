@@ -191,7 +191,7 @@ static void shell_print_help(void) {
     k64_term_write("  usermod groupadd groupdel gpasswd - manage roles and groups\n");
     k64_term_write("  reboot           - reboot the machine\n");
     k64_term_write("  shutdown         - power down the machine\n");
-    k64_term_write("  pwd ls cd mkdir touch write cat - filesystem commands from fsctl\n");
+    k64_term_write("  pwd ls cd mkdir touch write append cat stat rm rmdir mv cp - filesystem commands from fsctl\n");
     k64_term_write("  yield            - give up the current timeslice\n");
     k64_term_write("  panic            - trigger kernel panic\n");
 }
