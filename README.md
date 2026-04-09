@@ -1152,14 +1152,30 @@ K64 now splits versioning into:
 
 The build script `tools/gen_k64_version.py` computes the patch number as:
 
-- `git rev-list --count HEAD`
+- `git rev-list --count HEAD -- <tracked-kernel-paths>`
 - minus `K64_VERSION_PATCH_BASE_COUNT`
 - plus `1` when the working tree is dirty
 
 That means:
 
 - normal ongoing work in the `0.2.x` line advances automatically
+- only changes in kernel/runtime paths count toward the patch number
+- changes limited to repo housekeeping like `.github`, tests, or tooling do not bump the kernel version
 - a deliberate series jump like `0.3.0` is done by changing `K64_VERSION_MAJOR` / `K64_VERSION_MINOR` and resetting `K64_VERSION_PATCH_BASE_COUNT` to the current commit count
+
+The tracked kernel/runtime scope currently includes:
+
+- top-level kernel and boot sources: `*.c`, `*.h`, `*.s`, `*.S`
+- `linker.ld`
+- `k64m/`
+- `k64s/`
+- `ex/`
+- `grub/`
+- `rootfs/`
+
+Explicit exclusions from that scope:
+
+- `k64_version.h`, because it controls the release baseline rather than kernel behavior
 
 The generated full version is then used to name the kernel image automatically:
 

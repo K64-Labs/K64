@@ -7,6 +7,25 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION_HEADER = ROOT / "k64_version.h"
+TRACKED_PATHS = [
+    "*.c",
+    "*.h",
+    "*.s",
+    "*.S",
+    "linker.ld",
+    "k64m",
+    "k64s",
+    "ex",
+    "grub",
+    "rootfs",
+]
+EXCLUDED_PATHS = [
+    "k64_version.h",
+    "build",
+    "iso",
+    "k64.iso",
+    ".k64_boot.log",
+]
 
 
 def read_macro(name: str) -> int:
@@ -30,12 +49,26 @@ def git_stdout(*args: str) -> str:
 
 
 def git_commit_count() -> int:
-    out = git_stdout("rev-list", "--count", "HEAD")
+    out = git_stdout(
+        "rev-list",
+        "--count",
+        "HEAD",
+        "--",
+        *TRACKED_PATHS,
+        *(f":(exclude){path}" for path in EXCLUDED_PATHS),
+    )
     return int(out) if out.isdigit() else 0
 
 
 def git_dirty() -> bool:
-    out = git_stdout("status", "--porcelain")
+    out = git_stdout(
+        "status",
+        "--porcelain",
+        "--untracked-files=normal",
+        "--",
+        *TRACKED_PATHS,
+        *(f":(exclude){path}" for path in EXCLUDED_PATHS),
+    )
     return bool(out)
 
 
