@@ -6,3 +6,5 @@ iso/
 build/
 *.log
 tests/.shell_cmd_test
+tests/.string_test
+tests/.fs_unit_test

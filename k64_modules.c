@@ -33,6 +33,7 @@ static k64_rootfs_driver_ctx_t rootfs_ctx[K64_MAX_DRIVERS];
 static size_t rootfs_ctx_count = 0;
 
 static void default_driver_stop(k64_driver_t* driver);
+static void driver_worker_main(void* arg);
 
 static void copy_string(char* dst, size_t dst_size, const char* src) {
     size_t i = 0;
@@ -76,6 +77,30 @@ static bool default_driver_start(k64_driver_t* driver) {
 
 static void default_driver_stop(k64_driver_t* driver) {
     (void)driver;
+}
+
+static void driver_worker_main(void* arg) {
+    k64_driver_t* driver = (k64_driver_t*)arg;
+
+    if (!driver) {
+        return;
+    }
+
+    for (;;) {
+        uint64_t now;
+        if (driver->state != K64_DRIVER_STATE_RUNNING) {
+            return;
+        }
+        now = k64_pit_get_ticks();
+        if (driver->poll) {
+            driver->last_poll_tick = now;
+            driver->poll(driver, now);
+        }
+        if (driver->state != K64_DRIVER_STATE_RUNNING) {
+            return;
+        }
+        k64_sched_sleep(1);
+    }
 }
 
 static bool external_driver_start(k64_driver_t* driver) {
@@ -171,6 +196,8 @@ static bool rootfs_k64m_cb(const char* name, bool is_dir, void* ctx) {
 }
 
 static bool perform_driver_start(k64_driver_t* driver) {
+    k64_task_t* task = NULL;
+
     if (!driver || !driver->start) {
         return false;
     }
@@ -182,12 +209,25 @@ static bool perform_driver_start(k64_driver_t* driver) {
     driver->start_count++;
     driver->last_start_tick = k64_pit_get_ticks();
     driver->last_poll_tick = driver->last_start_tick;
+    driver->task = NULL;
+    if ((driver->flags & K64_MODULE_FLAG_ASYNC) != 0 && driver->poll) {
+        task = k64_task_create_arg(driver_worker_main, driver, (int)driver->priority, 0);
+        if (!task) {
+            driver->state = K64_DRIVER_STATE_STOPPED;
+            return false;
+        }
+        driver->task = task;
+    }
     return true;
 }
 
 static void perform_driver_stop(k64_driver_t* driver) {
     if (!driver) {
         return;
+    }
+    if (driver->task) {
+        k64_task_stop(driver->task);
+        driver->task = NULL;
     }
     if (driver->stop) {
         driver->stop(driver);
@@ -279,6 +319,7 @@ void k64_modules_registry_init(void) {
         drivers[i].start = NULL;
         drivers[i].stop = NULL;
         drivers[i].poll = NULL;
+        drivers[i].task = NULL;
         drivers[i].context = NULL;
         external_ctx[i].entry_addr = 0;
         rootfs_ctx[i].entry_path[0] = '\0';
@@ -322,6 +363,7 @@ k64_driver_t* k64_modules_register_driver(const char* name,
     driver->start = start ? start : default_driver_start;
     driver->stop = stop ? stop : default_driver_stop;
     driver->poll = poll;
+    driver->task = NULL;
     driver->context = context;
 
     return driver;
@@ -363,19 +405,7 @@ void k64_modules_load_rootfs(void) {
 }
 
 void k64_modules_poll_async(void) {
-    uint64_t now = k64_pit_get_ticks();
-
-    for (size_t i = 0; i < driver_count; ++i) {
-        k64_driver_t* driver = &drivers[i];
-        if (driver->state != K64_DRIVER_STATE_RUNNING) {
-            continue;
-        }
-        if ((driver->flags & K64_MODULE_FLAG_ASYNC) == 0 || !driver->poll) {
-            continue;
-        }
-        driver->last_poll_tick = now;
-        driver->poll(driver, now);
-    }
+    /* Async drivers are scheduled as worker tasks now. */
 }
 
 void k64_modules_reload_all(void) {

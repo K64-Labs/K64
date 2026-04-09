@@ -13,6 +13,9 @@ typedef enum {
 typedef struct k64_task {
     uint64_t         id;
     uint64_t         rsp;
+    uint64_t         cr3;
+    uint64_t         sleep_until_tick;
+    uint64_t         stack_frame;
     k64_task_state_t state;
     int              priority;
     uint32_t         base_timeslice;
@@ -25,7 +28,10 @@ typedef struct k64_task {
 void        k64_sched_init(void);
 k64_task_t* k64_task_create(void (*entry)(void));
 k64_task_t* k64_task_create_ex(void (*entry)(void), int priority);
+k64_task_t* k64_task_create_arg(void (*entry)(void*), void* arg, int priority, uint64_t cr3);
 uint64_t    k64_sched_handle_timer(uint64_t old_rsp);
 void        k64_sched_yield(void);
+void        k64_sched_sleep(uint64_t ticks);
+void        k64_task_stop(k64_task_t* task);
 k64_task_t* k64_sched_current_task(void);
 void        k64_sched_dump_stats(void);

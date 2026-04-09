@@ -93,10 +93,10 @@ The current paging setup is deliberately minimal. It is enough to enter long mod
 18. `sti`
 19. entry into the runtime dispatcher loop
 
-Once that loop starts, the kernel does not run a foreground shell loop of its own. Instead, it repeatedly:
+Once that loop starts, the kernel does not run a foreground shell loop of its own. Instead, it:
 
-- polls async drivers with `k64_modules_poll_async()`
-- polls async services with `k64_system_poll_async()`
+- lets the PIT drive the scheduler
+- runs async drivers and services as scheduled worker tasks
 - halts until the next interrupt with `hlt`
 
 This is the central design choice in the current codebase: the kernel owns bootstrapping, interrupt/timer infrastructure, memory allocators, and registries, but command behavior is mostly delegated outward.
@@ -238,11 +238,13 @@ Files:
 - `k64_sched.c`
 - `k64_sched.h`
 
-The scheduler exists and is initialized, but the current architecture is not using it as a full process scheduler in the usual OS sense. The important practical point is:
+The scheduler now drives runtime work more directly than before. The important practical point is:
 
-- K64’s visible runtime work is driven primarily through the async driver/service poll loops, not through independent preemptively isolated user processes
+- async services and async drivers are launched as worker tasks
+- worker tasks can yield or sleep on PIT ticks
+- timer IRQs perform round-robin task switching across runnable contexts
 
-That matters for expectations. The scheduler is part of the codebase and exposes debug information, but the system’s current service model is mostly cooperative and registry-driven.
+That still does not make K64 a full Unix-style process runtime. It remains a small kernel with cooperative service logic and a simple round-robin scheduler, not a full fork/exec/process-tree model.
 
 ### Physical memory management
 
@@ -274,7 +276,7 @@ Files:
 - `k64_vmm.c`
 - `k64_vmm.h`
 
-The VMM is currently a reservation layer, not a full isolation layer.
+The VMM now provides real per-space page tables for services and ELF-backed executables.
 
 What it does:
 
@@ -282,13 +284,17 @@ What it does:
 - assigns a root virtual range
 - assigns a heap window
 - assigns a stack window
-- allocates backing physical frames for the stack reservation
+- clones the kernel bootstrap mapping into a private `CR3`
+- maps a private stack into that service space
+- executes service callbacks and service-owned command handlers under the owning `CR3`
+- maps ELF PT_LOAD segments into temporary isolated executable spaces
 
 What it does not do:
 
-- create per-service page tables
-- switch `CR3` between services
-- isolate services into distinct virtual address spaces
+- move code into ring 3
+- provide copy-on-write or demand paging
+- provide a user-mode system-call ABI
+- fully remove the shared low identity-mapped kernel region
 
 The main constants today are:
 
@@ -298,7 +304,7 @@ The main constants today are:
 - heap size: `0x00100000`
 - stack size: `0x00008000`
 
-So when `servicectl list` shows a “VM BASE”, it is showing a reserved slot, not proof of full process-style memory isolation.
+So when `servicectl list` shows a “VM BASE”, it now refers to a real isolated service window backed by a private address space. The remaining boundary is that K64 still executes everything in ring 0 and shares the low identity-mapped kernel region.
 
 ## Driver Model (`.k64m`)
 
@@ -336,7 +342,7 @@ Driver lifecycle:
 2. built-in drivers are registered
 3. external Multiboot modules with a valid `K64M` header are scanned and registered
 4. autostart drivers are started during bootstrap
-5. async drivers are polled in the dispatcher loop
+5. async drivers are launched as scheduled worker tasks
 
 ### Built-in vs native-loaded `.k64m`
 
@@ -454,6 +460,8 @@ Important runtime functions:
 - `k64_system_bootstrap()`
 - `k64_system_poll_async()`
 
+`k64_system_poll_async()` now exists mostly as a compatibility stub because async services are scheduled as worker tasks rather than polled from the idle loop.
+
 Bootstrap behavior today:
 
 1. autostart services are started
@@ -485,7 +493,7 @@ What they do:
 - `servicectl`: service management command surface
 - `driverctl`: driver management command surface
 - `reload`: runtime reload request surface
-- `fsctl`: filesystem command surface
+- `fsctl`: read/write filesystem command surface
 - `userctl`: user/session/privilege command surface
 - `sysfetch`: system information surface
 - `uname`: kernel identity surface
@@ -669,8 +677,15 @@ Mutations such as:
 - `mkdir`
 - `touch`
 - `write`
+- `append`
+- `rm`
+- `rmdir`
+- `mv`
+- `cp`
 
 cause the in-memory node table to be repacked into a fresh `K64FS` image in RAM through `fs_writeback_image()`.
+
+That means `K64FS` now behaves as a normal read/write filesystem for everyday shell usage, not just a static system-image mount. Files and directories can be created, modified, moved, copied, inspected, and removed through the `fsctl` command surface.
 
 This is real writeback into the mounted image representation, but it is still only in memory. It does not currently flush to a persistent block device, so changes do not survive reboot unless the underlying boot image itself changes.
 
@@ -991,7 +1006,7 @@ It also exposes service-owned commands, including:
 When you enter a command, the shell:
 
 1. parses built-ins it owns directly
-2. asks the service command registry whether a running service owns the command
+2. asks the service command registry whether a running service owns the command, then runs that handler in the owning service address space
 3. if still unresolved, tries to start a service or driver by that name
 4. if still unresolved, tries `/ex/<command>.elf`
 
@@ -1015,20 +1030,19 @@ What it supports today:
 - `ET_EXEC` and `ET_DYN`
 - x86_64 machine type
 - `PT_LOAD` program headers
-- loading all PT_LOAD segments into one contiguous PMM-backed image
+- mapping PT_LOAD segments into a private executable address space
 - zero-filling BSS tails
-- calling the entrypoint as `int (*)(void)`
+- calling the entrypoint as `int (*)(void)` under an isolated `CR3` and private stack
 
 How execution works:
 
 1. `k64_fs_read_file_raw()` exposes the file bytes from `K64FS`
 2. `k64_elf_execute_path()` validates the ELF header and program-header table
-3. the loader computes the minimal virtual span across PT_LOAD segments
-4. it allocates contiguous frames from the PMM
-5. it copies each segment into the in-memory image
-6. it computes the entrypoint relative to the loaded image base
-7. it calls the entrypoint directly
-8. when the function returns, the loader prints the exit code and frees the image
+3. the loader allocates a temporary isolated VM space
+4. it maps each PT_LOAD segment into that space at the ELF virtual address
+5. it switches into the executable `CR3` and private stack
+6. it calls the entrypoint directly
+7. when the function returns, the loader prints the exit code and frees the temporary address space
 
 Important limits:
 
@@ -1306,9 +1320,9 @@ In practical terms:
 
 These are the main technical limits of the repository as it exists today.
 
-### 1. Virtual memory is not full process isolation
+### 1. Virtual memory is isolated by address space, but not by privilege level
 
-Services get reserved VM windows and stack backing frames, but they do not get separate page tables or true address-space isolation.
+Services and ELF-backed executables now get separate page tables and private stacks, but K64 still runs them in ring 0 and still shares the low identity-mapped kernel region. That is real address-space separation for service/app-private mappings, but it is not yet a hardened user/kernel security boundary.
 
 ### 2. Filesystem writeback is in-memory only
 

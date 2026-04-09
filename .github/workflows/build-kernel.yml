@@ -43,24 +43,12 @@ jobs:
       run: |
         git clone --depth 1 https://git.savannah.gnu.org/git/grub.git /tmp/grub-src
 
-    - name: Build K64 ISO
+    - name: Build and test K64
       env:
         GRUB_SRC: /tmp/grub-src
       run: |
         make clean
-        make k64.iso
-
-    - name: Run shell command tests
-      run: |
-        bash tests/run_shell_cmd_tests.sh
-
-    - name: Run GRUB config checks
-      run: |
-        bash tests/check_grub_cfg.sh
-
-    - name: Run boot smoke test
-      run: |
-        bash tests/boot_smoke_test.sh
+        make test
 
     - name: Upload build artifacts
       if: always()

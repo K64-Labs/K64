@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "k64_multiboot.h"
+#include "k64_sched.h"
 #include "k64_vmm.h"
 
 #define K64_SYSTEM_MAGIC 0x4B363453  /* "K64S" */
@@ -72,6 +73,7 @@ typedef struct k64_service {
     k64_service_stop_fn  stop;
     k64_service_poll_fn  poll;
     k64_vm_space_t       vm_space;
+    k64_task_t*          task;
     void*                context;
 } k64_service_t;
 

@@ -3,8 +3,8 @@
 #include <stdint.h>
 #include "k64_fs.h"
 #include "k64_log.h"
-#include "k64_pmm.h"
 #include "k64_terminal.h"
+#include "k64_vmm.h"
 
 #define K64_ELF64 2
 #define K64_ELF_LITTLE 1
@@ -42,24 +42,8 @@ typedef struct {
     uint64_t p_align;
 } __attribute__((packed)) k64_elf64_phdr_t;
 
-static uint64_t elf_align_down(uint64_t value, uint64_t align) {
-    return value & ~(align - 1ULL);
-}
-
 static uint64_t elf_align_up(uint64_t value, uint64_t align) {
     return (value + align - 1ULL) & ~(align - 1ULL);
-}
-
-static void elf_zero(uint8_t* dst, size_t size) {
-    for (size_t i = 0; i < size; ++i) {
-        dst[i] = 0;
-    }
-}
-
-static void elf_copy(uint8_t* dst, const uint8_t* src, size_t size) {
-    for (size_t i = 0; i < size; ++i) {
-        dst[i] = src[i];
-    }
 }
 
 bool k64_elf_execute_path(const char* path) {
@@ -69,10 +53,8 @@ bool k64_elf_execute_path(const char* path) {
     const k64_elf64_phdr_t* phdrs;
     uint64_t min_vaddr = UINT64_MAX;
     uint64_t max_vaddr = 0;
-    uint64_t image_size;
-    size_t frame_count;
-    uint8_t* image;
-    int (*entry_fn)(void);
+    k64_vm_space_t app_space;
+    static uint64_t next_ephemeral_pid = 0x100000000ULL;
     int rc;
 
     if (!path || !path[0]) {
@@ -111,7 +93,7 @@ bool k64_elf_execute_path(const char* path) {
             K64_LOG_WARN("ELF: segment exceeds file.");
             return false;
         }
-        seg_start = elf_align_down(ph->p_vaddr, K64_ELF_PAGE);
+        seg_start = ph->p_vaddr & ~(K64_ELF_PAGE - 1ULL);
         seg_end = elf_align_up(ph->p_vaddr + ph->p_memsz, K64_ELF_PAGE);
         if (seg_start < min_vaddr) {
             min_vaddr = seg_start;
@@ -126,35 +108,35 @@ bool k64_elf_execute_path(const char* path) {
         return false;
     }
 
-    image_size = max_vaddr - min_vaddr;
-    frame_count = (size_t)(image_size / K64_ELF_PAGE);
-    image = (uint8_t*)k64_pmm_alloc_contiguous(frame_count);
-    if (!image) {
+    if (!k64_vmm_alloc_service_space(next_ephemeral_pid++, &app_space)) {
         K64_LOG_WARN("ELF: allocation failed.");
         return false;
     }
-    elf_zero(image, (size_t)image_size);
 
     for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
         const k64_elf64_phdr_t* ph = &phdrs[i];
-        uint64_t rel_off;
 
         if (ph->p_type != K64_PT_LOAD || ph->p_memsz == 0) {
             continue;
         }
-        rel_off = ph->p_vaddr - min_vaddr;
-        elf_copy(image + rel_off, file_data + ph->p_offset, (size_t)ph->p_filesz);
+        if (!k64_vmm_map_private_range(&app_space,
+                                       ph->p_vaddr,
+                                       file_data + ph->p_offset,
+                                       (size_t)ph->p_filesz,
+                                       (size_t)ph->p_memsz)) {
+            K64_LOG_WARN("ELF: segment mapping failed.");
+            k64_vmm_release_service_space(&app_space);
+            return false;
+        }
     }
 
-    entry_fn = (int (*)(void))(void*)(image + (ehdr->e_entry - min_vaddr));
     k64_term_write("ELF: executing ");
     k64_term_write(path);
     k64_term_putc('\n');
-    rc = entry_fn();
+    rc = (int)k64_vmm_call_isolated(&app_space, ehdr->e_entry, 0, 0, 0);
     k64_term_write("ELF: exit code ");
     k64_term_write_dec((uint64_t)(uint32_t)rc);
     k64_term_putc('\n');
-
-    k64_pmm_free_contiguous(image, frame_count);
+    k64_vmm_release_service_space(&app_space);
     return true;
 }

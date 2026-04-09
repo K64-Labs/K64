@@ -175,7 +175,7 @@ static bool k64cc_build_stub_elf(const char* path) {
     svc_write_u16le(elf, 16, 2);
     svc_write_u16le(elf, 18, 62);
     svc_write_u32le(elf, 20, 1);
-    svc_write_u64le(elf, 24, 0x400078ULL);
+    svc_write_u64le(elf, 24, 0x50000078ULL);
     svc_write_u64le(elf, 32, 64);
     svc_write_u64le(elf, 40, 0);
     svc_write_u32le(elf, 48, 0);
@@ -189,8 +189,8 @@ static bool k64cc_build_stub_elf(const char* path) {
     svc_write_u32le(elf, 64, 1);
     svc_write_u32le(elf, 68, 5);
     svc_write_u64le(elf, 72, 0);
-    svc_write_u64le(elf, 80, 0x400000ULL);
-    svc_write_u64le(elf, 88, 0x400000ULL);
+    svc_write_u64le(elf, 80, 0x50000000ULL);
+    svc_write_u64le(elf, 88, 0x50000000ULL);
     svc_write_u64le(elf, 96, sizeof(elf));
     svc_write_u64le(elf, 104, sizeof(elf));
     svc_write_u64le(elf, 112, 0x1000ULL);
@@ -863,6 +863,147 @@ static bool fsctl_write_handler(const char* command, const char* args) {
     return true;
 }
 
+static bool fsctl_append_handler(const char* command, const char* args) {
+    char path[64];
+    const char* rest;
+    (void)command;
+
+    if (!args || !args[0]) {
+        fsctl_print("append failed");
+        return true;
+    }
+    rest = args;
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    {
+        int i = 0;
+        while (*rest && *rest != ' ' && *rest != '\t' && i + 1 < (int)sizeof(path)) {
+            path[i++] = *rest++;
+        }
+        path[i] = '\0';
+    }
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    if (!path[0] || !k64_fs_append_file(path, rest)) {
+        fsctl_print("append failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_rm_handler(const char* command, const char* args) {
+    (void)command;
+    if (!args || !args[0] || !k64_fs_remove(args)) {
+        fsctl_print("rm failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_rmdir_handler(const char* command, const char* args) {
+    (void)command;
+    if (!args || !args[0] || !k64_fs_rmdir(args)) {
+        fsctl_print("rmdir failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_mv_handler(const char* command, const char* args) {
+    char src[64];
+    char dst[64];
+    const char* rest;
+    (void)command;
+
+    if (!args || !args[0]) {
+        fsctl_print("mv failed");
+        return true;
+    }
+    rest = args;
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    {
+        int i = 0;
+        while (*rest && *rest != ' ' && *rest != '\t' && i + 1 < (int)sizeof(src)) {
+            src[i++] = *rest++;
+        }
+        src[i] = '\0';
+    }
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    {
+        int i = 0;
+        while (*rest && *rest != ' ' && *rest != '\t' && i + 1 < (int)sizeof(dst)) {
+            dst[i++] = *rest++;
+        }
+        dst[i] = '\0';
+    }
+    if (!src[0] || !dst[0] || !k64_fs_move(src, dst)) {
+        fsctl_print("mv failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_cp_handler(const char* command, const char* args) {
+    char src[64];
+    char dst[64];
+    const char* rest;
+    (void)command;
+
+    if (!args || !args[0]) {
+        fsctl_print("cp failed");
+        return true;
+    }
+    rest = args;
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    {
+        int i = 0;
+        while (*rest && *rest != ' ' && *rest != '\t' && i + 1 < (int)sizeof(src)) {
+            src[i++] = *rest++;
+        }
+        src[i] = '\0';
+    }
+    while (*rest == ' ' || *rest == '\t') {
+        rest++;
+    }
+    {
+        int i = 0;
+        while (*rest && *rest != ' ' && *rest != '\t' && i + 1 < (int)sizeof(dst)) {
+            dst[i++] = *rest++;
+        }
+        dst[i] = '\0';
+    }
+    if (!src[0] || !dst[0] || !k64_fs_copy(src, dst)) {
+        fsctl_print("cp failed");
+        return true;
+    }
+    return true;
+}
+
+static bool fsctl_stat_handler(const char* command, const char* args) {
+    k64_fs_stat_t st;
+    (void)command;
+
+    if (!k64_fs_stat(args && args[0] ? args : ".", &st)) {
+        fsctl_print("stat failed");
+        return true;
+    }
+
+    k64_term_write(st.is_dir ? "dir  " : "file ");
+    k64_term_write(st.path);
+    k64_term_write(" size=");
+    k64_term_write_dec(st.size);
+    k64_term_putc('\n');
+    return true;
+}
+
 static bool fsctl_start(k64_service_t* service) {
     (void)service;
     if (!k64_modules_is_driver_running("fs")) {
@@ -876,6 +1017,12 @@ static bool fsctl_start(k64_service_t* service) {
     (void)k64_system_register_command("fsctl", "touch", fsctl_touch_handler);
     (void)k64_system_register_command("fsctl", "cat", fsctl_cat_handler);
     (void)k64_system_register_command("fsctl", "write", fsctl_write_handler);
+    (void)k64_system_register_command("fsctl", "append", fsctl_append_handler);
+    (void)k64_system_register_command("fsctl", "rm", fsctl_rm_handler);
+    (void)k64_system_register_command("fsctl", "rmdir", fsctl_rmdir_handler);
+    (void)k64_system_register_command("fsctl", "mv", fsctl_mv_handler);
+    (void)k64_system_register_command("fsctl", "cp", fsctl_cp_handler);
+    (void)k64_system_register_command("fsctl", "stat", fsctl_stat_handler);
     k64_term_write("[svc] fsctl started pid=");
     k64_term_write_dec(service->pid);
     k64_term_putc('\n');

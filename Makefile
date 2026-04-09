@@ -78,7 +78,7 @@ K64_SRCS = \
   $(K64M_SRCS) \
   $(K64S_SRCS)
 
-K64_OBJS = $(K64_SRCS:.c=.o) boot.o longmode.o k64_isr.o k64_irq.o k64_hotreload_asm.o
+K64_OBJS = $(K64_SRCS:.c=.o) boot.o longmode.o k64_isr.o k64_irq.o k64_hotreload_asm.o k64_vmm_call.o
 
 all: k64.iso
 
@@ -105,6 +105,9 @@ k64_irq.o: k64_irq.S
 k64_hotreload_asm.o: k64_hotreload.S
 	$(CC64) $(CFLAGS64) -c -o $@ $<
 
+k64_vmm_call.o: k64_vmm_call.S
+	$(CC64) $(CFLAGS64) -c -o $@ $<
+
 $(filter %.o,$(K64_OBJS)): k64_version.h $(K64_AUTOVERSION_HDR)
 
 %.o: %.c
@@ -122,7 +125,7 @@ $(EX_BUILD_DIR)/%.o: ex/%.S
 
 $(EX_BUILD_DIR)/%.elf: $(EX_BUILD_DIR)/%.o
 	mkdir -p $(EX_BUILD_DIR)
-	$(LD) -nostdlib -static -e _start -Ttext 0x1000 -o $@ $<
+	$(LD) -nostdlib -static -e _start -Ttext 0x50000000 -o $@ $<
 
 $(K64_GRUB_K64FS_MOD): grub/k64fs.c tools/build_grub_k64fs.sh
 	mkdir -p build
@@ -226,11 +229,12 @@ run-headless: k64.iso
 	$(QEMU) -cdrom k64.iso -nographic -no-reboot -no-shutdown
 
 test: k64.iso
+	bash tests/run_host_tests.sh
 	bash tests/check_grub_cfg.sh
 	bash tests/boot_smoke_test.sh
 
 clean:
-	rm -rf *.o k64_kernel.elf k64-kernel-v*.elf iso build k64.iso .k64_boot.log
+	rm -rf *.o k64_kernel.elf k64-kernel-v*.elf iso build k64.iso .k64_boot.log tests/.shell_cmd_test tests/.string_test tests/.fs_unit_test
 
 .PHONY: all iso run run-headless test clean FORCE
 .NOTPARALLEL: k64.iso $(K64FS_STAGE_STAMP)

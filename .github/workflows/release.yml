@@ -45,10 +45,7 @@ jobs:
         GRUB_SRC: /tmp/grub-src
       run: |
         make clean
-        make k64.iso
-        bash tests/run_shell_cmd_tests.sh
-        bash tests/check_grub_cfg.sh
-        bash tests/boot_smoke_test.sh
+        make test
 
     - name: Compute release version
       id: version
