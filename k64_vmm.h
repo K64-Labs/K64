@@ -8,6 +8,7 @@ void k64_vmm_init(void);
 
 typedef struct {
     bool     present;
+    bool     user_mode;
     uint64_t cr3;
     uint64_t root_base;
     uint64_t root_size;
@@ -22,12 +23,18 @@ typedef struct {
 } k64_vm_space_t;
 
 bool k64_vmm_alloc_service_space(uint64_t pid, k64_vm_space_t* out_space);
+bool k64_vmm_alloc_user_space(uint64_t pid, k64_vm_space_t* out_space);
 void k64_vmm_release_service_space(k64_vm_space_t* space);
 bool k64_vmm_map_private_range(k64_vm_space_t* space,
                                uint64_t virt_addr,
                                const uint8_t* data,
                                size_t file_size,
                                size_t mem_size);
+bool k64_vmm_map_user_range(k64_vm_space_t* space,
+                            uint64_t virt_addr,
+                            const uint8_t* data,
+                            size_t file_size,
+                            size_t mem_size);
 uint64_t k64_vmm_call_isolated(const k64_vm_space_t* space,
                                uint64_t entry,
                                uint64_t arg0,

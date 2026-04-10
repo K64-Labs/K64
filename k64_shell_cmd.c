@@ -37,6 +37,16 @@ k64_shell_cmd_t k64_shell_parse_command(const char* line, const char** arg_out) 
     if (starts_with_word(line, "serial"))return K64_SHELL_CMD_SERIAL;
     if (starts_with_word(line, "sched")) return K64_SHELL_CMD_SCHED;
     if (starts_with_word(line, "panic")) return K64_SHELL_CMD_PANIC;
+    if (starts_with_word(line, "elfrun")) {
+        if (arg_out) {
+            const char* p = line + 6;
+            while (is_space(*p)) {
+                p++;
+            }
+            *arg_out = p;
+        }
+        return K64_SHELL_CMD_ELFRUN;
+    }
     if (starts_with_word(line, "yield")) return K64_SHELL_CMD_YIELD;
     if (starts_with_word(line, "layout")) {
         if (arg_out) {

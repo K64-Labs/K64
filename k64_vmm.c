@@ -7,6 +7,7 @@
 #define K64_PAGE_MASK             (~(K64_PAGE_SIZE - 1ULL))
 #define K64_PAGE_PRESENT          0x001ULL
 #define K64_PAGE_RW               0x002ULL
+#define K64_PAGE_USER             0x004ULL
 #define K64_PAGE_TABLE_FLAGS      (K64_PAGE_PRESENT | K64_PAGE_RW)
 #define K64_SERVICE_VM_BASE       0x0000000040000000ULL
 #define K64_SERVICE_VM_STRIDE     0x0000000001000000ULL
@@ -45,6 +46,7 @@ static void vmm_clear_space(k64_vm_space_t* space) {
     }
 
     space->present = false;
+    space->user_mode = false;
     space->cr3 = 0;
     space->root_base = 0;
     space->root_size = 0;
@@ -89,7 +91,7 @@ static uint64_t* vmm_alloc_table_frame(k64_vm_space_t* space) {
     return (uint64_t*)(uintptr_t)frame;
 }
 
-static uint64_t* vmm_next_table(k64_vm_space_t* space, uint64_t* table, size_t index) {
+static uint64_t* vmm_next_table(k64_vm_space_t* space, uint64_t* table, size_t index, uint64_t flags) {
     uint64_t entry = table[index];
     uint64_t* next;
 
@@ -104,7 +106,7 @@ static uint64_t* vmm_next_table(k64_vm_space_t* space, uint64_t* table, size_t i
     if (!next) {
         return NULL;
     }
-    table[index] = ((uint64_t)(uintptr_t)next) | K64_PAGE_TABLE_FLAGS;
+    table[index] = ((uint64_t)(uintptr_t)next) | K64_PAGE_TABLE_FLAGS | (flags & K64_PAGE_USER);
     return next;
 }
 
@@ -128,15 +130,15 @@ static bool vmm_map_page(k64_vm_space_t* space, uint64_t virt_addr, uint64_t phy
     pdt_index = (size_t)((virt_addr >> 21) & 0x1FFULL);
     pt_index = (size_t)((virt_addr >> 12) & 0x1FFULL);
 
-    pdpt = vmm_next_table(space, pml4, pml4_index);
+    pdpt = vmm_next_table(space, pml4, pml4_index, flags);
     if (!pdpt) {
         return false;
     }
-    pdt = vmm_next_table(space, pdpt, pdpt_index);
+    pdt = vmm_next_table(space, pdpt, pdpt_index, flags);
     if (!pdt) {
         return false;
     }
-    pt = vmm_next_table(space, pdt, pdt_index);
+    pt = vmm_next_table(space, pdt, pdt_index, flags);
     if (!pt) {
         return false;
     }
@@ -172,12 +174,12 @@ static bool vmm_clone_kernel_root(k64_vm_space_t* space) {
         new_pdpt[i] = kernel_pdpt[i];
     }
 
-    new_pml4[0] = ((uint64_t)(uintptr_t)new_pdpt) | K64_PAGE_TABLE_FLAGS;
+    new_pml4[0] = ((uint64_t)(uintptr_t)new_pdpt) | K64_PAGE_TABLE_FLAGS | (space->user_mode ? K64_PAGE_USER : 0);
     space->cr3 = (uint64_t)(uintptr_t)new_pml4;
     return true;
 }
 
-static bool vmm_map_zeroed_page(k64_vm_space_t* space, uint64_t virt_addr) {
+static bool vmm_map_zeroed_page_flags(k64_vm_space_t* space, uint64_t virt_addr, uint64_t flags) {
     void* frame = k64_pmm_alloc_frame();
 
     if (!frame) {
@@ -192,19 +194,10 @@ static bool vmm_map_zeroed_page(k64_vm_space_t* space, uint64_t virt_addr) {
     }
 
     vmm_clear_page(frame);
-    return vmm_map_page(space, virt_addr, (uint64_t)(uintptr_t)frame, K64_PAGE_RW);
+    return vmm_map_page(space, virt_addr, (uint64_t)(uintptr_t)frame, flags);
 }
 
-void k64_vmm_init(void) {
-    kernel_cr3 = vmm_read_cr3();
-    for (size_t i = 0; i < K64_SERVICE_VM_MAX_SLOTS; ++i) {
-        service_slot_used[i] = false;
-    }
-
-    K64_LOG_INFO("VMM: initialized isolated address-space pool.");
-}
-
-bool k64_vmm_alloc_service_space(uint64_t pid, k64_vm_space_t* out_space) {
+static bool vmm_alloc_space(uint64_t pid, k64_vm_space_t* out_space, uint64_t stack_flags, bool user_mode) {
     size_t start_slot;
     size_t slot;
 
@@ -216,6 +209,7 @@ bool k64_vmm_alloc_service_space(uint64_t pid, k64_vm_space_t* out_space) {
 
     if (pid == 0) {
         out_space->present = true;
+        out_space->user_mode = false;
         out_space->cr3 = kernel_cr3;
         out_space->root_base = 0;
         out_space->root_size = 0x40000000ULL;
@@ -233,6 +227,7 @@ bool k64_vmm_alloc_service_space(uint64_t pid, k64_vm_space_t* out_space) {
 
     service_slot_used[slot] = true;
     out_space->present = true;
+    out_space->user_mode = user_mode;
     out_space->root_base = K64_SERVICE_VM_BASE + ((uint64_t)slot * K64_SERVICE_VM_STRIDE);
     out_space->root_size = K64_SERVICE_VM_ROOT_SIZE;
     out_space->heap_base = out_space->root_base + 0x00100000ULL;
@@ -246,13 +241,30 @@ bool k64_vmm_alloc_service_space(uint64_t pid, k64_vm_space_t* out_space) {
     }
 
     for (size_t i = 0; i < K64_SERVICE_STACK_FRAMES; ++i) {
-        if (!vmm_map_zeroed_page(out_space, out_space->stack_base + (i * K64_PAGE_SIZE))) {
+        if (!vmm_map_zeroed_page_flags(out_space, out_space->stack_base + (i * K64_PAGE_SIZE), stack_flags)) {
             k64_vmm_release_service_space(out_space);
             return false;
         }
     }
 
     return true;
+}
+
+void k64_vmm_init(void) {
+    kernel_cr3 = vmm_read_cr3();
+    for (size_t i = 0; i < K64_SERVICE_VM_MAX_SLOTS; ++i) {
+        service_slot_used[i] = false;
+    }
+
+    K64_LOG_INFO("VMM: initialized isolated address-space pool.");
+}
+
+bool k64_vmm_alloc_service_space(uint64_t pid, k64_vm_space_t* out_space) {
+    return vmm_alloc_space(pid, out_space, K64_PAGE_RW, false);
+}
+
+bool k64_vmm_alloc_user_space(uint64_t pid, k64_vm_space_t* out_space) {
+    return vmm_alloc_space(pid, out_space, K64_PAGE_RW | K64_PAGE_USER, true);
 }
 
 void k64_vmm_release_service_space(k64_vm_space_t* space) {
@@ -283,11 +295,12 @@ void k64_vmm_release_service_space(k64_vm_space_t* space) {
     vmm_clear_space(space);
 }
 
-bool k64_vmm_map_private_range(k64_vm_space_t* space,
-                               uint64_t virt_addr,
-                               const uint8_t* data,
-                               size_t file_size,
-                               size_t mem_size) {
+static bool vmm_map_range_flags(k64_vm_space_t* space,
+                                uint64_t virt_addr,
+                                const uint8_t* data,
+                                size_t file_size,
+                                size_t mem_size,
+                                uint64_t flags) {
     uint64_t page_start;
     uint64_t page_end;
 
@@ -335,12 +348,28 @@ bool k64_vmm_map_private_range(k64_vm_space_t* space,
             }
         }
 
-        if (!vmm_map_page(space, page, (uint64_t)(uintptr_t)frame, K64_PAGE_RW)) {
+        if (!vmm_map_page(space, page, (uint64_t)(uintptr_t)frame, flags)) {
             return false;
         }
     }
 
     return true;
+}
+
+bool k64_vmm_map_private_range(k64_vm_space_t* space,
+                               uint64_t virt_addr,
+                               const uint8_t* data,
+                               size_t file_size,
+                               size_t mem_size) {
+    return vmm_map_range_flags(space, virt_addr, data, file_size, mem_size, K64_PAGE_RW);
+}
+
+bool k64_vmm_map_user_range(k64_vm_space_t* space,
+                            uint64_t virt_addr,
+                            const uint8_t* data,
+                            size_t file_size,
+                            size_t mem_size) {
+    return vmm_map_range_flags(space, virt_addr, data, file_size, mem_size, K64_PAGE_RW | K64_PAGE_USER);
 }
 
 uint64_t k64_vmm_call_isolated(const k64_vm_space_t* space,

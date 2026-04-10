@@ -137,7 +137,7 @@ static bool shell_try_execute_elf(const char* name) {
         path[pos] = '\0';
     }
 
-    return k64_elf_execute_path(path);
+    return k64_elf_execute_user_path(path);
 }
 
 static const char* shell_next_token(const char* s, char* token, int token_size) {
@@ -184,6 +184,7 @@ static void shell_print_help(void) {
     k64_term_write("  layout [us|de]   - show or switch keyboard layout\n");
     k64_term_write("  servicectl <cmd> - manage services\n");
     k64_term_write("  driverctl <cmd>  - manage drivers\n");
+    k64_term_write("  storagectl <cmd> - manage block storage and sync\n");
     k64_term_write("  reload <target>  - reload drivers or kernel runtime\n");
     k64_term_write("  whoami id users groups - inspect users, groups, and the current session\n");
     k64_term_write("  login logout su sudo   - switch or elevate the current session\n");
@@ -191,7 +192,7 @@ static void shell_print_help(void) {
     k64_term_write("  usermod groupadd groupdel gpasswd - manage roles and groups\n");
     k64_term_write("  reboot           - reboot the machine\n");
     k64_term_write("  shutdown         - power down the machine\n");
-    k64_term_write("  pwd ls cd mkdir touch write append cat stat rm rmdir mv cp - filesystem commands from fsctl\n");
+    k64_term_write("  pwd ls cd mkdir touch write append cat stat rm rmdir mv cp sync - filesystem commands from fsctl/storagectl\n");
     k64_term_write("  yield            - give up the current timeslice\n");
     k64_term_write("  panic            - trigger kernel panic\n");
 }
@@ -727,6 +728,15 @@ static void shell_handle_command(const char* cmd) {
         case K64_SHELL_CMD_ECHO:
             k64_term_write(arg);
             k64_term_putc('\n');
+            return;
+        case K64_SHELL_CMD_ELFRUN:
+            if (!arg[0]) {
+                k64_term_write("Usage: elfrun </path/to/file.elf>\n");
+                return;
+            }
+            if (!k64_elf_execute_user_path(arg)) {
+                k64_term_write("elfrun failed\n");
+            }
             return;
         case K64_SHELL_CMD_YIELD:
             k64_sched_yield();
