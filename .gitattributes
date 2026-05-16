@@ -1,0 +1,11 @@
+*.c text eol=lf
+*.h text eol=lf
+*.s text eol=lf
+*.S text eol=lf
+*.ld text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.svc text eol=lf
+*.drv text eol=lf
+Makefile text eol=lf
+README.md text eol=lf
