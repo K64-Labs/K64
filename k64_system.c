@@ -9,7 +9,7 @@
 #include "k64_terminal.h"
 
 #define K64_MAX_SERVICES 32
-#define K64_MAX_SERVICE_COMMANDS 32
+#define K64_MAX_SERVICE_COMMANDS 96
 #define K64_SYSTEM_PID_BASE 1000
 #define K64_ROOT_PID_BASE   2000
 #define K64_USER_PID_BASE   3000
@@ -683,12 +683,8 @@ bool k64_system_dispatch_command(const char* command, const char* args) {
         }
         if (k64_streq(service_commands[i].name, command)) {
             owner = k64_system_find_service_by_name(service_commands[i].owner);
-            if (owner && owner->state == K64_SERVICE_STATE_RUNNING) {
-                return call_in_service_space(owner,
-                                             (void*)service_commands[i].handler,
-                                             (uint64_t)(uintptr_t)command,
-                                             (uint64_t)(uintptr_t)args,
-                                             0) != 0;
+            if (!owner || owner->state != K64_SERVICE_STATE_RUNNING) {
+                return false;
             }
             return service_commands[i].handler(command, args);
         }

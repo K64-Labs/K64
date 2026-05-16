@@ -31,6 +31,17 @@ static void k64_term_sync_cursor(void) {
     outb(0x3D5, (uint8_t)((pos >> 8) & 0xFF));
 }
 
+static void k64_term_enable_cursor(void) {
+    if (!screen_enabled) {
+        return;
+    }
+    outb(0x3D4, 0x0A);
+    outb(0x3D5, 0x0E);
+    outb(0x3D4, 0x0B);
+    outb(0x3D5, 0x0F);
+    k64_term_sync_cursor();
+}
+
 static void k64_term_scroll(void) {
     if (!screen_enabled) {
         cursor_y = K64_ROWS - 1;
@@ -144,6 +155,7 @@ void k64_term_init(void) {
     k64_serial_init();
     k64_term_setcolor(K64_COLOR_LIGHT_GREY, K64_COLOR_BLACK);
     k64_term_clear();
+    k64_term_enable_cursor();
 }
 
 void k64_term_set_cursor(int x, int y) {
@@ -183,6 +195,7 @@ int k64_term_rows(void) {
 
 bool k64_term_screen_start(void) {
     screen_enabled = true;
+    k64_term_enable_cursor();
     k64_term_sync_cursor();
     return true;
 }

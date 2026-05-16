@@ -51,6 +51,7 @@ static k64_fs_node_t nodes[K64_FS_MAX_NODES];
 static uint8_t fs_image[K64_FS_IMAGE_MAX];
 static uint8_t fs_image_scratch[K64_FS_IMAGE_MAX];
 static uint8_t fs_mutable[K64_FS_MUTABLE_MAX];
+static uint8_t fs_append_buffer[K64_FS_MUTABLE_MAX];
 static uint8_t fs_block_buffer[K64_FS_IMAGE_MAX];
 static size_t fs_image_size = 0;
 static size_t fs_mutable_used = 0;
@@ -895,7 +896,6 @@ bool k64_fs_append_file(const char* path, const char* text) {
     const uint8_t* current;
     int current_size;
     int extra_size = fs_len(text ? text : "");
-    uint8_t combined[K64_FS_MUTABLE_MAX];
 
     if (parent < 0 || !leaf[0] || extra_size < 0) {
         return false;
@@ -913,12 +913,12 @@ bool k64_fs_append_file(const char* path, const char* text) {
         return false;
     }
     for (int i = 0; i < current_size; ++i) {
-        combined[i] = current ? current[i] : 0;
+        fs_append_buffer[i] = current ? current[i] : 0;
     }
     for (int i = 0; i < extra_size; ++i) {
-        combined[current_size + i] = (uint8_t)text[i];
+        fs_append_buffer[current_size + i] = (uint8_t)text[i];
     }
-    if (!fs_store_mutable(&nodes[idx], combined, current_size + extra_size)) {
+    if (!fs_store_mutable(&nodes[idx], fs_append_buffer, current_size + extra_size)) {
         return false;
     }
     return fs_writeback_image();

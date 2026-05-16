@@ -293,6 +293,7 @@ test: k64.iso
 	bash tests/run_host_tests.sh
 	bash tests/check_grub_cfg.sh
 	bash tests/boot_smoke_test.sh
+	$(PYTHON) tests/shell_smoke.py
 	$(PYTHON) tests/user_elf_smoke.py
 	$(PYTHON) tests/persistence_smoke.py
 

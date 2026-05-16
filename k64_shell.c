@@ -816,9 +816,11 @@ static void shell_handle_command(const char* cmd) {
         case K64_SHELL_CMD_REBOOT:
             k64_term_write("Rebooting...\n");
             k64_power_reboot();
+            return;
         case K64_SHELL_CMD_SHUTDOWN:
             k64_term_write("Shutting down...\n");
             k64_power_shutdown();
+            return;
         case K64_SHELL_CMD_SUDO:
             if (!arg[0]) {
                 k64_term_write("usage: sudo <command>\n");

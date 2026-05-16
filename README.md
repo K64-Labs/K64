@@ -46,7 +46,7 @@ Important directories and files:
 - `grub/k64fs.c`: custom GRUB filesystem module for `K64FS`
 - `rootfs/`: host-side source tree used to build `root.k64fs`
 - `tools/mk_k64fs.py`: image builder for the `K64FS` format
-- `tests/`: parser, GRUB-config, and boot smoke tests
+- `tests/`: parser, filesystem, shell, userland, persistence, GRUB-config, and boot smoke tests
 
 ## Architectural Summary
 
@@ -186,6 +186,7 @@ Responsibilities:
 
 - VGA text-mode output
 - hardware cursor updates
+- explicit VGA cursor re-enable during terminal and screen-driver startup
 - serial mirroring to COM1 when available
 - boot screen rendering
 - panic output and structured log levels
@@ -193,6 +194,7 @@ Responsibilities:
 Notable behavior:
 
 - the shell prompt includes the effective user name
+- the VGA text cursor is made visible even when firmware or GRUB left it disabled
 - serial is not assumed to exist anymore; COM1 is probed and loopback-tested
 - if serial is absent on real hardware, K64 falls back to VGA-only console output
 
@@ -305,7 +307,8 @@ The current libc layer is intentionally tiny:
 
 - `_start` calls `main()` and exits through the kernel syscall ABI
 - syscall wrappers for write, open, read, close, getpid, and uptime
-- minimal string and decimal-print helpers
+- minimal string, memory, decimal, and hexadecimal print helpers
+- a ring-3 `libctest.elf` smoke program that validates libc helpers and read-only file I/O
 
 This is not a full C library yet. It is the first stable ABI surface for growing a real userland without writing every program in assembly.
 
@@ -851,6 +854,7 @@ The repository currently ships these sample executables:
 - `/ex/hello.elf`
 - `/ex/catmotd.elf`
 - `/ex/procinfo.elf`
+- `/ex/libctest.elf`
 
 and two native binary modules that consume it:
 
@@ -1044,7 +1048,7 @@ The shell supports:
 - backspace
 - forward delete
 - command history
-- hardware cursor updates on VGA
+- visible hardware cursor updates on VGA
 
 Keyboard layout switching supports:
 
@@ -1115,7 +1119,7 @@ It also exposes service-owned commands, including:
 When you enter a command, the shell:
 
 1. parses built-ins it owns directly
-2. asks the service command registry whether a running service owns the command, then runs that handler in the owning service address space
+2. asks the service command registry whether a running service owns the command, then runs that handler
 3. if still unresolved, tries to start a service or driver by that name
 4. if still unresolved, tries `/ex/<command>.elf`
 
@@ -1186,6 +1190,8 @@ hello
 `catmotd.elf` is also staged into `/ex` and demonstrates user-mode file I/O by opening and reading `/etc/motd` through the syscall layer.
 
 `procinfo.elf` is built from C under `userland/bin/` and linked against the small K64 libc shim. It demonstrates the C userland path plus `getpid()` and uptime syscalls.
+
+`libctest.elf` is also built from C and exercises the userland libc shim in ring 3. It checks string helpers, memory helpers, file open/read/close, process IDs, and uptime output.
 
 ## Service and Driver Control
 
@@ -1462,6 +1468,8 @@ Tests currently cover:
 - ring-3 user ELF execution through `elfrun`
 - user process-table visibility through `ps`
 - user-mode console output and read-only file I/O syscalls
+- userland libc smoke coverage through `/ex/libctest.elf`
+- interactive shell smoke coverage for built-ins, service commands, filesystem commands, user commands, and ELF launch
 - persistence across two QEMU boots using the same `build/root.disk`
 
 Files:
@@ -1469,13 +1477,14 @@ Files:
 - `tests/run_host_tests.sh`
 - `tests/check_grub_cfg.sh`
 - `tests/boot_smoke_test.sh`
+- `tests/shell_smoke.py`
 - `tests/user_elf_smoke.py`
 - `tests/persistence_smoke.py`
 - `tests/shell_cmd_test.c`
 - `tests/string_test.c`
 - `tests/fs_unit_test.c`
 
-The test suite is intentionally small and targeted. It is useful for protecting the packaging path, parser logic, filesystem behavior, boot path, and first user-mode execution path, but it does not amount to broad runtime verification.
+The test suite is intentionally small and targeted. It is useful for protecting the packaging path, parser logic, filesystem behavior, shell command surface, boot path, and first user-mode execution path, but it does not amount to broad runtime verification.
 
 ## Development Model
 
@@ -1577,7 +1586,15 @@ cat /README
 cat /etc/motd
 mkdir /tmp/demo
 write /tmp/demo/note hello
+append /tmp/demo/note -again
 cat /tmp/demo/note
+stat /tmp/demo/note
+cp /tmp/demo/note /tmp/demo/copy
+mv /tmp/demo/copy /tmp/demo/moved
+rm /tmp/demo/moved
+rm /tmp/demo/note
+rmdir /tmp/demo
+elfrun /ex/libctest.elf
 ```
 
 ## If You Want to Extend K64

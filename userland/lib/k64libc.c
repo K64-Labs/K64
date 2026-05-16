@@ -60,6 +60,97 @@ size_t k64_strlen(const char* text) {
     return len;
 }
 
+int k64_strcmp(const char* a, const char* b) {
+    unsigned char ca;
+    unsigned char cb;
+
+    if (!a) {
+        a = "";
+    }
+    if (!b) {
+        b = "";
+    }
+    while (*a || *b) {
+        ca = (unsigned char)*a;
+        cb = (unsigned char)*b;
+        if (ca != cb) {
+            return ca < cb ? -1 : 1;
+        }
+        a++;
+        b++;
+    }
+    return 0;
+}
+
+int k64_strncmp(const char* a, const char* b, size_t len) {
+    unsigned char ca;
+    unsigned char cb;
+
+    if (!a) {
+        a = "";
+    }
+    if (!b) {
+        b = "";
+    }
+    for (size_t i = 0; i < len; ++i) {
+        ca = (unsigned char)a[i];
+        cb = (unsigned char)b[i];
+        if (ca != cb) {
+            return ca < cb ? -1 : 1;
+        }
+        if (ca == '\0') {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+int k64_memcmp(const void* a, const void* b, size_t len) {
+    const unsigned char* pa = (const unsigned char*)a;
+    const unsigned char* pb = (const unsigned char*)b;
+
+    for (size_t i = 0; i < len; ++i) {
+        if (pa[i] != pb[i]) {
+            return pa[i] < pb[i] ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+void* k64_memcpy(void* dst, const void* src, size_t len) {
+    unsigned char* d = (unsigned char*)dst;
+    const unsigned char* s = (const unsigned char*)src;
+
+    for (size_t i = 0; i < len; ++i) {
+        d[i] = s[i];
+    }
+    return dst;
+}
+
+void* k64_memset(void* dst, int value, size_t len) {
+    unsigned char* d = (unsigned char*)dst;
+
+    for (size_t i = 0; i < len; ++i) {
+        d[i] = (unsigned char)value;
+    }
+    return dst;
+}
+
+char* k64_strcpy(char* dst, const char* src) {
+    size_t i = 0;
+
+    if (!dst) {
+        return dst;
+    }
+    if (!src) {
+        src = "";
+    }
+    do {
+        dst[i] = src[i];
+    } while (src[i++] != '\0');
+    return dst;
+}
+
 void k64_puts(const char* text) {
     (void)k64_write(text, k64_strlen(text));
 }
@@ -87,4 +178,18 @@ void k64_put_i64(int64_t value) {
         return;
     }
     k64_put_u64((uint64_t)value);
+}
+
+void k64_put_hex64(uint64_t value) {
+    static const char hex[] = "0123456789abcdef";
+    char buf[19];
+
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (int i = 0; i < 16; ++i) {
+        unsigned shift = (unsigned)(60 - (i * 4));
+        buf[2 + i] = hex[(value >> shift) & 0xFULL];
+    }
+    buf[18] = '\0';
+    k64_puts(buf);
 }
