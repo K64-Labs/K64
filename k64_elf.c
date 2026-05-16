@@ -163,7 +163,7 @@ static bool elf_execute_impl(const char* path, bool user_mode) {
     }
     if (user_mode) {
         uint64_t user_stack_top = app_space.stack_base + app_space.stack_size - 16ULL;
-        rc = (int)k64_usermode_execute(&app_space, ehdr->e_entry, user_stack_top);
+        rc = (int)k64_usermode_execute_named(&app_space, ehdr->e_entry, user_stack_top, path);
     } else {
         rc = (int)k64_vmm_call_isolated(&app_space, ehdr->e_entry, 0, 0, 0);
     }

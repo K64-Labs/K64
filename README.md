@@ -273,6 +273,8 @@ What was added:
 - an IDT gate at vector `0x80` with DPL 3
 - an `iretq`-based ring transition into user mode
 - a return path back into the kernel on `exit` or on a user fault
+- a small kernel-side user process table for ELF runs
+- `ps` output for user ELF PID, state, exit code, runtime ticks, and image path
 
 Current syscall ABI:
 
@@ -284,7 +286,7 @@ Current syscall ABI:
 - `5`: `read(fd, buf, len)`
 - `6`: `close(fd)`
 
-This is still intentionally small, but it is now enough for simple ring-3 programs to do console output and read regular files from `K64FS`. It is not yet a full userspace runtime with writable file descriptors, process spawning, or a libc layer.
+This is still intentionally small, but it is now enough for simple ring-3 programs to do console output and read regular files from `K64FS`. It is not yet a full userspace runtime with concurrent user processes, writable file descriptors, process spawning, or a libc layer. The current process table is accounting and lifecycle visibility for synchronous user ELF runs.
 
 ### Physical memory management
 
@@ -335,7 +337,7 @@ What it does not do:
 
 - provide copy-on-write or demand paging
 - fully remove the shared low identity-mapped kernel region
-- provide process lifetime management beyond synchronous ELF execution
+- provide concurrent process scheduling beyond synchronous ELF execution
 
 The main constants today are:
 
@@ -1035,6 +1037,7 @@ The shell has some built-in commands of its own:
 - `clear`
 - `ticks`
 - `task`
+- `ps`
 - `serial`
 - `sched`
 - `echo`
@@ -1139,6 +1142,7 @@ Important limits:
 - only `/ex/*.elf` currently use the ring-3 path
 - ELF-backed services and drivers still execute on the kernel side
 - file access through the syscall layer is read-only today
+- user processes are recorded and inspectable, but still run synchronously
 
 So this is now a real split execution model: user applications in `/ex` can run in ring 3, but the overall ELF runtime is still far smaller than a complete Unix-style process environment.
 
@@ -1218,7 +1222,7 @@ Behavior:
 - `list` prints registered block devices, their mode, and geometry
 - `root` prints the current root mount source and whether it is persistent
 - `sync` flushes the mounted `K64FS` image back to the block device when one is active
-- bare `sync` is a convenience alias provided by the same service
+- bare `sync` is handled directly by the shell as a global filesystem flush
 
 ## Reload Paths
 
@@ -1432,7 +1436,9 @@ Tests currently cover:
 - generated GRUB config correctness
 - boot smoke behavior in QEMU with an attached writable disk image
 - ring-3 user ELF execution through `elfrun`
+- user process-table visibility through `ps`
 - user-mode console output and read-only file I/O syscalls
+- persistence across two QEMU boots using the same `build/root.disk`
 
 Files:
 
@@ -1440,6 +1446,7 @@ Files:
 - `tests/check_grub_cfg.sh`
 - `tests/boot_smoke_test.sh`
 - `tests/user_elf_smoke.py`
+- `tests/persistence_smoke.py`
 - `tests/shell_cmd_test.c`
 - `tests/string_test.c`
 - `tests/fs_unit_test.c`
@@ -1531,6 +1538,7 @@ layout de
 servicectl list
 driverctl list
 storagectl list
+ps
 sync
 users
 groups

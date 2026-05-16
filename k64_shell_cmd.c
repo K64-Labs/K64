@@ -36,6 +36,7 @@ k64_shell_cmd_t k64_shell_parse_command(const char* line, const char** arg_out) 
     if (starts_with_word(line, "uname"))    return K64_SHELL_CMD_UNAME;
     if (starts_with_word(line, "ticks"))    return K64_SHELL_CMD_TICKS;
     if (starts_with_word(line, "task"))  return K64_SHELL_CMD_TASK;
+    if (starts_with_word(line, "ps"))    return K64_SHELL_CMD_PS;
     if (starts_with_word(line, "serial"))return K64_SHELL_CMD_SERIAL;
     if (starts_with_word(line, "sched")) return K64_SHELL_CMD_SCHED;
     if (starts_with_word(line, "panic")) return K64_SHELL_CMD_PANIC;
@@ -100,6 +101,7 @@ k64_shell_cmd_t k64_shell_parse_command(const char* line, const char** arg_out) 
         }
         return K64_SHELL_CMD_SUDO;
     }
+    if (starts_with_word(line, "sync")) return K64_SHELL_CMD_SYNC;
     if (starts_with_word(line, "reboot")) return K64_SHELL_CMD_REBOOT;
     if (starts_with_word(line, "shutdown")) return K64_SHELL_CMD_SHUTDOWN;
 

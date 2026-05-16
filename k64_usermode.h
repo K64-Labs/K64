@@ -13,7 +13,12 @@
 
 void k64_usermode_init(void);
 int64_t k64_usermode_execute(const k64_vm_space_t* space, uint64_t entry, uint64_t user_stack_top);
+int64_t k64_usermode_execute_named(const k64_vm_space_t* space,
+                                   uint64_t entry,
+                                   uint64_t user_stack_top,
+                                   const char* path);
 bool k64_usermode_is_active(void);
+void k64_usermode_dump_processes(void);
 void k64_usermode_handle_fault(uint64_t vec,
                                uint64_t err,
                                uint64_t rip,

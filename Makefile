@@ -274,6 +274,7 @@ test: k64.iso
 	bash tests/check_grub_cfg.sh
 	bash tests/boot_smoke_test.sh
 	$(PYTHON) tests/user_elf_smoke.py
+	$(PYTHON) tests/persistence_smoke.py
 
 clean:
 	rm -rf *.o k64_kernel.elf k64-kernel-v*.elf iso build k64.iso .k64_boot.log tests/.shell_cmd_test tests/.string_test tests/.fs_unit_test

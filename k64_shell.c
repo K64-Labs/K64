@@ -15,6 +15,7 @@
 #include "k64_system.h"
 #include "k64_terminal.h"
 #include "k64_user.h"
+#include "k64_usermode.h"
 
 #define SHELL_MAX_LINE 128
 #define SHELL_HISTORY_MAX 16
@@ -213,6 +214,7 @@ static void shell_print_help(void) {
     k64_term_write("  elfrun <path>    - execute an ELF file directly\n");
     k64_term_write("  ticks            - show PIT tick counter\n");
     k64_term_write("  task             - print current task id\n");
+    k64_term_write("  ps               - list user ELF processes\n");
     k64_term_write("  serial           - print serial availability\n");
     k64_term_write("  sched            - dump scheduler stats\n");
     k64_term_write("  echo <text>      - print text back to the console\n");
@@ -756,6 +758,9 @@ static void shell_handle_command(const char* cmd) {
             k64_term_putc('\n');
             return;
         }
+        case K64_SHELL_CMD_PS:
+            k64_usermode_dump_processes();
+            return;
         case K64_SHELL_CMD_SERIAL:
             k64_term_write("Serial: ");
             k64_term_write(k64_serial_is_ready() ? "ready" : "unavailable");
@@ -826,6 +831,13 @@ static void shell_handle_command(const char* cmd) {
             k64_user_begin_sudo_scope();
             shell_handle_command(arg);
             k64_user_end_sudo_scope();
+            return;
+        case K64_SHELL_CMD_SYNC:
+            if (!k64_fs_sync()) {
+                k64_term_write("sync failed\n");
+                return;
+            }
+            k64_term_write("sync complete\n");
             return;
         case K64_SHELL_CMD_UNKNOWN: {
             char unknown_cmd[32];

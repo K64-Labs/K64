@@ -2,6 +2,7 @@
 #include "k64_fs.h"
 #include "k64_idt.h"
 #include "k64_log.h"
+#include "k64_pit.h"
 #include "k64_sched.h"
 #include "k64_terminal.h"
 #include "k64_string.h"
@@ -9,6 +10,15 @@
 #define K64_GDT_TSS_SELECTOR  0x28
 #define K64_USER_DATA_SELECTOR 0x1B
 #define K64_USER_CODE_SELECTOR 0x23
+#define K64_USER_PROCESS_MAX 32
+#define K64_USER_PROCESS_PATH_MAX 96
+
+typedef enum {
+    K64_USER_PROCESS_EMPTY = 0,
+    K64_USER_PROCESS_RUNNING,
+    K64_USER_PROCESS_EXITED,
+    K64_USER_PROCESS_FAULTED,
+} k64_user_process_state_t;
 
 typedef struct {
     uint32_t reserved0;
@@ -40,8 +50,23 @@ typedef struct {
     uint64_t kernel_cr3;
     int64_t  result;
     uint64_t active;
+    int      process_index;
     k64_user_fd_t fds[8];
 } k64_user_exec_context_t;
+
+typedef struct {
+    bool     used;
+    uint64_t pid;
+    k64_user_process_state_t state;
+    int64_t  exit_code;
+    uint64_t entry;
+    uint64_t cr3;
+    uint64_t start_tick;
+    uint64_t end_tick;
+    uint64_t fault_vector;
+    uint64_t fault_rip;
+    char     path[K64_USER_PROCESS_PATH_MAX];
+} k64_user_process_t;
 
 typedef struct {
     uint64_t rax;
@@ -77,6 +102,8 @@ extern void k64_syscall_stub(void);
 static k64_tss64_t tss64;
 static uint8_t syscall_stack[16384] __attribute__((aligned(16)));
 static k64_user_exec_context_t active_ctx;
+static k64_user_process_t process_table[K64_USER_PROCESS_MAX];
+static uint64_t next_user_pid = 5000;
 
 static void set_tss_descriptor(uint64_t base, uint32_t limit) {
     uint64_t low;
@@ -106,12 +133,88 @@ static void ctx_clear(void) {
     active_ctx.kernel_cr3 = 0;
     active_ctx.result = -1;
     active_ctx.active = 0;
+    active_ctx.process_index = -1;
     for (size_t i = 0; i < sizeof(active_ctx.fds) / sizeof(active_ctx.fds[0]); ++i) {
         active_ctx.fds[i].used = false;
         active_ctx.fds[i].data = NULL;
         active_ctx.fds[i].size = 0;
         active_ctx.fds[i].offset = 0;
     }
+}
+
+static void process_copy_path(char* dst, const char* src) {
+    size_t i = 0;
+
+    if (!dst) {
+        return;
+    }
+    if (!src || !src[0]) {
+        src = "<user-elf>";
+    }
+    while (src[i] && i + 1 < K64_USER_PROCESS_PATH_MAX) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+static int process_alloc(const char* path, uint64_t entry, uint64_t cr3) {
+    int free_slot = -1;
+
+    for (int i = 0; i < K64_USER_PROCESS_MAX; ++i) {
+        if (!process_table[i].used) {
+            free_slot = i;
+            break;
+        }
+    }
+    if (free_slot < 0) {
+        uint64_t oldest_pid = UINT64_MAX;
+        for (int i = 0; i < K64_USER_PROCESS_MAX; ++i) {
+            if (process_table[i].state != K64_USER_PROCESS_RUNNING &&
+                process_table[i].pid < oldest_pid) {
+                oldest_pid = process_table[i].pid;
+                free_slot = i;
+            }
+        }
+    }
+    if (free_slot < 0) {
+        return -1;
+    }
+
+    process_table[free_slot].used = true;
+    process_table[free_slot].pid = next_user_pid++;
+    process_table[free_slot].state = K64_USER_PROCESS_RUNNING;
+    process_table[free_slot].exit_code = -1;
+    process_table[free_slot].entry = entry;
+    process_table[free_slot].cr3 = cr3;
+    process_table[free_slot].start_tick = k64_pit_get_ticks();
+    process_table[free_slot].end_tick = 0;
+    process_table[free_slot].fault_vector = 0;
+    process_table[free_slot].fault_rip = 0;
+    process_copy_path(process_table[free_slot].path, path);
+    return free_slot;
+}
+
+static const char* process_state_name(k64_user_process_state_t state) {
+    switch (state) {
+        case K64_USER_PROCESS_RUNNING:
+            return "RUNNING";
+        case K64_USER_PROCESS_EXITED:
+            return "EXITED";
+        case K64_USER_PROCESS_FAULTED:
+            return "FAULTED";
+        default:
+            return "EMPTY";
+    }
+}
+
+static void process_finish(int index, k64_user_process_state_t state, int64_t exit_code) {
+    if (index < 0 || index >= K64_USER_PROCESS_MAX || !process_table[index].used) {
+        return;
+    }
+    process_table[index].state = state;
+    process_table[index].exit_code = exit_code;
+    process_table[index].end_tick = k64_pit_get_ticks();
 }
 
 static void write_text(const char* text, size_t len) {
@@ -163,6 +266,7 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
         case K64_SYSCALL_EXIT:
             active_ctx.result = (int64_t)frame->rdi;
             active_ctx.active = 0;
+            process_finish(active_ctx.process_index, K64_USER_PROCESS_EXITED, active_ctx.result);
             k64_user_return_asm(&active_ctx, active_ctx.result);
             break;
         case K64_SYSCALL_WRITE:
@@ -238,21 +342,74 @@ void k64_usermode_init(void) {
     K64_LOG_INFO("User mode initialized.");
 }
 
-int64_t k64_usermode_execute(const k64_vm_space_t* space, uint64_t entry, uint64_t user_stack_top) {
+int64_t k64_usermode_execute_named(const k64_vm_space_t* space,
+                                   uint64_t entry,
+                                   uint64_t user_stack_top,
+                                   const char* path) {
+    int process_index;
+
     if (!space || !space->present || !entry || !user_stack_top) {
+        return -1;
+    }
+
+    process_index = process_alloc(path, entry, space->cr3);
+    if (process_index < 0) {
+        k64_term_write("User process table is full\n");
         return -1;
     }
 
     ctx_clear();
     active_ctx.active = 1;
     active_ctx.result = -1;
+    active_ctx.process_index = process_index;
     active_ctx.result = k64_user_enter_asm(space->cr3, user_stack_top, entry, &active_ctx);
+    if (process_table[process_index].state == K64_USER_PROCESS_RUNNING) {
+        process_finish(process_index, K64_USER_PROCESS_EXITED, active_ctx.result);
+    }
 
     return active_ctx.result;
 }
 
+int64_t k64_usermode_execute(const k64_vm_space_t* space, uint64_t entry, uint64_t user_stack_top) {
+    return k64_usermode_execute_named(space, entry, user_stack_top, "<user-elf>");
+}
+
 bool k64_usermode_is_active(void) {
     return active_ctx.active != 0;
+}
+
+void k64_usermode_dump_processes(void) {
+    k64_term_write("PID   STATE    EXIT  TICKS  IMAGE\n");
+    for (int i = 0; i < K64_USER_PROCESS_MAX; ++i) {
+        uint64_t ticks;
+
+        if (!process_table[i].used) {
+            continue;
+        }
+        ticks = process_table[i].end_tick > process_table[i].start_tick
+                    ? process_table[i].end_tick - process_table[i].start_tick
+                    : k64_pit_get_ticks() - process_table[i].start_tick;
+        k64_term_write_dec(process_table[i].pid);
+        k64_term_write("  ");
+        k64_term_write(process_state_name(process_table[i].state));
+        if (process_table[i].state == K64_USER_PROCESS_EXITED) {
+            k64_term_write("   ");
+        } else {
+            k64_term_write("  ");
+        }
+        k64_term_write_dec((uint64_t)(uint32_t)process_table[i].exit_code);
+        k64_term_write("  ");
+        k64_term_write_dec(ticks);
+        k64_term_write("  ");
+        k64_term_write(process_table[i].path);
+        if (process_table[i].state == K64_USER_PROCESS_FAULTED) {
+            k64_term_write(" fault=");
+            k64_term_write_dec(process_table[i].fault_vector);
+            k64_term_write(" rip=");
+            k64_term_write_hex(process_table[i].fault_rip);
+        }
+        k64_term_putc('\n');
+    }
 }
 
 void k64_usermode_handle_fault(uint64_t vec,
@@ -281,6 +438,12 @@ void k64_usermode_handle_fault(uint64_t vec,
 
     active_ctx.result = -1;
     active_ctx.active = 0;
+    if (active_ctx.process_index >= 0 && active_ctx.process_index < K64_USER_PROCESS_MAX &&
+        process_table[active_ctx.process_index].used) {
+        process_table[active_ctx.process_index].fault_vector = vec;
+        process_table[active_ctx.process_index].fault_rip = rip;
+    }
+    process_finish(active_ctx.process_index, K64_USER_PROCESS_FAULTED, -1);
     k64_user_return_asm(&active_ctx, -1);
     for (;;) {
     }

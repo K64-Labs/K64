@@ -61,6 +61,7 @@ int main(void) {
     expect_cmd("clear", K64_SHELL_CMD_CLEAR);
     expect_cmd("ticks", K64_SHELL_CMD_TICKS);
     expect_cmd("task", K64_SHELL_CMD_TASK);
+    expect_cmd("ps", K64_SHELL_CMD_PS);
     expect_cmd("serial", K64_SHELL_CMD_SERIAL);
     expect_cmd("sched", K64_SHELL_CMD_SCHED);
     expect_cmd("panic", K64_SHELL_CMD_PANIC);
@@ -69,6 +70,7 @@ int main(void) {
     expect_cmd("servicectl", K64_SHELL_CMD_SERVICECTL);
     expect_cmd("driverctl", K64_SHELL_CMD_DRIVERCTL);
     expect_cmd("reload", K64_SHELL_CMD_RELOAD);
+    expect_cmd("sync", K64_SHELL_CMD_SYNC);
     expect_cmd("reboot", K64_SHELL_CMD_REBOOT);
     expect_cmd("shutdown", K64_SHELL_CMD_SHUTDOWN);
     expect_cmd("unknowncmd", K64_SHELL_CMD_UNKNOWN);

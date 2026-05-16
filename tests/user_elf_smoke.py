@@ -103,6 +103,13 @@ def run_smoke(read_until, send_line):
         if "motd => " not in combined or "welcome to K64" not in combined:
             raise RuntimeError(f"user file I/O output missing\nCaptured:\n{combined}")
 
+    send_line("ps\n")
+    combined += read_until("PID   STATE", 10)
+    expected_proc = "/ex/hello.elf" if "hello" in elfs else "/ex/catmotd.elf"
+    combined += read_until(expected_proc, 10)
+    if "EXITED" not in combined:
+        raise RuntimeError(f"user process table missing exited process\nCaptured:\n{combined}")
+
     print("user ELF smoke test passed")
 
 
