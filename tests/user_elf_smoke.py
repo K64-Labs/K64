@@ -88,7 +88,7 @@ def run_smoke(read_until, send_line):
     boot = read_until("K64 shell started. Type 'help' for commands.", 25)
     send_line("\n")
     combined = boot
-    requested = os.environ.get("K64_SMOKE_ELFS", "hello,catmotd")
+    requested = os.environ.get("K64_SMOKE_ELFS", "hello,catmotd,procinfo")
     elfs = [name.strip() for name in requested.split(",") if name.strip()]
 
     if "hello" in elfs:
@@ -103,9 +103,16 @@ def run_smoke(read_until, send_line):
         if "motd => " not in combined or "welcome to K64" not in combined:
             raise RuntimeError(f"user file I/O output missing\nCaptured:\n{combined}")
 
+    if "procinfo" in elfs:
+        send_line("elfrun /ex/procinfo.elf\n")
+        combined += read_until("ELF: exit code 0", 15)
+        if "procinfo: pid=" not in combined or "uptime_ticks=" not in combined:
+            raise RuntimeError(f"user libc/procinfo output missing\nCaptured:\n{combined}")
+
     send_line("ps\n")
     combined += read_until("PID   STATE", 10)
-    expected_proc = "/ex/hello.elf" if "hello" in elfs else "/ex/catmotd.elf"
+    expected_proc = "/ex/procinfo.elf" if "procinfo" in elfs else (
+        "/ex/hello.elf" if "hello" in elfs else "/ex/catmotd.elf")
     combined += read_until(expected_proc, 10)
     if "EXITED" not in combined:
         raise RuntimeError(f"user process table missing exited process\nCaptured:\n{combined}")

@@ -285,8 +285,29 @@ Current syscall ABI:
 - `4`: `open(path)`
 - `5`: `read(fd, buf, len)`
 - `6`: `close(fd)`
+- `7`: `getpid()`
+- `8`: `uptime_ticks()`
 
-This is still intentionally small, but it is now enough for simple ring-3 programs to do console output and read regular files from `K64FS`. It is not yet a full userspace runtime with concurrent user processes, writable file descriptors, process spawning, or a libc layer. The current process table is accounting and lifecycle visibility for synchronous user ELF runs.
+This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64FS`, ask for their process id, and read the kernel tick counter. It is not yet a full userspace runtime with concurrent user processes, writable file descriptors, process spawning, or a POSIX-compatible libc. The current process table is accounting and lifecycle visibility for synchronous user ELF runs.
+
+### Userland libc seed
+
+Files:
+
+- `userland/include/k64/libc.h`
+- `userland/lib/crt0.S`
+- `userland/lib/k64libc.c`
+- `userland/bin/*.c`
+
+K64 now has a small native userland build path for C programs. The build system compiles `userland/bin/*.c` with freestanding user-mode flags, links each program with the K64 crt0 and libc shim, and stages the result into `/ex` beside the hand-written assembly samples.
+
+The current libc layer is intentionally tiny:
+
+- `_start` calls `main()` and exits through the kernel syscall ABI
+- syscall wrappers for write, open, read, close, getpid, and uptime
+- minimal string and decimal-print helpers
+
+This is not a full C library yet. It is the first stable ABI surface for growing a real userland without writing every program in assembly.
 
 ### Physical memory management
 
@@ -829,6 +850,7 @@ The repository currently ships these sample executables:
 
 - `/ex/hello.elf`
 - `/ex/catmotd.elf`
+- `/ex/procinfo.elf`
 
 and two native binary modules that consume it:
 
@@ -1162,6 +1184,8 @@ hello
 `hello.elf` now uses the `int 0x80` syscall path to write text and exit from ring 3.
 
 `catmotd.elf` is also staged into `/ex` and demonstrates user-mode file I/O by opening and reading `/etc/motd` through the syscall layer.
+
+`procinfo.elf` is built from C under `userland/bin/` and linked against the small K64 libc shim. It demonstrates the C userland path plus `getpid()` and uptime syscalls.
 
 ## Service and Driver Control
 

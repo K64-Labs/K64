@@ -69,7 +69,7 @@ static void ata_delay_400ns(uint16_t ctrl_base) {
 
 static bool ata_poll_ready(k64_ata_device_t* dev, bool need_drq) {
     uint8_t status;
-    int spins = 100000;
+    int spins = 1000000;
 
     ata_delay_400ns(dev->ctrl_base);
     while (spins-- > 0) {
@@ -155,6 +155,7 @@ static bool ata_pio_rw(k64_ata_device_t* dev, uint64_t lba, uint32_t count, void
             for (int i = 0; i < 256; ++i) {
                 outw(dev->io_base + ATA_REG_DATA, words[i]);
             }
+            ata_delay_400ns(dev->ctrl_base);
             outb(dev->io_base + ATA_REG_COMMAND, ATA_CMD_CACHE_FLUSH);
             if (!ata_poll_ready(dev, false)) {
                 return false;

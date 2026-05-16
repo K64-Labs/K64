@@ -50,6 +50,7 @@ TARGET64 ?=
 
 CFLAGS32 = $(TARGET32) -I. -Ibuild -m32 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-builtin -fno-pic -fno-pie -mno-mmx -mno-sse -mno-sse2
 CFLAGS64 = $(TARGET64) -I. -Ibuild -m64 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-builtin -fno-pic -fno-pie -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -mno-mmx -mno-sse -mno-sse2
+USER_CFLAGS = $(TARGET64) -Iuserland/include -m64 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-builtin -fno-pic -fno-pie -mno-red-zone -mno-mmx -mno-sse -mno-sse2
 LDFLAGS  = -T linker.ld -nostdlib
 
 K64S_SRCS = $(wildcard k64s/*.c)
@@ -61,8 +62,11 @@ K64M_DEF_SRCS = $(wildcard k64m_def/*.drv)
 K64M_BUILD_DIR := build/k64m
 K64M_BINS := $(patsubst k64m_def/%.drv,$(K64M_BUILD_DIR)/%.k64m,$(K64M_DEF_SRCS))
 EX_SRCS = $(wildcard ex/*.S)
+USER_C_SRCS = $(wildcard userland/bin/*.c)
 EX_BUILD_DIR := build/ex
 EX_ELFS := $(patsubst ex/%.S,$(EX_BUILD_DIR)/%.elf,$(EX_SRCS))
+USER_ELFS := $(patsubst userland/bin/%.c,$(EX_BUILD_DIR)/%.elf,$(USER_C_SRCS))
+USER_LIB_OBJS := build/userland/crt0.o build/userland/k64libc.o
 K64FS_SRC_ROOT := rootfs
 K64FS_STAGE_ROOT := build/rootfs
 K64FS_STAGE_STAMP := build/rootfs.stamp
@@ -157,6 +161,22 @@ $(EX_BUILD_DIR)/%.elf: $(EX_BUILD_DIR)/%.o
 	mkdir -p $(EX_BUILD_DIR)
 	$(LD) -nostdlib -static -e _start -Ttext 0x40100000 -o $@ $<
 
+build/userland/%.o: userland/lib/%.S
+	mkdir -p build/userland
+	$(CC64) $(USER_CFLAGS) -c -o $@ $<
+
+build/userland/%.o: userland/lib/%.c
+	mkdir -p build/userland
+	$(CC64) $(USER_CFLAGS) -c -o $@ $<
+
+build/userland/%.o: userland/bin/%.c
+	mkdir -p build/userland
+	$(CC64) $(USER_CFLAGS) -c -o $@ $<
+
+$(EX_BUILD_DIR)/%.elf: build/userland/%.o $(USER_LIB_OBJS)
+	mkdir -p $(EX_BUILD_DIR)
+	$(LD) -nostdlib -static -e _start -Ttext 0x40100000 -o $@ build/userland/crt0.o $< build/userland/k64libc.o
+
 $(K64_GRUB_K64FS_MOD): grub/k64fs.c tools/build_grub_k64fs.sh
 	mkdir -p build
 	rm -rf $(GRUB_MODDIR)
@@ -224,7 +244,7 @@ $(K64M_BUILD_DIR)/%.k64m: k64m_def/%.drv tools/build_k64x.py
 	mkdir -p $(K64M_BUILD_DIR)
 	$(PYTHON) tools/build_k64x.py driver $< $@
 
-$(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(K64_GRUB_ROOT_CFG) tools/mk_k64fs.py tools/build_k64x.py $(shell find rootfs -type f 2>/dev/null) $(K64S_DEF_SRCS) $(K64M_DEF_SRCS) $(K64S_BINS) $(K64M_BINS)
+$(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(USER_ELFS) $(K64_GRUB_ROOT_CFG) tools/mk_k64fs.py tools/build_k64x.py $(shell find rootfs -type f 2>/dev/null) $(K64S_DEF_SRCS) $(K64M_DEF_SRCS) $(K64S_BINS) $(K64M_BINS)
 	rm -rf $(K64FS_STAGE_ROOT)
 	mkdir -p $(K64FS_STAGE_ROOT)/boot
 	mkdir -p $(K64FS_STAGE_ROOT)/boot/grub
@@ -236,7 +256,7 @@ $(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(K64_GRUB_ROOT_CFG) tools/mk
 	cp $(K64_GRUB_ROOT_CFG) $(K64FS_STAGE_ROOT)/boot/grub/grub.cfg
 	if [ -n "$(K64S_BINS)" ]; then cp $(K64S_BINS) $(K64FS_STAGE_ROOT)/k64s/; fi
 	if [ -n "$(K64M_BINS)" ]; then cp $(K64M_BINS) $(K64FS_STAGE_ROOT)/k64m/; fi
-	if [ -n "$(EX_ELFS)" ]; then cp $(EX_ELFS) $(K64FS_STAGE_ROOT)/ex/; fi
+	if [ -n "$(EX_ELFS) $(USER_ELFS)" ]; then cp $(EX_ELFS) $(USER_ELFS) $(K64FS_STAGE_ROOT)/ex/; fi
 	touch $(K64FS_STAGE_STAMP)
 
 $(K64FS_IMAGE): $(K64FS_STAGE_STAMP)

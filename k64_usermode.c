@@ -322,6 +322,15 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             active_ctx.fds[fd].offset = 0;
             return 0;
         }
+        case K64_SYSCALL_GETPID:
+            if (active_ctx.process_index < 0 ||
+                active_ctx.process_index >= K64_USER_PROCESS_MAX ||
+                !process_table[active_ctx.process_index].used) {
+                return -1;
+            }
+            return (int64_t)process_table[active_ctx.process_index].pid;
+        case K64_SYSCALL_UPTIME:
+            return (int64_t)k64_pit_get_ticks();
         default:
             return -1;
     }
