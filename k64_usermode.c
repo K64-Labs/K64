@@ -263,7 +263,9 @@ void k64_usermode_handle_fault(uint64_t vec,
     (void)cs;
     (void)rflags;
     uint64_t cr2 = 0;
+    uint64_t cr3 = 0;
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
 
     k64_term_write("\nUser-mode fault: vector=");
     k64_term_write_dec(vec);
@@ -273,6 +275,8 @@ void k64_usermode_handle_fault(uint64_t vec,
     k64_term_write_hex(err);
     k64_term_write(" cr2=");
     k64_term_write_hex(cr2);
+    k64_term_write(" cr3=");
+    k64_term_write_hex(cr3);
     k64_term_putc('\n');
 
     active_ctx.result = -1;

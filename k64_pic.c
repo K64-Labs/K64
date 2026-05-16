@@ -19,9 +19,6 @@ static inline uint8_t inb(uint16_t port) {
 }
 
 void k64_pic_remap(void) {
-    uint8_t a1 = inb(PIC1_DATA);
-    uint8_t a2 = inb(PIC2_DATA);
-
     outb(PIC1_CMD, 0x11);
     outb(PIC2_CMD, 0x11);
 
@@ -34,8 +31,12 @@ void k64_pic_remap(void) {
     outb(PIC1_DATA, 0x01);
     outb(PIC2_DATA, 0x01);
 
-    outb(PIC1_DATA, a1);
-    outb(PIC2_DATA, a2);
+    /*
+     * Start from a fully masked PIC state and let K64 explicitly unmask only
+     * the IRQ lines that have installed handlers.
+     */
+    outb(PIC1_DATA, 0xFF);
+    outb(PIC2_DATA, 0xFF);
 }
 
 void k64_pic_send_eoi(uint8_t irq) {

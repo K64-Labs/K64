@@ -9,6 +9,7 @@ fi
 set +e
 timeout 8s qemu-system-x86_64 \
   -cdrom k64.iso \
+  -drive file=build/root.disk,format=raw,if=ide,index=0 \
   -display none \
   -serial none \
   -no-reboot -no-shutdown >/dev/null 2>&1

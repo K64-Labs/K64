@@ -45,7 +45,9 @@
 k64_irq0_stub:
     PUSH_ALL
     movq %rsp, %rdi
+    subq $8, %rsp
     call k64_sched_handle_timer
+    addq $8, %rsp
     movq %rax, %rsp
     POP_ALL
     iretq
@@ -53,6 +55,8 @@ k64_irq0_stub:
 .global k64_irq1_stub
 k64_irq1_stub:
     PUSH_ALL
+    subq $8, %rsp
     call k64_keyboard_on_interrupt
+    addq $8, %rsp
     POP_ALL
     iretq

@@ -12,12 +12,12 @@ K64 is currently best understood as:
 - a legacy-hardware-oriented runtime using VGA text mode, PIC, PIT, and PS/2 keyboard input
 - a registry-based service/driver environment
 - a boot image that includes a custom root filesystem format, `K64FS`
+- a writable ATA-backed root path in the default QEMU flow
 - a system where user-facing commands are mostly exposed by services rather than hard-coded into the kernel core
 
 It is not yet:
 
-- a fully isolated multi-process OS with per-process page tables
-- a persistent disk-backed system with writeback to real storage
+- a fully isolated multi-process OS with complete userland, libc, and process management
 - a production-ready hot-reloadable kernel
 - a modern UEFI/USB-first OS
 
@@ -67,7 +67,7 @@ The kernel starts as a Multiboot v1 payload under GRUB. The low-level path is:
 6. `boot.s` enables PAE, enables long mode in `EFER`, loads `CR3`, enables paging, and performs a far jump to 64-bit code.
 7. `longmode.s` sets up segment registers, switches to the 64-bit stack, and calls `k64_kernel_main()`.
 
-The current paging setup is deliberately minimal. It is enough to enter long mode and run the kernel image, but it is not a full virtual memory environment with distinct address spaces.
+The boot-time paging setup is deliberately minimal. It is enough to enter long mode and run the kernel image. Later in bring-up, `k64_vmm.c` adds private page-table roots for services and ELF execution, including a small ring-3 path for `/ex/*.elf` programs.
 
 ### Layer 2: Core kernel runtime
 
@@ -110,9 +110,11 @@ K64 has two registry-backed runtime layers:
 
 The built-in kernel code registers internal implementations for several of them, but the naming, packaging, boot exposure, and control-plane model all revolve around those artifacts.
 
+There is now also a small block-device layer under the driver model. The first concrete backend is a built-in ATA PIO driver exposed as `ata.k64m`.
+
 ### Layer 4: Root filesystem and boot image
 
-The running system mounts a `K64FS` image from a Multiboot module. The root filesystem contains normal user-visible paths plus system artifacts such as:
+The running system now prefers a writable `K64FS` image on a block device and only falls back to the old Multiboot module image when no persistent root is available. The root filesystem contains normal user-visible paths plus system artifacts such as:
 
 - `/boot/k64-kernel-v<version>.elf`
 - `/boot/grub/grub.cfg`
@@ -120,7 +122,7 @@ The running system mounts a `K64FS` image from a Multiboot module. The root file
 - `/k64m/*.k64m`
 - `/ex/*.elf`
 
-GRUB itself also understands `K64FS` through the custom module in `grub/k64fs.c`, so the ISO boot path can load the boot configuration from inside the root filesystem.
+GRUB itself also understands `K64FS` through the custom module in `grub/k64fs.c`, so the ISO bootstrap path can hand off to the boot configuration stored inside the root filesystem.
 
 ## Boot Pipeline in Detail
 
@@ -134,11 +136,12 @@ Its job is to:
 
 - load GRUB modules `loopback`, `configfile`, and `k64fs`
 - remember the ISO root as `k64_iso_root`
+- try `(hd0)/boot/grub/grub.cfg` first
 - loop-mount `/k64fs/root.k64fs`
 - set `root=(loop)`
 - `configfile (loop)/boot/grub/grub.cfg`
 
-So the ISO config is only a bootstrap shim. The real menu comes from the root filesystem image.
+So the ISO config is only a bootstrap shim. On a system with a writable K64 disk, GRUB prefers the disk copy of `/boot/grub/grub.cfg`. On a pure ISO boot, it falls back to the loop-mounted `root.k64fs` image on the CD.
 
 ### Step 2: Rootfs GRUB config
 
@@ -146,18 +149,25 @@ The “real” GRUB config is generated into `build/grub-root.cfg` and copied in
 
 The default menu entry does:
 
-- `set root=(loop)`
 - `multiboot /boot/k64-kernel-v<version>.elf pit_hz=1000 log_level=debug`
-- `set root=${k64_iso_root}`
-- `module /k64fs/root.k64fs /k64fs/root.k64fs`
+- conditionally pass `/k64fs/root.k64fs` as a Multiboot module only when booting through the ISO fallback path
 
-That means the kernel is loaded from the loop-mounted root filesystem, and the rootfs image itself is also passed into the kernel again as a Multiboot module so that `fs.k64m` can mount it at runtime. The binary `.k64s` and `.k64m` files are discovered from the mounted rootfs by the native loaders.
+That means the kernel can boot in two modes:
+
+- persistent disk-root mode, where `fs.k64m` mounts the raw `K64FS` volume directly from the ATA disk
+- ISO fallback mode, where GRUB passes `root.k64fs` in as a Multiboot module and the kernel mounts that image in memory
+
+The binary `.k64s` and `.k64m` files are discovered from the mounted rootfs by the native loaders in both modes.
 
 ### Step 3: Kernel-side mount
 
-`k64_fs_driver_start()` scans Multiboot modules and mounts the first one whose module path ends in `.k64fs`.
+`k64_fs_driver_start()` mounts in this order:
 
-If no valid `K64FS` image is found, the filesystem driver falls back to a tiny in-memory tree. In normal builds, the mounted root image should exist and succeed.
+1. first compatible writable block device with a valid `K64FS` header
+2. first Multiboot module whose path ends in `.k64fs`
+3. tiny in-memory fallback tree
+
+In normal QEMU builds, the first path is used because `make` now builds and attaches `build/root.disk`.
 
 ## Core Subsystems
 
@@ -246,6 +256,36 @@ The scheduler now drives runtime work more directly than before. The important p
 
 That still does not make K64 a full Unix-style process runtime. It remains a small kernel with cooperative service logic and a simple round-robin scheduler, not a full fork/exec/process-tree model.
 
+### User mode and syscalls
+
+Files:
+
+- `k64_usermode.c`
+- `k64_usermode.h`
+- `k64_usermode_asm.S`
+
+K64 now has a real first user-mode execution path for `/ex/*.elf` programs.
+
+What was added:
+
+- user code and data descriptors in the GDT
+- a 64-bit TSS with a dedicated ring-0 syscall/fault stack
+- an IDT gate at vector `0x80` with DPL 3
+- an `iretq`-based ring transition into user mode
+- a return path back into the kernel on `exit` or on a user fault
+
+Current syscall ABI:
+
+- `0`: `exit(code)`
+- `1`: `write(ptr, len)`
+- `2`: `yield()`
+- `3`: `sleep(ticks)`
+- `4`: `open(path)`
+- `5`: `read(fd, buf, len)`
+- `6`: `close(fd)`
+
+This is still intentionally small, but it is now enough for simple ring-3 programs to do console output and read regular files from `K64FS`. It is not yet a full userspace runtime with writable file descriptors, process spawning, or a libc layer.
+
 ### Physical memory management
 
 Files:
@@ -288,13 +328,14 @@ What it does:
 - maps a private stack into that service space
 - executes service callbacks and service-owned command handlers under the owning `CR3`
 - maps ELF PT_LOAD segments into temporary isolated executable spaces
+- maps `/ex/*.elf` programs as user pages for the ring-3 execution path
+- exposes a page-table lookup helper used to reject unmapped user entrypoints before execution
 
 What it does not do:
 
-- move code into ring 3
 - provide copy-on-write or demand paging
-- provide a user-mode system-call ABI
 - fully remove the shared low identity-mapped kernel region
+- provide process lifetime management beyond synchronous ELF execution
 
 The main constants today are:
 
@@ -304,7 +345,7 @@ The main constants today are:
 - heap size: `0x00100000`
 - stack size: `0x00008000`
 
-So when `servicectl list` shows a “VM BASE”, it now refers to a real isolated service window backed by a private address space. The remaining boundary is that K64 still executes everything in ring 0 and shares the low identity-mapped kernel region.
+So when `servicectl list` shows a “VM BASE”, it now refers to a real isolated service window backed by a private address space. The remaining boundary is that services and ELF-backed drivers still execute in ring 0 and share the low identity-mapped kernel region. Standalone `/ex/*.elf` user programs are the first ring-3 path.
 
 ## Driver Model (`.k64m`)
 
@@ -408,6 +449,30 @@ Supported operations:
 
 Driver control is root-only.
 
+### Block devices and `storagectl`
+
+Files:
+
+- `k64_block.c`
+- `k64_block.h`
+- `k64_ata.c`
+- `k64_ata.h`
+
+The block layer provides:
+
+- block-device registration
+- read/write dispatch by LBA
+- simple device enumeration for services and the filesystem layer
+
+The first backend is the built-in ATA PIO driver. In the default QEMU flow, `make` attaches `build/root.disk` as an IDE hard disk, the ATA driver registers it as `ata0`, and `fs.k64m` mounts the `K64FS` volume from it.
+
+The `storagectl` service exposes that state at runtime:
+
+- `storagectl list`
+- `storagectl root`
+- `storagectl sync`
+- `sync`
+
 ## Service Model (`.k64s`)
 
 Files:
@@ -478,6 +543,7 @@ The built-in service registration in `k64s/k64s_builtin.c` currently creates:
 - `init`
 - `servicectl`
 - `driverctl`
+- `storagectl`
 - `reload`
 - `fsctl`
 - `userctl`
@@ -492,6 +558,7 @@ What they do:
 - `init`: starts the rest of the base userspace/service plane
 - `servicectl`: service management command surface
 - `driverctl`: driver management command surface
+- `storagectl`: block-device inspection and filesystem sync
 - `reload`: runtime reload request surface
 - `fsctl`: read/write filesystem command surface
 - `userctl`: user/session/privilege command surface
@@ -583,6 +650,7 @@ Files:
 
 - the kernel runtime filesystem driver
 - the GRUB-side filesystem module
+- the persistent raw disk image attached as `build/root.disk` in the default QEMU path
 
 ### Design goals of `K64FS`
 
@@ -661,10 +729,11 @@ Each node tracks:
 `k64_fs_driver_start()`:
 
 1. resets the filesystem state
-2. scans Multiboot modules for the first `.k64fs`
-3. validates the header and entry table
-4. populates the node table
-5. if no mountable image exists, creates a fallback in-memory filesystem
+2. probes registered block devices for a valid `K64FS` image
+3. if no block-backed root is found, scans Multiboot modules for the first `.k64fs`
+4. validates the header and entry table
+5. populates the node table
+6. if no mountable image exists, creates a fallback in-memory filesystem
 
 ### Read behavior
 
@@ -683,11 +752,17 @@ Mutations such as:
 - `mv`
 - `cp`
 
-cause the in-memory node table to be repacked into a fresh `K64FS` image in RAM through `fs_writeback_image()`.
+cause the in-memory node table to be repacked into a fresh `K64FS` image through `fs_writeback_image()`.
 
-That means `K64FS` now behaves as a normal read/write filesystem for everyday shell usage, not just a static system-image mount. Files and directories can be created, modified, moved, copied, inspected, and removed through the `fsctl` command surface.
+If the mounted root came from a block device, the rebuilt image is also flushed back to that device. If the mounted root came from a Multiboot module, the writeback stays in memory only.
 
-This is real writeback into the mounted image representation, but it is still only in memory. It does not currently flush to a persistent block device, so changes do not survive reboot unless the underlying boot image itself changes.
+That means `K64FS` now behaves as a real read/write filesystem for everyday shell usage, not just a static system-image mount. Files and directories can be created, modified, moved, copied, inspected, and removed through the `fsctl` command surface, and those changes survive reboot when booted with the default attached disk image.
+
+Current boundaries:
+
+- the persistent path is a raw unpartitioned `K64FS` volume, not a partitioned disk format
+- the first implemented backend is ATA PIO, not AHCI or NVMe
+- there is no journal or crash-recovery layer
 
 ### GRUB-side support
 
@@ -748,9 +823,10 @@ Current behavior:
 - `elfrun /ex/<file>.elf` executes a file explicitly
 - typing `<name>` in the shell will try `/ex/<name>.elf` automatically if no built-in command, service command, service name, or driver name matches first
 
-The repository currently ships one sample executable:
+The repository currently ships these sample executables:
 
 - `/ex/hello.elf`
+- `/ex/catmotd.elf`
 
 and two native binary modules that consume it:
 
@@ -972,6 +1048,7 @@ It also exposes service-owned commands, including:
 
 - `servicectl`
 - `driverctl`
+- `storagectl`
 - `reload`
 - `sysfetch`
 - `uname`
@@ -983,7 +1060,14 @@ It also exposes service-owned commands, including:
 - `mkdir`
 - `touch`
 - `write`
+- `append`
 - `cat`
+- `stat`
+- `rm`
+- `rmdir`
+- `mv`
+- `cp`
+- `sync`
 - `userctl`
 - `users`
 - `groups`
@@ -1019,7 +1103,9 @@ Files:
 - `k64_elf.c`
 - `k64_elf.h`
 - `ex/hello.S`
-- `k64s/elfctl.k64s`
+- `ex/catmotd.S`
+- `k64s/k64s_builtin.c`
+- `k64s_def/elfctl.svc`
 
 K64 now has a real minimal ELF64 loader for filesystem-backed executables.
 
@@ -1032,7 +1118,7 @@ What it supports today:
 - `PT_LOAD` program headers
 - mapping PT_LOAD segments into a private executable address space
 - zero-filling BSS tails
-- calling the entrypoint as `int (*)(void)` under an isolated `CR3` and private stack
+- calling the entrypoint either under an isolated kernel `CR3` or through the ring-3 user-mode path
 
 How execution works:
 
@@ -1040,21 +1126,21 @@ How execution works:
 2. `k64_elf_execute_path()` validates the ELF header and program-header table
 3. the loader allocates a temporary isolated VM space
 4. it maps each PT_LOAD segment into that space at the ELF virtual address
-5. it switches into the executable `CR3` and private stack
-6. it calls the entrypoint directly
-7. when the function returns, the loader prints the exit code and frees the temporary address space
+5. for `/ex/*.elf` and `elfrun`, it maps the image as user-accessible and enters ring 3 through `iretq`
+6. for ELF-backed `.k64s` and `.k64m`, it still uses the older isolated ring-0 call path
+7. on `exit`, the loader returns to the kernel, prints the exit code, and frees the temporary address space
 
 Important limits:
 
 - no relocations beyond simple PT_LOAD copying
 - no dynamic linker
 - no symbol resolution
-- no user-mode transition
-- no separate address space
 - no argv/envp
-- execution happens inside the kernel runtime context, not as a fully isolated process
+- only `/ex/*.elf` currently use the ring-3 path
+- ELF-backed services and drivers still execute on the kernel side
+- file access through the syscall layer is read-only today
 
-So this is a real ELF loader, but it is still a minimal kernel-internal execution model rather than a complete Unix-style process runtime.
+So this is now a real split execution model: user applications in `/ex` can run in ring 3, but the overall ELF runtime is still far smaller than a complete Unix-style process environment.
 
 ### `elfctl` and shell execution
 
@@ -1068,6 +1154,10 @@ The shell also auto-executes `/ex/<name>.elf` as its last fallback, so both of t
 elfrun /ex/hello.elf
 hello
 ```
+
+`hello.elf` now uses the `int 0x80` syscall path to write text and exit from ring 3.
+
+`catmotd.elf` is also staged into `/ex` and demonstrates user-mode file I/O by opening and reading `/etc/motd` through the syscall layer.
 
 ## Service and Driver Control
 
@@ -1111,6 +1201,24 @@ The list view includes:
 - state
 - name
 - source binary path
+
+### `storagectl`
+
+Runtime storage control currently supports:
+
+```text
+storagectl list
+storagectl root
+storagectl sync
+sync
+```
+
+Behavior:
+
+- `list` prints registered block devices, their mode, and geometry
+- `root` prints the current root mount source and whether it is persistent
+- `sync` flushes the mounted `K64FS` image back to the block device when one is active
+- bare `sync` is a convenience alias provided by the same service
 
 ## Reload Paths
 
@@ -1227,6 +1335,32 @@ File:
 
 - `Makefile`
 
+### Fedora WSL quick start
+
+This repository is currently known to build and test cleanly from the Fedora WSL environment used during development:
+
+```powershell
+wsl.exe -d FedoraLinux-43 -e bash -lc "cd /mnt/c/Users/linob/Downloads/K64 && make test"
+```
+
+To boot it interactively:
+
+```powershell
+wsl.exe -d FedoraLinux-43 -e bash -lc "cd /mnt/c/Users/linob/Downloads/K64 && make run"
+```
+
+Required Fedora-side tools include:
+
+- `gcc`
+- `make`
+- `python3`
+- `qemu-system-x86_64`
+- `grub2-tools`
+- `xorriso`
+- `rsync`
+
+The custom GRUB `k64fs.mod` build also needs GRUB source headers. By default the helper script looks for them at `/tmp/grub-src`; override this with `GRUB_SRC=/path/to/grub-src` if needed.
+
 ### Toolchain detection
 
 The build prefers cross-compilers:
@@ -1274,8 +1408,11 @@ The ISO build process is:
 2. build the GRUB `k64fs.mod`
 3. generate bootstrap and root GRUB configs
 4. build `root.k64fs`
-5. assemble the `iso/` tree
-6. run `grub-mkrescue`
+5. create `build/root.disk` as a raw writable `K64FS` volume
+6. assemble the `iso/` tree
+7. run `grub-mkrescue`
+
+The default QEMU targets attach both the ISO and `build/root.disk`. The ISO is the boot medium; the raw disk is the persistent root device that the ATA driver mounts as `K64FS`.
 
 ### Build targets
 
@@ -1290,17 +1427,24 @@ The ISO build process is:
 Tests currently cover:
 
 - shell command parsing
+- string helper behavior
+- filesystem mutation and lookup behavior
 - generated GRUB config correctness
-- boot smoke behavior in QEMU
+- boot smoke behavior in QEMU with an attached writable disk image
+- ring-3 user ELF execution through `elfrun`
+- user-mode console output and read-only file I/O syscalls
 
 Files:
 
-- `tests/run_shell_cmd_tests.sh`
+- `tests/run_host_tests.sh`
 - `tests/check_grub_cfg.sh`
 - `tests/boot_smoke_test.sh`
+- `tests/user_elf_smoke.py`
 - `tests/shell_cmd_test.c`
+- `tests/string_test.c`
+- `tests/fs_unit_test.c`
 
-The test suite is intentionally small and targeted. It is useful for protecting the packaging path and parser logic, but it does not amount to broad runtime verification.
+The test suite is intentionally small and targeted. It is useful for protecting the packaging path, parser logic, filesystem behavior, boot path, and first user-mode execution path, but it does not amount to broad runtime verification.
 
 ## Development Model
 
@@ -1324,9 +1468,14 @@ These are the main technical limits of the repository as it exists today.
 
 Services and ELF-backed executables now get separate page tables and private stacks, but K64 still runs them in ring 0 and still shares the low identity-mapped kernel region. That is real address-space separation for service/app-private mappings, but it is not yet a hardened user/kernel security boundary.
 
-### 2. Filesystem writeback is in-memory only
+### 2. Persistent storage is intentionally simple
 
-Filesystem mutations are repacked into the mounted `K64FS` image in RAM, but there is no persistent block-device backend yet. Reboot loses those changes.
+The persistent path is now a raw `K64FS` image on an ATA block device. That is enough for real reboot-persistent writes in the default QEMU flow, but it is still a minimal design:
+
+- no partition table support
+- no journal
+- no crash recovery
+- no AHCI or NVMe backend yet
 
 ### 3. Hot kernel reload is incomplete
 
@@ -1358,16 +1507,17 @@ A typical boot looks like this:
 
 1. GRUB loads the bootstrap config from the ISO
 2. GRUB loads `k64fs.mod`
-3. GRUB loop-mounts `root.k64fs`
-4. GRUB loads `/boot/grub/grub.cfg` from inside `root.k64fs`
-5. GRUB loads the kernel from `/boot/k64-kernel-v<version>.elf`
-6. GRUB passes `root.k64fs` as a Multiboot module
-7. the kernel initializes its core subsystems
-8. the driver registry autostarts built-in drivers such as `screen`, `keyboard`, and `fs`
-9. the service registry starts `init`
-10. `init` starts `servicectl`, `driverctl`, `fsctl`, `userctl`, and `shell`
-11. the kernel enters the async dispatcher loop
-12. you interact with the shell as `guest@k64>`
+3. GRUB first checks the attached writable disk for `/boot/grub/grub.cfg`
+4. if no disk config is present, GRUB loop-mounts the ISO copy of `root.k64fs`
+5. GRUB loads `/boot/grub/grub.cfg` from the disk or loop-mounted rootfs
+6. GRUB loads the kernel from `/boot/k64-kernel-v<version>.elf`
+7. GRUB passes `root.k64fs` as a Multiboot module only for the ISO fallback path
+8. the kernel initializes its core subsystems
+9. the driver registry autostarts built-in drivers such as `screen`, `keyboard`, and `fs`
+10. the service registry starts `init`
+11. `init` starts `servicectl`, `driverctl`, `storagectl`, `fsctl`, `userctl`, and `shell`
+12. the kernel enters the async dispatcher loop
+13. you interact with the shell as `[guest]@K64 ~/ >>>`
 
 ## Common Commands
 
@@ -1380,6 +1530,8 @@ serial
 layout de
 servicectl list
 driverctl list
+storagectl list
+sync
 users
 groups
 whoami
@@ -1409,7 +1561,7 @@ The cleanest extension points today are:
 
 If you want to turn K64 into a more complete OS, the highest-value next steps are probably:
 
-- real block-device drivers and persistent filesystem writeback
+- AHCI/NVMe backends on top of the block layer
 - true per-process page tables and context isolation
 - UEFI boot support
 - USB input support

@@ -1,6 +1,7 @@
 // k64_kernel.c – main
 #include <stdint.h>
 #include "k64_terminal.h"
+#include "k64_block.h"
 #include "k64_log.h"
 #include "k64_multiboot.h"
 #include "k64_config.h"
@@ -13,6 +14,7 @@
 #include "k64_modules.h"
 #include "k64_system.h"
 #include "k64_serial.h"
+#include "k64_usermode.h"
 #include "k64_version.h"
 #include "k64_autoversion.h"
 
@@ -66,7 +68,9 @@ void k64_kernel_main(void) {
 
     K64_LOG_INFO("Initializing scheduler...");
     k64_sched_init();
+    k64_usermode_init();
 
+    k64_block_init();
     k64_modules_registry_init();
     k64_system_registry_init();
     k64_system_register_core_services();
@@ -95,6 +99,5 @@ void k64_kernel_main(void) {
     for (;;) {
         k64_modules_poll_async();
         k64_system_poll_async();
-        __asm__ __volatile__("hlt");
     }
 }

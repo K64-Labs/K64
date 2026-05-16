@@ -2,6 +2,7 @@
 #include "k64_idt.h"
 #include "k64_terminal.h"
 #include "k64_log.h"
+#include "k64_usermode.h"
 
 #define K64_IDT_SIZE 256
 
@@ -113,6 +114,10 @@ void k64_exception_handler(uint64_t vec,
                            uint64_t rip,
                            uint64_t cs,
                            uint64_t rflags) {
+    if ((cs & 0x3ULL) == 0x3ULL && k64_usermode_is_active()) {
+        k64_usermode_handle_fault(vec, err, rip, cs, rflags);
+    }
+
     k64_term_setcolor(K64_COLOR_WHITE, K64_COLOR_RED);
     k64_term_write("\nK64 CPU EXCEPTION\n");
 

@@ -4,6 +4,7 @@
 #include "k64_fs.h"
 #include "k64_log.h"
 #include "k64_terminal.h"
+#include "k64_usermode.h"
 #include "k64_vmm.h"
 
 #define K64_ELF64 2
@@ -13,6 +14,10 @@
 #define K64_ELF_X86_64 62
 #define K64_PT_LOAD 1
 #define K64_ELF_PAGE 4096ULL
+#define K64_ELF_VM_BASE 0x0000000040000000ULL
+#define K64_ELF_VM_STRIDE 0x0000000001000000ULL
+#define K64_ELF_VM_MAX_SLOTS 256ULL
+#define K64_ELF_PID_BASE 0x100000000ULL
 
 typedef struct {
     unsigned char e_ident[16];
@@ -46,7 +51,17 @@ static uint64_t elf_align_up(uint64_t value, uint64_t align) {
     return (value + align - 1ULL) & ~(align - 1ULL);
 }
 
-bool k64_elf_execute_path(const char* path) {
+static uint64_t elf_pid_for_entry(uint64_t fallback_pid, uint64_t entry) {
+    if (entry >= K64_ELF_VM_BASE) {
+        uint64_t slot = (entry - K64_ELF_VM_BASE) / K64_ELF_VM_STRIDE;
+        if (slot < K64_ELF_VM_MAX_SLOTS) {
+            return K64_ELF_PID_BASE + slot;
+        }
+    }
+    return fallback_pid;
+}
+
+static bool elf_execute_impl(const char* path, bool user_mode) {
     const uint8_t* file_data = NULL;
     size_t file_size = 0;
     const k64_elf64_ehdr_t* ehdr;
@@ -54,7 +69,8 @@ bool k64_elf_execute_path(const char* path) {
     uint64_t min_vaddr = UINT64_MAX;
     uint64_t max_vaddr = 0;
     k64_vm_space_t app_space;
-    static uint64_t next_ephemeral_pid = 0x100000000ULL;
+    static uint64_t next_ephemeral_pid = K64_ELF_PID_BASE;
+    uint64_t app_pid;
     int rc;
 
     if (!path || !path[0]) {
@@ -108,7 +124,9 @@ bool k64_elf_execute_path(const char* path) {
         return false;
     }
 
-    if (!k64_vmm_alloc_service_space(next_ephemeral_pid++, &app_space)) {
+    app_pid = elf_pid_for_entry(next_ephemeral_pid++, ehdr->e_entry);
+    if ((user_mode ? !k64_vmm_alloc_user_space(app_pid, &app_space)
+                   : !k64_vmm_alloc_service_space(app_pid, &app_space))) {
         K64_LOG_WARN("ELF: allocation failed.");
         return false;
     }
@@ -119,11 +137,16 @@ bool k64_elf_execute_path(const char* path) {
         if (ph->p_type != K64_PT_LOAD || ph->p_memsz == 0) {
             continue;
         }
-        if (!k64_vmm_map_private_range(&app_space,
-                                       ph->p_vaddr,
-                                       file_data + ph->p_offset,
-                                       (size_t)ph->p_filesz,
-                                       (size_t)ph->p_memsz)) {
+        if (!(user_mode ? k64_vmm_map_user_range(&app_space,
+                                                 ph->p_vaddr,
+                                                 file_data + ph->p_offset,
+                                                 (size_t)ph->p_filesz,
+                                                 (size_t)ph->p_memsz)
+                        : k64_vmm_map_private_range(&app_space,
+                                                    ph->p_vaddr,
+                                                    file_data + ph->p_offset,
+                                                    (size_t)ph->p_filesz,
+                                                    (size_t)ph->p_memsz))) {
             K64_LOG_WARN("ELF: segment mapping failed.");
             k64_vmm_release_service_space(&app_space);
             return false;
@@ -133,10 +156,28 @@ bool k64_elf_execute_path(const char* path) {
     k64_term_write("ELF: executing ");
     k64_term_write(path);
     k64_term_putc('\n');
-    rc = (int)k64_vmm_call_isolated(&app_space, ehdr->e_entry, 0, 0, 0);
+    if (user_mode && !k64_vmm_is_mapped(&app_space, ehdr->e_entry, true)) {
+        k64_term_write("ELF: entry page is not mapped\n");
+        k64_vmm_release_service_space(&app_space);
+        return false;
+    }
+    if (user_mode) {
+        uint64_t user_stack_top = app_space.stack_base + app_space.stack_size - 16ULL;
+        rc = (int)k64_usermode_execute(&app_space, ehdr->e_entry, user_stack_top);
+    } else {
+        rc = (int)k64_vmm_call_isolated(&app_space, ehdr->e_entry, 0, 0, 0);
+    }
     k64_term_write("ELF: exit code ");
     k64_term_write_dec((uint64_t)(uint32_t)rc);
     k64_term_putc('\n');
     k64_vmm_release_service_space(&app_space);
     return true;
+}
+
+bool k64_elf_execute_path(const char* path) {
+    return elf_execute_impl(path, false);
+}
+
+bool k64_elf_execute_user_path(const char* path) {
+    return elf_execute_impl(path, true);
 }

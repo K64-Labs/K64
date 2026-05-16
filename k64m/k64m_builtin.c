@@ -1,7 +1,18 @@
+#include "k64_ata.h"
 #include "k64_fs.h"
 #include "k64_keyboard.h"
 #include "k64_modules.h"
 #include "k64_terminal.h"
+
+static bool ata_driver_start(k64_driver_t* driver) {
+    (void)driver;
+    return k64_ata_driver_start();
+}
+
+static void ata_driver_stop(k64_driver_t* driver) {
+    (void)driver;
+    k64_ata_driver_stop();
+}
 
 static bool screen_driver_start(k64_driver_t* driver) {
     (void)driver;
@@ -34,6 +45,17 @@ static void fs_driver_stop(k64_driver_t* driver) {
 }
 
 void k64m_register_builtin_drivers(void) {
+    k64_modules_register_driver("ata",
+                                "k64m/ata.k64m",
+                                K64_MODULE_TYPE_DRIVER,
+                                K64_MODULE_FLAG_AUTOSTART,
+                                1,
+                                true,
+                                ata_driver_start,
+                                ata_driver_stop,
+                                NULL,
+                                NULL);
+
     k64_modules_register_driver("screen",
                                 "k64m/screen.k64m",
                                 K64_MODULE_TYPE_DRIVER,

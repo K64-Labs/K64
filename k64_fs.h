@@ -33,5 +33,8 @@ bool k64_fs_cat(const char* path, char* out, int out_size);
 bool k64_fs_read_file_raw(const char* path, const uint8_t** data, size_t* size);
 bool k64_fs_stat(const char* path, k64_fs_stat_t* out);
 bool k64_fs_find_boot_kernel(char* out, int out_size);
+bool k64_fs_sync(void);
+bool k64_fs_is_persistent(void);
+bool k64_fs_mount_source(char* out, int out_size);
 size_t k64_fs_used_bytes(void);
 size_t k64_fs_capacity_bytes(void);

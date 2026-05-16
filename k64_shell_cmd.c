@@ -30,9 +30,11 @@ k64_shell_cmd_t k64_shell_parse_command(const char* line, const char** arg_out) 
         return K64_SHELL_CMD_EMPTY;
     }
 
-    if (starts_with_word(line, "help"))  return K64_SHELL_CMD_HELP;
-    if (starts_with_word(line, "clear")) return K64_SHELL_CMD_CLEAR;
-    if (starts_with_word(line, "ticks")) return K64_SHELL_CMD_TICKS;
+    if (starts_with_word(line, "help"))     return K64_SHELL_CMD_HELP;
+    if (starts_with_word(line, "clear"))    return K64_SHELL_CMD_CLEAR;
+    if (starts_with_word(line, "sysfetch")) return K64_SHELL_CMD_SYSFETCH;
+    if (starts_with_word(line, "uname"))    return K64_SHELL_CMD_UNAME;
+    if (starts_with_word(line, "ticks"))    return K64_SHELL_CMD_TICKS;
     if (starts_with_word(line, "task"))  return K64_SHELL_CMD_TASK;
     if (starts_with_word(line, "serial"))return K64_SHELL_CMD_SERIAL;
     if (starts_with_word(line, "sched")) return K64_SHELL_CMD_SCHED;
@@ -87,6 +89,16 @@ k64_shell_cmd_t k64_shell_parse_command(const char* line, const char** arg_out) 
             *arg_out = p;
         }
         return K64_SHELL_CMD_RELOAD;
+    }
+    if (starts_with_word(line, "sudo")) {
+        if (arg_out) {
+            const char* p = line + 4;
+            while (is_space(*p)) {
+                p++;
+            }
+            *arg_out = p;
+        }
+        return K64_SHELL_CMD_SUDO;
     }
     if (starts_with_word(line, "reboot")) return K64_SHELL_CMD_REBOOT;
     if (starts_with_word(line, "shutdown")) return K64_SHELL_CMD_SHUTDOWN;

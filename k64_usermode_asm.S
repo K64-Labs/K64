@@ -13,11 +13,12 @@ k64_user_enter_asm:
     movq %rsp, 0(%rcx)
     movq %cr3, %rax
     movq %rax, 8(%rcx)
-    movq %rdi, %cr3
+    movq %rdi, %rax
+    movq %rax, %cr3
     movq %rsi, %rsp
     pushq $0x1b
     pushq %rsi
-    pushq $0x2
+    pushq $0x202
     pushq $0x23
     pushq %rdx
     iretq

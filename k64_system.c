@@ -236,15 +236,18 @@ static void service_worker_main(void* arg) {
 }
 
 static bool perform_start(k64_service_t* service) {
-    k64_task_t* task = NULL;
-
     if (!service->start) {
         return false;
     }
     if (!service->vm_space.present && !k64_vmm_alloc_service_space(service->managed_pid, &service->vm_space)) {
         return false;
     }
-    if (call_in_service_space(service, (void*)service->start, (uint64_t)(uintptr_t)service, 0, 0) == 0) {
+    /*
+     * Service lifecycle hooks are part of the kernel control plane. Running
+     * them directly keeps bootstrap deterministic while command handlers and
+     * async workers still execute inside the service address space.
+     */
+    if (!service->start(service)) {
         k64_vmm_release_service_space(&service->vm_space);
         return false;
     }
@@ -253,20 +256,6 @@ static bool perform_start(k64_service_t* service) {
     service->last_start_tick = k64_pit_get_ticks();
     service->last_poll_tick = service->last_start_tick;
     service->task = NULL;
-
-    if ((service->flags & K64_SERVICE_FLAG_ASYNC) != 0 && service->poll) {
-        task = k64_task_create_arg(service_worker_main,
-                                   service,
-                                   (int)service->priority,
-                                   service->vm_space.cr3);
-        if (!task) {
-            service->state = K64_SERVICE_STATE_STOPPED;
-            k64_system_unregister_commands(service->name);
-            k64_vmm_release_service_space(&service->vm_space);
-            return false;
-        }
-        service->task = task;
-    }
     return true;
 }
 
@@ -276,7 +265,7 @@ static void perform_stop(k64_service_t* service) {
     }
 
     if (service->stop) {
-        (void)call_in_service_space(service, (void*)service->stop, (uint64_t)(uintptr_t)service, 0, 0);
+        service->stop(service);
     }
     if (service->task) {
         k64_task_stop(service->task);
@@ -510,7 +499,29 @@ void k64_system_soft_reload_runtime(uint64_t preserve_pid) {
 }
 
 void k64_system_poll_async(void) {
-    /* Async services are scheduled as worker tasks now. */
+    uint64_t now = k64_pit_get_ticks();
+
+    for (size_t i = 0; i < service_count; ++i) {
+        k64_service_t* service = &services[i];
+        if (service->state != K64_SERVICE_STATE_RUNNING) {
+            continue;
+        }
+        if ((service->flags & K64_SERVICE_FLAG_ASYNC) == 0 || !service->poll) {
+            continue;
+        }
+        if (service->poll_interval_ticks != 0 &&
+            service->last_poll_tick != 0 &&
+            now - service->last_poll_tick < service->poll_interval_ticks) {
+            continue;
+        }
+
+        service->last_poll_tick = now;
+        (void)call_in_service_space(service,
+                                    (void*)service->poll,
+                                    (uint64_t)(uintptr_t)service,
+                                    now,
+                                    0);
+    }
 }
 
 size_t k64_system_service_count(void) {

@@ -10,7 +10,6 @@
 #define K64_GROUP_NAME_MAX 16
 #define K64_USER_DB_PATH "/etc/users.k64"
 #define K64_GROUP_DB_PATH "/etc/groups.k64"
-
 typedef struct {
     char name[K64_USER_NAME_MAX];
     char password[K64_USER_PASS_MAX];
@@ -800,38 +799,21 @@ static bool user_command_logout(const char* command, const char* args) {
 }
 
 static bool user_command_sudo(const char* command, const char* args) {
-    char token[K64_USER_PASS_MAX];
     (void)command;
+    (void)args;
 
     if (!user_require_login()) {
         return true;
     }
-    if (k64_user_is_root() && (!args || !args[0])) {
+    if (k64_user_is_root()) {
         user_print_line("already root");
-        return true;
-    }
-
-    args = user_next_token(args, token, sizeof(token));
-    if (k64_streq(token, "off")) {
-        user_state.sudo_active = false;
-        user_print_line("sudo disabled");
         return true;
     }
     if (!user_state.accounts[user_state.current_index].sudoer) {
         user_print_line("permission denied: account is not in sudo");
         return true;
     }
-    if (!token[0] || k64_streq(token, "on")) {
-        user_state.sudo_active = true;
-        user_print_line("sudo enabled");
-        return true;
-    }
-    if (!user_password_matches(&user_state.accounts[user_state.current_index], token)) {
-        user_print_line("authentication failed");
-        return true;
-    }
-    user_state.sudo_active = true;
-    user_print_line("sudo enabled");
+    user_print_line("usage: sudo <command>");
     return true;
 }
 
@@ -1192,6 +1174,7 @@ bool k64_user_service_start(k64_service_t* service) {
             user_state.current_index = 0;
         }
     }
+    user_state.sudo_active = false;
 
     user_state.ready = true;
     (void)k64_system_register_command("userctl", "userctl", user_command_userctl);
@@ -1225,6 +1208,33 @@ bool k64_user_is_root(void) {
         return false;
     }
     return user_state.accounts[user_state.current_index].is_root || user_state.sudo_active;
+}
+
+bool k64_user_can_sudo(void) {
+    if (!user_state.ready || user_state.current_index < 0 || user_state.current_index >= user_state.count) {
+        return false;
+    }
+    return user_state.accounts[user_state.current_index].is_root ||
+           user_state.accounts[user_state.current_index].sudoer;
+}
+
+void k64_user_begin_sudo_scope(void) {
+    if (!user_state.ready || user_state.current_index < 0 || user_state.current_index >= user_state.count) {
+        return;
+    }
+    if (!user_state.accounts[user_state.current_index].is_root &&
+        user_state.accounts[user_state.current_index].sudoer) {
+        user_state.sudo_active = true;
+    }
+}
+
+void k64_user_end_sudo_scope(void) {
+    if (!user_state.ready || user_state.current_index < 0 || user_state.current_index >= user_state.count) {
+        return;
+    }
+    if (!user_state.accounts[user_state.current_index].is_root) {
+        user_state.sudo_active = false;
+    }
 }
 
 bool k64_user_can_manage_service(const k64_service_t* service) {

@@ -5,6 +5,7 @@
 #include "k64_pit.h"
 #include "k64_pic.h"
 #include "k64_terminal.h"
+#include "k64_usermode.h"
 
 #define K64_TASK_STACK_SIZE 4096
 #define K64_DEFAULT_TIMESLICE 2U
@@ -37,6 +38,12 @@ static int build_initial_stack(k64_task_t* t, void (*entry)(void*), void* arg) {
 
     uint64_t* sp = (uint64_t*)((uintptr_t)stack_base + K64_TASK_STACK_SIZE);
 
+    /*
+     * Tasks enter C code through iretq, not a normal call instruction.
+     * Reserve one extra slot so the task sees the SysV-required stack
+     * alignment on first entry.
+     */
+    *--sp = 0;
     uint64_t rflags = (1ULL << 9); // IF=1
     *--sp = rflags;
     *--sp = 0x08;
@@ -88,6 +95,7 @@ static void on_tick_accounting(void) {
 
 __attribute__((noreturn))
 static void task_entry_trampoline(void (*entry)(void*), void* arg) {
+    K64_LOG_INFO("Scheduler: entered task trampoline.");
     entry(arg);
     if (current_task) {
         current_task->state = K64_TASK_STATE_ZOMBIE;
@@ -219,6 +227,13 @@ static uint64_t pick_next_rsp(void) {
 }
 
 uint64_t k64_sched_handle_timer(uint64_t old_rsp) {
+    if (k64_usermode_is_active()) {
+        k64_pit_on_tick();
+        on_tick_accounting();
+        k64_pic_send_eoi(0);
+        return old_rsp;
+    }
+
     if (current_task) {
         current_task->rsp = old_rsp;
     }

@@ -1,4 +1,5 @@
 #include "k64_fs.h"
+#include "k64_block.h"
 #include "k64_log.h"
 #include "k64_multiboot.h"
 #include "k64_string.h"
@@ -7,6 +8,7 @@
 #define K64_FS_NAME_MAX    32
 #define K64_FS_IMAGE_MAX   (2 * 1024 * 1024)
 #define K64_FS_MUTABLE_MAX (512 * 1024)
+#define K64_FS_BLOCK_SIZE  512u
 #define K64FS_MAGIC_0      0x4B363446u
 #define K64FS_MAGIC_1      0x00010053u
 #define K64FS_TYPE_DIR     1u
@@ -49,12 +51,18 @@ static k64_fs_node_t nodes[K64_FS_MAX_NODES];
 static uint8_t fs_image[K64_FS_IMAGE_MAX];
 static uint8_t fs_image_scratch[K64_FS_IMAGE_MAX];
 static uint8_t fs_mutable[K64_FS_MUTABLE_MAX];
+static uint8_t fs_block_buffer[K64_FS_IMAGE_MAX];
 static size_t fs_image_size = 0;
 static size_t fs_mutable_used = 0;
 static bool fs_running = false;
+static bool fs_persistent = false;
+static bool fs_dirty = false;
+static k64_block_device_t* fs_block_device = NULL;
+static char fs_mount_name[32];
 static int cwd_index = 0;
 
 static bool fs_writeback_image(void);
+static bool fs_flush_block_device(void);
 
 static void fs_copy(char* dst, int dst_size, const char* src) {
     int i = 0;
@@ -115,6 +123,10 @@ static void fs_reset(void) {
     cwd_index = 0;
     fs_image_size = 0;
     fs_mutable_used = 0;
+    fs_persistent = false;
+    fs_dirty = false;
+    fs_block_device = NULL;
+    fs_mount_name[0] = '\0';
 }
 
 static int fs_alloc_node(void) {
@@ -397,6 +409,74 @@ static bool fs_mount_image(const void* image, size_t size) {
     return fs_parse_loaded_image(size);
 }
 
+static bool fs_mount_from_block_device(k64_block_device_t* dev) {
+    k64fs_header_t hdr;
+    uint32_t image_size;
+    uint32_t sectors;
+
+    if (!dev || dev->block_size != K64_FS_BLOCK_SIZE) {
+        return false;
+    }
+    if (!k64_block_read(dev, 0, 1, fs_block_buffer)) {
+        K64_LOG_WARN("K64FS: block root probe read failed.");
+        return false;
+    }
+
+    for (size_t i = 0; i < sizeof(hdr); ++i) {
+        ((uint8_t*)&hdr)[i] = fs_block_buffer[i];
+    }
+    if (hdr.magic0 != K64FS_MAGIC_0 || hdr.magic1 != K64FS_MAGIC_1 || hdr.version != 1) {
+        K64_LOG_WARN("K64FS: block root header invalid.");
+        return false;
+    }
+
+    image_size = hdr.image_size;
+    if (image_size < sizeof(k64fs_header_t) || image_size > K64_FS_IMAGE_MAX) {
+        K64_LOG_WARN("K64FS: block root image size invalid.");
+        return false;
+    }
+
+    sectors = (image_size + K64_FS_BLOCK_SIZE - 1u) / K64_FS_BLOCK_SIZE;
+    if ((uint64_t)sectors > dev->block_count) {
+        K64_LOG_WARN("K64FS: block root exceeds device size.");
+        return false;
+    }
+    if (!k64_block_read(dev, 0, sectors, fs_block_buffer)) {
+        K64_LOG_WARN("K64FS: block root image read failed.");
+        return false;
+    }
+    if (!fs_mount_image(fs_block_buffer, image_size)) {
+        K64_LOG_WARN("K64FS: block root parse failed.");
+        return false;
+    }
+
+    fs_persistent = true;
+    fs_dirty = false;
+    fs_block_device = dev;
+    fs_copy(fs_mount_name, sizeof(fs_mount_name), dev->name);
+    K64_LOG_INFO("K64FS: mounted persistent block root.");
+    return true;
+}
+
+static bool fs_mount_from_blocks(void) {
+    bool saw_device = false;
+
+    for (size_t i = 0; i < k64_block_device_count(); ++i) {
+        k64_block_device_t* dev = k64_block_device_at(i);
+        if (!dev || !dev->online || dev->block_size != K64_FS_BLOCK_SIZE) {
+            continue;
+        }
+        saw_device = true;
+        if (fs_mount_from_block_device(dev)) {
+            return true;
+        }
+    }
+    if (saw_device) {
+        K64_LOG_WARN("K64FS: no persistent block root mounted.");
+    }
+    return false;
+}
+
 static bool fs_mount_from_multiboot(void) {
     multiboot_info_t* mb;
     multiboot_module_t* mods;
@@ -420,6 +500,10 @@ static bool fs_mount_from_multiboot(void) {
         if (path && fs_path_has_suffix(path, ".k64fs")) {
             K64_LOG_INFO("K64FS: found root image module.");
             if (fs_mount_image((const void*)(uintptr_t)mod->mod_start, size)) {
+                fs_persistent = false;
+                fs_dirty = false;
+                fs_block_device = NULL;
+                fs_copy(fs_mount_name, sizeof(fs_mount_name), "multiboot");
                 K64_LOG_INFO("K64FS: mounted root image.");
                 return true;
             }
@@ -523,6 +607,9 @@ static int fs_used_count(void) {
 }
 
 static bool fs_writeback_image(void) {
+    bool was_persistent = fs_persistent;
+    k64_block_device_t* saved_block_device = fs_block_device;
+    char saved_mount_name[32];
     k64fs_header_t* hdr;
     k64fs_entry_t* entries;
     int entry_count;
@@ -538,6 +625,8 @@ static bool fs_writeback_image(void) {
         K64_LOG_WARN("K64FS: failed to compact nodes before writeback.");
         return false;
     }
+
+    fs_copy(saved_mount_name, sizeof(saved_mount_name), fs_mount_name);
 
     entry_count = fs_used_count();
     if (entry_count <= 0) {
@@ -617,12 +706,25 @@ static bool fs_writeback_image(void) {
     for (size_t i = 0; i < total_size; ++i) {
         fs_image[i] = fs_image_scratch[i];
     }
-    return fs_parse_loaded_image(total_size);
+    if (!fs_parse_loaded_image(total_size)) {
+        return false;
+    }
+    fs_persistent = was_persistent;
+    fs_block_device = saved_block_device;
+    fs_copy(fs_mount_name, sizeof(fs_mount_name), saved_mount_name);
+    fs_dirty = true;
+    if (fs_persistent) {
+        return fs_flush_block_device();
+    }
+    return true;
 }
 
 bool k64_fs_driver_start(void) {
     fs_running = true;
     fs_reset();
+    if (fs_mount_from_blocks()) {
+        return true;
+    }
     if (!fs_mount_from_multiboot()) {
         (void)k64_fs_mkdir("/home");
         (void)k64_fs_mkdir("/home/root");
@@ -631,11 +733,13 @@ bool k64_fs_driver_start(void) {
         (void)k64_fs_write_file("/README", "K64 in-memory filesystem");
         (void)k64_fs_touch("/etc/motd");
         (void)k64_fs_write_file("/etc/motd", "welcome to K64");
+        fs_copy(fs_mount_name, sizeof(fs_mount_name), "memory");
     }
     return true;
 }
 
 void k64_fs_driver_stop(void) {
+    (void)k64_fs_sync();
     fs_running = false;
 }
 
@@ -983,10 +1087,55 @@ bool k64_fs_find_boot_kernel(char* out, int out_size) {
     return false;
 }
 
+static bool fs_flush_block_device(void) {
+    uint32_t sectors;
+    size_t bytes;
+
+    if (!fs_persistent || !fs_block_device || !fs_dirty) {
+        return true;
+    }
+    bytes = (fs_image_size + K64_FS_BLOCK_SIZE - 1u) / K64_FS_BLOCK_SIZE * K64_FS_BLOCK_SIZE;
+    sectors = (uint32_t)(bytes / K64_FS_BLOCK_SIZE);
+    if ((uint64_t)sectors > fs_block_device->block_count || bytes > sizeof(fs_block_buffer)) {
+        return false;
+    }
+    for (size_t i = 0; i < bytes; ++i) {
+        fs_block_buffer[i] = i < fs_image_size ? fs_image[i] : 0;
+    }
+    if (!k64_block_write(fs_block_device, 0, sectors, fs_block_buffer)) {
+        K64_LOG_WARN("K64FS: writeback to block device failed.");
+        return false;
+    }
+    fs_dirty = false;
+    return true;
+}
+
+bool k64_fs_sync(void) {
+    return fs_flush_block_device();
+}
+
+bool k64_fs_is_persistent(void) {
+    return fs_persistent;
+}
+
+bool k64_fs_mount_source(char* out, int out_size) {
+    if (!out || out_size <= 0) {
+        return false;
+    }
+    fs_copy(out, out_size, fs_mount_name[0] ? fs_mount_name : "unknown");
+    return true;
+}
+
 size_t k64_fs_used_bytes(void) {
     return fs_image_size;
 }
 
 size_t k64_fs_capacity_bytes(void) {
+    if (fs_block_device && fs_block_device->block_size) {
+        uint64_t bytes = fs_block_device->block_count * (uint64_t)fs_block_device->block_size;
+        if (bytes < K64_FS_IMAGE_MAX) {
+            return (size_t)bytes;
+        }
+    }
     return K64_FS_IMAGE_MAX;
 }

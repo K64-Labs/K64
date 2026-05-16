@@ -41,6 +41,41 @@ static int shell_history_index = -1;
 static char shell_saved_line[SHELL_MAX_LINE];
 static bool shell_saved_line_valid = false;
 
+static bool shell_is_public_service(const char* name) {
+    return k64_streq(name, "sysfetch") || k64_streq(name, "uname");
+}
+
+static void shell_run_public_command(const char* name) {
+    k64_service_t* service;
+    k64_service_result_t result;
+
+    if (k64_system_dispatch_command(name, "")) {
+        return;
+    }
+
+    service = k64_system_find_service_by_name(name);
+    if (!service) {
+        k64_term_write("Unknown command: ");
+        k64_term_write(name);
+        k64_term_putc('\n');
+        return;
+    }
+
+    result = k64_system_start_service_by_name(name);
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("Failed to start ");
+        k64_term_write(name);
+        k64_term_putc('\n');
+        return;
+    }
+
+    if (!k64_system_dispatch_command(name, "")) {
+        k64_term_write("Failed to run ");
+        k64_term_write(name);
+        k64_term_putc('\n');
+    }
+}
+
 static void shell_prompt(void) {
     char cwd[128];
 
@@ -187,7 +222,8 @@ static void shell_print_help(void) {
     k64_term_write("  storagectl <cmd> - manage block storage and sync\n");
     k64_term_write("  reload <target>  - reload drivers or kernel runtime\n");
     k64_term_write("  whoami id users groups - inspect users, groups, and the current session\n");
-    k64_term_write("  login logout su sudo   - switch or elevate the current session\n");
+    k64_term_write("  login logout su        - switch the current session\n");
+    k64_term_write("  sudo <command>         - run one command with root privileges\n");
     k64_term_write("  passwd useradd userdel - manage user accounts\n");
     k64_term_write("  usermod groupadd groupdel gpasswd - manage roles and groups\n");
     k64_term_write("  reboot           - reboot the machine\n");
@@ -702,6 +738,12 @@ static void shell_handle_command(const char* cmd) {
         case K64_SHELL_CMD_CLEAR:
             k64_term_clear();
             return;
+        case K64_SHELL_CMD_SYSFETCH:
+            shell_run_public_command("sysfetch");
+            return;
+        case K64_SHELL_CMD_UNAME:
+            shell_run_public_command("uname");
+            return;
         case K64_SHELL_CMD_TICKS:
             k64_term_write("PIT ticks: ");
             k64_term_write_dec(k64_pit_get_ticks());
@@ -772,6 +814,19 @@ static void shell_handle_command(const char* cmd) {
         case K64_SHELL_CMD_SHUTDOWN:
             k64_term_write("Shutting down...\n");
             k64_power_shutdown();
+        case K64_SHELL_CMD_SUDO:
+            if (!arg[0]) {
+                k64_term_write("usage: sudo <command>\n");
+                return;
+            }
+            if (!k64_user_can_sudo()) {
+                k64_term_write("permission denied: account is not in sudo\n");
+                return;
+            }
+            k64_user_begin_sudo_scope();
+            shell_handle_command(arg);
+            k64_user_end_sudo_scope();
+            return;
         case K64_SHELL_CMD_UNKNOWN: {
             char unknown_cmd[32];
             const char* unknown_args = shell_next_token(cmd, unknown_cmd, sizeof(unknown_cmd));
@@ -782,7 +837,9 @@ static void shell_handle_command(const char* cmd) {
             {
                 k64_service_t* target_service = k64_system_find_service_by_name(unknown_cmd);
                 k64_service_result_t service_result;
-                if (target_service && !k64_user_can_manage_service(target_service)) {
+                if (target_service &&
+                    !shell_is_public_service(unknown_cmd) &&
+                    !k64_user_can_manage_service(target_service)) {
                     k64_term_write("Permission denied: ");
                     k64_term_write(unknown_cmd);
                     k64_term_putc('\n');

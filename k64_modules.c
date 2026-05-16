@@ -196,8 +196,6 @@ static bool rootfs_k64m_cb(const char* name, bool is_dir, void* ctx) {
 }
 
 static bool perform_driver_start(k64_driver_t* driver) {
-    k64_task_t* task = NULL;
-
     if (!driver || !driver->start) {
         return false;
     }
@@ -210,14 +208,6 @@ static bool perform_driver_start(k64_driver_t* driver) {
     driver->last_start_tick = k64_pit_get_ticks();
     driver->last_poll_tick = driver->last_start_tick;
     driver->task = NULL;
-    if ((driver->flags & K64_MODULE_FLAG_ASYNC) != 0 && driver->poll) {
-        task = k64_task_create_arg(driver_worker_main, driver, (int)driver->priority, 0);
-        if (!task) {
-            driver->state = K64_DRIVER_STATE_STOPPED;
-            return false;
-        }
-        driver->task = task;
-    }
     return true;
 }
 
@@ -405,7 +395,19 @@ void k64_modules_load_rootfs(void) {
 }
 
 void k64_modules_poll_async(void) {
-    /* Async drivers are scheduled as worker tasks now. */
+    uint64_t now = k64_pit_get_ticks();
+
+    for (size_t i = 0; i < driver_count; ++i) {
+        k64_driver_t* driver = &drivers[i];
+        if (driver->state != K64_DRIVER_STATE_RUNNING) {
+            continue;
+        }
+        if ((driver->flags & K64_MODULE_FLAG_ASYNC) == 0 || !driver->poll) {
+            continue;
+        }
+        driver->last_poll_tick = now;
+        driver->poll(driver, now);
+    }
 }
 
 void k64_modules_reload_all(void) {

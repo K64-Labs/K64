@@ -372,6 +372,47 @@ bool k64_vmm_map_user_range(k64_vm_space_t* space,
     return vmm_map_range_flags(space, virt_addr, data, file_size, mem_size, K64_PAGE_RW | K64_PAGE_USER);
 }
 
+bool k64_vmm_is_mapped(const k64_vm_space_t* space, uint64_t virt_addr, bool require_user) {
+    uint64_t* pml4;
+    uint64_t* pdpt;
+    uint64_t* pdt;
+    uint64_t* pt;
+    uint64_t entry;
+    uint64_t user_mask = require_user ? K64_PAGE_USER : 0;
+
+    if (!space || !space->present || space->cr3 == 0) {
+        return false;
+    }
+
+    pml4 = (uint64_t*)(uintptr_t)space->cr3;
+    entry = pml4[(virt_addr >> 39) & 0x1FFULL];
+    if ((entry & (K64_PAGE_PRESENT | user_mask)) != (K64_PAGE_PRESENT | user_mask)) {
+        return false;
+    }
+    pdpt = (uint64_t*)(uintptr_t)(entry & K64_PAGE_MASK);
+
+    entry = pdpt[(virt_addr >> 30) & 0x1FFULL];
+    if ((entry & (K64_PAGE_PRESENT | user_mask)) != (K64_PAGE_PRESENT | user_mask)) {
+        return false;
+    }
+    if ((entry & (1ULL << 7)) != 0) {
+        return true;
+    }
+    pdt = (uint64_t*)(uintptr_t)(entry & K64_PAGE_MASK);
+
+    entry = pdt[(virt_addr >> 21) & 0x1FFULL];
+    if ((entry & (K64_PAGE_PRESENT | user_mask)) != (K64_PAGE_PRESENT | user_mask)) {
+        return false;
+    }
+    if ((entry & (1ULL << 7)) != 0) {
+        return true;
+    }
+    pt = (uint64_t*)(uintptr_t)(entry & K64_PAGE_MASK);
+
+    entry = pt[(virt_addr >> 12) & 0x1FFULL];
+    return (entry & (K64_PAGE_PRESENT | user_mask)) == (K64_PAGE_PRESENT | user_mask);
+}
+
 uint64_t k64_vmm_call_isolated(const k64_vm_space_t* space,
                                uint64_t entry,
                                uint64_t arg0,

@@ -1,4 +1,5 @@
 #include "k64_artifact.h"
+#include "k64_block.h"
 #include "k64_elf.h"
 #include "k64_config.h"
 #include "k64_fs.h"
@@ -61,6 +62,10 @@ static void servicectl_usage(void) {
 
 static void driverctl_usage(void) {
     svc_print_line("usage: driverctl <list|stopped|start|stop|restart> [id]");
+}
+
+static void storagectl_usage(void) {
+    svc_print_line("usage: storagectl <list|sync|root>");
 }
 
 static void svc_print_uptime_line(void) {
@@ -249,7 +254,7 @@ static bool elfctl_command(const char* command, const char* args) {
         svc_print_line("usage: elfrun </path/to/file.elf>");
         return true;
     }
-    if (!k64_elf_execute_path(args)) {
+    if (!k64_elf_execute_user_path(args)) {
         svc_print_line("elfrun failed");
         return true;
     }
@@ -331,9 +336,9 @@ static bool sysfetch_command(const char* command, const char* args) {
     }
     k64_term_putc('\n');
     svc_print_uptime_line();
-    svc_print_mib_line("Memory Free", free_mem);
+    svc_print_mib_line("Memory Available", free_mem);
     svc_print_mib_line("Memory Total", total_mem);
-    svc_print_mib_line("Disk Free", disk_free);
+    svc_print_mib_line("Disk Available", disk_free);
     svc_print_mib_line("Disk Total", disk_total);
     k64_term_write("Drivers Loaded: ");
     k64_term_write_dec(k64_modules_driver_count());
@@ -685,91 +690,127 @@ static bool reload_command(const char* command, const char* args) {
 
 static bool servicectl_start(k64_service_t* service) {
     (void)k64_system_register_command(service->name, "servicectl", servicectl_command);
-    k64_term_write("[svc] servicectl started pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
     return true;
 }
 
 static void servicectl_stop(k64_service_t* service) {
-    k64_term_write("[svc] servicectl stopped pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
+    (void)service;
 }
 
 static bool driverctl_start(k64_service_t* service) {
     (void)k64_system_register_command(service->name, "driverctl", driverctl_command);
-    k64_term_write("[svc] driverctl started pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
     return true;
 }
 
 static bool sysfetch_start(k64_service_t* service) {
     (void)k64_system_register_command(service->name, "sysfetch", sysfetch_command);
-    k64_term_write("[svc] sysfetch started pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
     return true;
 }
 
 static void sysfetch_stop(k64_service_t* service) {
-    k64_term_write("[svc] sysfetch stopped pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
+    (void)service;
 }
 
 static bool k64cc_start(k64_service_t* service) {
     (void)k64_system_register_command(service->name, "k64cc", k64cc_command);
-    k64_term_write("[svc] k64cc started pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
     return true;
 }
 
 static void k64cc_stop(k64_service_t* service) {
-    k64_term_write("[svc] k64cc stopped pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
+    (void)service;
 }
 
 static bool elfctl_start(k64_service_t* service) {
     (void)k64_system_register_command(service->name, "elfrun", elfctl_command);
-    k64_term_write("[svc] elfctl started pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
     return true;
 }
 
 static void elfctl_stop(k64_service_t* service) {
-    k64_term_write("[svc] elfctl stopped pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
+    (void)service;
 }
 
 static bool uname_start(k64_service_t* service) {
     (void)k64_system_register_command(service->name, "uname", uname_command);
-    k64_term_write("[svc] uname started pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
     return true;
 }
 
 static void uname_stop(k64_service_t* service) {
-    k64_term_write("[svc] uname stopped pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
+    (void)service;
 }
 
 static void driverctl_stop(k64_service_t* service) {
-    k64_term_write("[svc] driverctl stopped pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
+    (void)service;
 }
 
 static void fsctl_print(const char* text) {
     k64_term_write(text ? text : "");
     k64_term_putc('\n');
+}
+
+static bool storagectl_command(const char* command, const char* args) {
+    char sub[32];
+
+    if (command && k64_streq(command, "sync")) {
+        sub[0] = 's';
+        sub[1] = 'y';
+        sub[2] = 'n';
+        sub[3] = 'c';
+        sub[4] = '\0';
+    } else {
+        args = svc_next_token(args, sub, sizeof(sub));
+    }
+    if (!sub[0]) {
+        storagectl_usage();
+        return true;
+    }
+
+    if (k64_streq(sub, "list")) {
+        for (size_t i = 0; i < k64_block_device_count(); ++i) {
+            k64_block_device_t* dev = k64_block_device_at(i);
+            if (!dev) {
+                continue;
+            }
+            k64_term_write(dev->name);
+            k64_term_write(" id=");
+            k64_term_write_dec(dev->id);
+            k64_term_write(" state=");
+            k64_term_write(dev->online ? "online" : "offline");
+            k64_term_write(" mode=");
+            k64_term_write(dev->writable ? "rw" : "ro");
+            k64_term_write(" blocks=");
+            k64_term_write_dec(dev->block_count);
+            k64_term_write(" block_size=");
+            k64_term_write_dec(dev->block_size);
+            k64_term_putc('\n');
+        }
+        return true;
+    }
+
+    if (k64_streq(sub, "sync")) {
+        if (!k64_fs_sync()) {
+            svc_print_line("sync failed");
+            return true;
+        }
+        svc_print_line("sync complete");
+        return true;
+    }
+
+    if (k64_streq(sub, "root")) {
+        char source[32];
+        k64_term_write("rootfs source: ");
+        if (k64_fs_mount_source(source, sizeof(source))) {
+            k64_term_write(source);
+        } else {
+            k64_term_write("unknown");
+        }
+        k64_term_write(" mode=");
+        k64_term_write(k64_fs_is_persistent() ? "persistent" : "ephemeral");
+        k64_term_putc('\n');
+        return true;
+    }
+
+    storagectl_usage();
+    return true;
 }
 
 static bool fsctl_pwd_handler(const char* command, const char* args) {
@@ -1004,6 +1045,17 @@ static bool fsctl_stat_handler(const char* command, const char* args) {
     return true;
 }
 
+static bool fsctl_sync_handler(const char* command, const char* args) {
+    (void)command;
+    (void)args;
+    if (!k64_fs_sync()) {
+        fsctl_print("sync failed");
+        return true;
+    }
+    fsctl_print("sync complete");
+    return true;
+}
+
 static bool fsctl_start(k64_service_t* service) {
     (void)service;
     if (!k64_modules_is_driver_running("fs")) {
@@ -1023,84 +1075,83 @@ static bool fsctl_start(k64_service_t* service) {
     (void)k64_system_register_command("fsctl", "mv", fsctl_mv_handler);
     (void)k64_system_register_command("fsctl", "cp", fsctl_cp_handler);
     (void)k64_system_register_command("fsctl", "stat", fsctl_stat_handler);
-    k64_term_write("[svc] fsctl started pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
+    (void)k64_system_register_command("fsctl", "sync", fsctl_sync_handler);
     return true;
 }
 
 static void fsctl_stop(k64_service_t* service) {
-    k64_term_write("[svc] fsctl stopped pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
+    (void)service;
 }
 
 static bool init_start(k64_service_t* service) {
     k64_service_result_t result;
 
-    k64_term_write("[svc] init started pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
-
     result = k64_system_start_service_by_name("servicectl");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
-        k64_term_write("[svc] init failed to start servicectl: ");
+        k64_term_write("init: failed to start servicectl: ");
         k64_term_write(k64_system_result_string(result));
         k64_term_putc('\n');
     }
 
     result = k64_system_start_service_by_name("driverctl");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
-        k64_term_write("[svc] init failed to start driverctl: ");
+        k64_term_write("init: failed to start driverctl: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
+    result = k64_system_start_service_by_name("storagectl");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("init: failed to start storagectl: ");
         k64_term_write(k64_system_result_string(result));
         k64_term_putc('\n');
     }
 
     result = k64_system_start_service_by_name("fsctl");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
-        k64_term_write("[svc] init failed to start fsctl: ");
+        k64_term_write("init: failed to start fsctl: ");
         k64_term_write(k64_system_result_string(result));
         k64_term_putc('\n');
     }
 
     result = k64_system_start_service_by_name("userctl");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
-        k64_term_write("[svc] init failed to start userctl: ");
+        k64_term_write("init: failed to start userctl: ");
         k64_term_write(k64_system_result_string(result));
         k64_term_putc('\n');
     }
 
     result = k64_system_start_service_by_name("sysfetch");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
-        k64_term_write("[svc] init failed to start sysfetch: ");
+        k64_term_write("init: failed to start sysfetch: ");
         k64_term_write(k64_system_result_string(result));
         k64_term_putc('\n');
     }
 
     result = k64_system_start_service_by_name("uname");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
-        k64_term_write("[svc] init failed to start uname: ");
+        k64_term_write("init: failed to start uname: ");
         k64_term_write(k64_system_result_string(result));
         k64_term_putc('\n');
     }
 
     result = k64_system_start_service_by_name("k64cc");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
-        k64_term_write("[svc] init failed to start k64cc: ");
+        k64_term_write("init: failed to start k64cc: ");
         k64_term_write(k64_system_result_string(result));
         k64_term_putc('\n');
     }
 
     result = k64_system_start_service_by_name("elfctl");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
-        k64_term_write("[svc] init failed to start elfctl: ");
+        k64_term_write("init: failed to start elfctl: ");
         k64_term_write(k64_system_result_string(result));
         k64_term_putc('\n');
     }
 
     result = k64_system_start_service_by_name("shell");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
-        k64_term_write("[svc] init failed to start shell: ");
+        k64_term_write("init: failed to start shell: ");
         k64_term_write(k64_system_result_string(result));
         k64_term_putc('\n');
     }
@@ -1109,9 +1160,7 @@ static bool init_start(k64_service_t* service) {
 }
 
 static void init_stop(k64_service_t* service) {
-    k64_term_write("[svc] init stopped pid=");
-    k64_term_write_dec(service->pid);
-    k64_term_putc('\n');
+    (void)service;
 }
 
 static bool reload_start(k64_service_t* service) {
@@ -1152,6 +1201,16 @@ static void reload_poll(k64_service_t* service, uint64_t now_ticks) {
     (void)k64_system_stop_service(service->pid);
 }
 
+static bool storagectl_start(k64_service_t* service) {
+    (void)k64_system_register_command(service->name, "storagectl", storagectl_command);
+    (void)k64_system_register_command(service->name, "sync", storagectl_command);
+    return true;
+}
+
+static void storagectl_stop(k64_service_t* service) {
+    (void)service;
+}
+
 void k64s_register_builtin_services(void) {
     k64_system_register_service("init",
                                 "k64s/init.k64s",
@@ -1186,6 +1245,18 @@ void k64s_register_builtin_services(void) {
                                 true,
                                 driverctl_start,
                                 driverctl_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("storagectl",
+                                "k64s/storagectl.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                storagectl_start,
+                                storagectl_stop,
                                 NULL,
                                 NULL);
 

@@ -7,6 +7,17 @@ GRUB_SRC="${GRUB_SRC:-/tmp/grub-src}"
 PLATFORM_DIR="${1:?platform dir required}"
 WORK_DIR="${2:?work dir required}"
 
+if [[ ! -d "${GRUB_SRC}/include/grub" ]]; then
+  echo "GRUB source headers not found at ${GRUB_SRC}." >&2
+  echo "Set GRUB_SRC to a GRUB source checkout, for example: git clone --depth 1 https://git.savannah.gnu.org/git/grub.git /tmp/grub-src" >&2
+  exit 1
+fi
+
+if [[ ! -f /usr/lib/grub/i386-pc/modinfo.sh ]]; then
+  echo "GRUB i386-pc module metadata not found; install grub-pc-bin/grub-common." >&2
+  exit 1
+fi
+
 mkdir -p "${PLATFORM_DIR}" "${WORK_DIR}/include/grub"
 ln -sfn "${GRUB_SRC}/include/grub/i386" "${WORK_DIR}/include/grub/cpu"
 

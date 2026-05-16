@@ -40,14 +40,20 @@ pdpt_table:
     .endr
 
 .align 8
+.globl gdt64
 gdt64:
     .quad 0x0000000000000000        /* null desc */
     .quad 0x00AF9A000000FFFF        /* code */
-    .quad 0x00AF92000000FFFF        /* data */
+    .quad 0x00CF92000000FFFF        /* data */
+    .quad 0x00CFF2000000FFFF        /* user data */
+    .quad 0x00AFFA000000FFFF        /* user code */
+    .quad 0x0000000000000000        /* tss low */
+    .quad 0x0000000000000000        /* tss high */
+gdt64_end:
 
 .globl gdt64_descriptor
 gdt64_descriptor:
-    .word (gdt64_descriptor_end - gdt64 - 1)
+    .word (gdt64_end - gdt64 - 1)
     .long gdt64
 gdt64_descriptor_end:
 
