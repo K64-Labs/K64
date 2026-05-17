@@ -542,14 +542,18 @@ K64 now has a first real Ethernet path:
 - transmit and receive rings/buffers
 - Ethernet frame send/receive
 - ARP request/reply handling
-- static IPv4 configuration for the default QEMU user network
+- DHCP discover/request handling with QEMU/VM NAT defaults as fallback
 - ICMP echo packet send and echo-reply response handling
-- UDP packet send support
+- UDP packet send support with checksums
+- DNS A-query plumbing and cache
+- a minimal TCP client path for outbound HTTP
+- a `kcurl` HTTP/1.0 client command for plain `http://` URLs
 
-The default network identity is intentionally simple and matches QEMU user networking:
+The fallback network identity is intentionally simple and matches QEMU user networking:
 
 - IPv4: `10.0.2.15`
 - gateway: `10.0.2.2`
+- DNS: `10.0.2.3`
 - netmask: `255.255.255.0`
 
 The `netctl` service exposes the runtime network surface:
@@ -557,8 +561,11 @@ The `netctl` service exposes the runtime network surface:
 ```text
 netctl status
 netctl poll
+netctl dhcp
+netctl resolve <host>
 netctl arp <ipv4>
-ping <ipv4>
+ping <ipv4|host>
+kcurl http://host[:port]/path
 udp send <ipv4> <port> <text>
 ```
 
@@ -566,13 +573,16 @@ Examples:
 
 ```text
 netctl status
+netctl dhcp
+netctl resolve example.com
 netctl arp 10.0.2.2
 netctl poll
 ping 10.0.2.2
+kcurl http://10.0.2.2:8080/
 udp send 10.0.2.2 9 hello-from-k64
 ```
 
-This is not yet a full socket API, DHCP client, DNS resolver, TCP stack, or browser-style internet userland. It is the first working packet path: K64 can initialize a NIC through a `.k64m` driver, send Ethernet/ARP/IPv4/ICMP/UDP packets, poll received packets, and answer basic inbound ARP/ICMP traffic.
+This is not yet a POSIX socket API or TLS stack. It is now a usable VM internet foundation: K64 can initialize a NIC through a `.k64m` driver, acquire VM network settings with DHCP, send Ethernet/ARP/IPv4/ICMP/UDP/TCP packets, poll received packets, answer basic inbound ARP/ICMP traffic, and fetch plain HTTP resources with `kcurl`. HTTPS URLs are intentionally rejected until K64 has TLS support.
 
 For VMware, configure the virtual NIC as `e1000`/Intel E1000 when possible. The default QEMU targets attach an RTL8139 NIC, while the smoke tests can also boot with QEMU's e1000 device.
 
@@ -1686,9 +1696,12 @@ storagectl list
 storagectl partitions ata0
 storagectl root
 netctl status
+netctl dhcp
+netctl resolve example.com
 netctl arp 10.0.2.2
 netctl poll
 ping 10.0.2.2
+kcurl http://10.0.2.2:8080/
 udp send 10.0.2.2 9 hello
 install
 ps

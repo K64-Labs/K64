@@ -225,7 +225,9 @@ static void shell_print_help(void) {
     k64_term_write("  install          - guide disk installation from the live ISO\n");
     k64_term_write("  netctl status    - show RTL8139/K64M network state\n");
     k64_term_write("  netctl arp <ip>  - send an ARP request\n");
-    k64_term_write("  ping <ip>        - send an ICMP echo packet\n");
+    k64_term_write("  netctl resolve <host> - resolve a host name\n");
+    k64_term_write("  ping <ip|host>   - send an ICMP echo packet\n");
+    k64_term_write("  kcurl http://host[:port]/path - fetch a plain HTTP URL\n");
     k64_term_write("  udp send <ip> <port> <text> - send a UDP packet\n");
     k64_term_write("  reload <target>  - reload drivers or kernel runtime\n");
     k64_term_write("  whoami id users groups - inspect users, groups, and the current session\n");

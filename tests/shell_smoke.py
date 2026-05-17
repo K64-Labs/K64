@@ -6,6 +6,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import http.server
+import socketserver
+import threading
 import time
 
 try:
@@ -96,6 +99,22 @@ def wait_for_tcp(port, timeout):
             last_error = exc
             time.sleep(0.05)
     raise RuntimeError(f"failed to connect to QEMU serial TCP port {port}: {last_error}")
+
+
+class TestHTTPServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
+
+class TestHTTPHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"k64-http-ok\n"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
 
 
 class Guest:
@@ -216,10 +235,16 @@ def main():
         print("required boot artifacts missing; skipping shell smoke test")
         return 0
 
-    with Guest() as guest:
-        net_device = os.environ.get("K64_SMOKE_NET_DEVICE", "rtl8139")
-        net_driver = "e1000" if net_device.startswith("e1000") else "rtl8139"
-        checks = [
+    http_server = TestHTTPServer(("0.0.0.0", 0), TestHTTPHandler)
+    http_port = http_server.server_address[1]
+    http_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+    http_thread.start()
+
+    try:
+        with Guest() as guest:
+            net_device = os.environ.get("K64_SMOKE_NET_DEVICE", "rtl8139")
+            net_driver = "e1000" if net_device.startswith("e1000") else "rtl8139"
+            checks = [
             ("help", "Commands:"),
             ("echo shell-smoke-ok", "shell-smoke-ok"),
             ("sysfetch", "Kernel:"),
@@ -238,9 +263,12 @@ def main():
             ("storagectl root", "image_limit="),
             ("grow /", "grow complete") if attach_disk else ("grow /", "grow failed"),
             ("netctl status", f"net: driver={net_driver}"),
+            ("netctl dhcp", "dhcp: complete"),
+            ("netctl resolve 10.0.2.2", "resolve: 10.0.2.2 -> 10.0.2.2"),
             ("netctl arp 10.0.2.2", "net: arp request sent"),
             ("netctl poll", "net: poll complete"),
             ("ping 10.0.2.2", PROMPT_NEEDLE),
+            ("kcurl https://example.com", "kcurl: only plain http://host[:port]/path URLs are supported"),
             ("udp send 10.0.2.2 9 shell-smoke", PROMPT_NEEDLE),
             ("install", "K64 installer"),
             ("install ata0 yes", "installer: root filesystem installed") if attach_disk else ("install ata0 yes", "installer: failed"),
@@ -268,9 +296,14 @@ def main():
             ("elfrun /ex/procinfo.elf", "procinfo: pid="),
             ("elfrun /ex/libctest.elf", "libctest: OK"),
             ("unknown-smoke-command", "Unknown command: unknown-smoke-command"),
-        ]
-        for cmd, expected in checks:
-            guest.command(cmd, expected)
+            ]
+            if net_driver == "rtl8139":
+                checks.insert(25, (f"kcurl http://10.0.2.2:{http_port}/", "k64-http-ok"))
+            for cmd, expected in checks:
+                guest.command(cmd, expected)
+    finally:
+        http_server.shutdown()
+        http_server.server_close()
 
     print("shell smoke test passed")
     return 0

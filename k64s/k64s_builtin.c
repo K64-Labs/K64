@@ -198,9 +198,63 @@ static void svc_write_u64le(uint8_t* buf, size_t off, uint64_t value) {
 }
 
 static void netctl_usage(void) {
-    svc_print_line("usage: netctl <status|poll|arp>");
-    svc_print_line("       ping <ipv4>");
+    svc_print_line("usage: netctl <status|poll|dhcp|arp|resolve>");
+    svc_print_line("       netctl resolve <host>");
+    svc_print_line("       ping <ipv4|host>");
+    svc_print_line("       kcurl http://host[/path]");
     svc_print_line("       udp send <ipv4> <port> <text>");
+}
+
+static void svc_net_poll_many(int count) {
+    for (int i = 0; i < count; ++i) {
+        k64_rtl8139_poll();
+        k64_e1000_poll();
+    }
+}
+
+static bool svc_parse_http_url(const char* url, char* host, int host_size, char* path, int path_size, uint16_t* port) {
+    const char* p = url;
+    int i = 0;
+    uint64_t port64 = 80;
+
+    if (!url || !host || !path || !port || host_size <= 0 || path_size <= 0) {
+        return false;
+    }
+    if (k64_strncmp(p, "http://", 7) == 0) {
+        p += 7;
+    } else if (k64_strncmp(p, "https://", 8) == 0) {
+        return false;
+    }
+    while (*p && *p != '/' && *p != ':' && i + 1 < host_size) {
+        host[i++] = *p++;
+    }
+    host[i] = '\0';
+    if (*p == ':') {
+        char port_buf[8];
+        int j = 0;
+        p++;
+        while (*p >= '0' && *p <= '9' && j + 1 < (int)sizeof(port_buf)) {
+            port_buf[j++] = *p++;
+        }
+        port_buf[j] = '\0';
+        if (!port_buf[0] || !svc_parse_u64(port_buf, &port64) || port64 == 0 || port64 > 65535) {
+            return false;
+        }
+    }
+    if (!host[0]) {
+        return false;
+    }
+    i = 0;
+    if (*p == '/') {
+        while (*p && i + 1 < path_size) {
+            path[i++] = *p++;
+        }
+    } else {
+        path[i++] = '/';
+    }
+    path[i] = '\0';
+    *port = (uint16_t)port64;
+    return true;
 }
 
 static void svc_print_mac(const uint8_t mac[6]) {
@@ -1030,9 +1084,15 @@ static bool netctl_command(const char* command, const char* args) {
     char sub[16];
     char arg1[32];
     char arg2[16];
+    char host[64];
+    char path[128];
+    char response[1024];
     uint32_t ip;
+    uint16_t http_port;
     uint64_t port64;
     k64_net_status_t st;
+    bool pending;
+    const char* state;
 
     if (command && k64_streq(command, "ping")) {
         sub[0] = 'p';
@@ -1045,6 +1105,13 @@ static bool netctl_command(const char* command, const char* args) {
         sub[1] = 'd';
         sub[2] = 'p';
         sub[3] = '\0';
+    } else if (command && k64_streq(command, "kcurl")) {
+        sub[0] = 'k';
+        sub[1] = 'c';
+        sub[2] = 'u';
+        sub[3] = 'r';
+        sub[4] = 'l';
+        sub[5] = '\0';
     } else {
         args = svc_next_token(args, sub, sizeof(sub));
     }
@@ -1065,6 +1132,9 @@ static bool netctl_command(const char* command, const char* args) {
         k64_net_format_ipv4(st.gateway, ipbuf, sizeof(ipbuf));
         k64_term_write(" gateway=");
         k64_term_write(ipbuf);
+        k64_net_format_ipv4(st.dns_server, ipbuf, sizeof(ipbuf));
+        k64_term_write(" dns=");
+        k64_term_write(ipbuf);
         k64_term_putc('\n');
         k64_term_write("net: tx=");
         k64_term_write_dec(st.tx_frames);
@@ -1078,6 +1148,12 @@ static bool netctl_command(const char* command, const char* args) {
         k64_term_write_dec(st.rx_udp);
         k64_term_write(" icmp=");
         k64_term_write_dec(st.rx_icmp);
+        k64_term_write(" tcp=");
+        k64_term_write_dec(st.rx_tcp);
+        k64_term_write(" dns=");
+        k64_term_write_dec(st.rx_dns);
+        k64_term_write(" ping_replies=");
+        k64_term_write_dec(st.ping_replies);
         k64_term_write(" last_eth=");
         k64_term_write_hex(st.last_ethertype);
         k64_term_putc('\n');
@@ -1088,6 +1164,41 @@ static bool netctl_command(const char* command, const char* args) {
         k64_rtl8139_poll();
         k64_e1000_poll();
         svc_print_line("net: poll complete");
+        return true;
+    }
+
+    if (k64_streq(sub, "dhcp")) {
+        if (!k64_net_dhcp_discover()) {
+            svc_print_line("dhcp: discover failed");
+            return true;
+        }
+        for (int i = 0; i < 128; ++i) {
+            svc_net_poll_many(16);
+        }
+        svc_print_line("dhcp: complete");
+        return true;
+    }
+
+    if (k64_streq(sub, "resolve")) {
+        args = svc_next_token(args, host, sizeof(host));
+        if (!host[0]) {
+            netctl_usage();
+            return true;
+        }
+        for (int i = 0; i < 24; ++i) {
+            if (k64_net_resolve_host(host, &ip, &pending)) {
+                char ipbuf[24];
+                k64_net_format_ipv4(ip, ipbuf, sizeof(ipbuf));
+                k64_term_write("resolve: ");
+                k64_term_write(host);
+                k64_term_write(" -> ");
+                k64_term_write(ipbuf);
+                k64_term_putc('\n');
+                return true;
+            }
+            svc_net_poll_many(64);
+        }
+        svc_print_line("resolve: no answer");
         return true;
     }
 
@@ -1107,15 +1218,52 @@ static bool netctl_command(const char* command, const char* args) {
 
     if (k64_streq(sub, "ping")) {
         args = svc_next_token(args, arg1, sizeof(arg1));
-        if (!k64_net_parse_ipv4(arg1, &ip)) {
+        if (!k64_net_resolve_host(arg1, &ip, &pending)) {
+            svc_net_poll_many(128);
+        }
+        if (!k64_net_resolve_host(arg1, &ip, &pending)) {
             netctl_usage();
             return true;
         }
         if (!k64_net_send_ping(ip, 1)) {
-            svc_print_line("ping: resolving target, retry after netctl poll");
-            return true;
+            svc_net_poll_many(128);
+            if (!k64_net_send_ping(ip, 1)) {
+                svc_print_line("ping: resolving target, retry after netctl poll");
+                return true;
+            }
+        }
+        for (int i = 0; i < 128; ++i) {
+            svc_net_poll_many(8);
         }
         svc_print_line("ping: icmp echo sent");
+        return true;
+    }
+
+    if (k64_streq(sub, "kcurl")) {
+        args = svc_next_token(args, arg1, sizeof(arg1));
+        if (!svc_parse_http_url(arg1, host, sizeof(host), path, sizeof(path), &http_port)) {
+            svc_print_line("kcurl: only plain http://host[:port]/path URLs are supported");
+            return true;
+        }
+        for (int i = 0; i < 160; ++i) {
+            if (k64_net_http_get(host, path, http_port, response, sizeof(response), &state)) {
+                k64_term_write(response[0] ? response : "kcurl: empty response");
+                if (response[0] && response[k64_strlen(response) - 1] != '\n') {
+                    k64_term_putc('\n');
+                }
+                return true;
+            }
+            svc_net_poll_many(64);
+        }
+        k64_term_write("kcurl: ");
+        k64_term_write(state ? state : "no response");
+        k64_term_putc('\n');
+        if (response[0]) {
+            k64_term_write(response);
+            if (response[k64_strlen(response) - 1] != '\n') {
+                k64_term_putc('\n');
+            }
+        }
         return true;
     }
 
@@ -1567,6 +1715,7 @@ static void storagectl_stop(k64_service_t* service) {
 static bool netctl_start(k64_service_t* service) {
     (void)k64_system_register_command(service->name, "netctl", netctl_command);
     (void)k64_system_register_command(service->name, "ping", netctl_command);
+    (void)k64_system_register_command(service->name, "kcurl", netctl_command);
     (void)k64_system_register_command(service->name, "udp", netctl_command);
     return true;
 }
