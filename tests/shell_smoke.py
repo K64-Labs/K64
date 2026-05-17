@@ -15,6 +15,7 @@ except ImportError:
 
 
 def qemu_base_cmd():
+    net_device = os.environ.get("K64_SMOKE_NET_DEVICE", "rtl8139")
     cmd = [
         "qemu-system-x86_64",
         "-boot",
@@ -28,6 +29,10 @@ def qemu_base_cmd():
             "file=build/root.disk,format=raw,if=ide,index=0",
         ]
     cmd += [
+        "-netdev",
+        "user,id=k64net",
+        "-device",
+        f"{net_device},netdev=k64net",
         "-display",
         "none",
         "-monitor",
@@ -212,6 +217,8 @@ def main():
         return 0
 
     with Guest() as guest:
+        net_device = os.environ.get("K64_SMOKE_NET_DEVICE", "rtl8139")
+        net_driver = "e1000" if net_device.startswith("e1000") else "rtl8139"
         checks = [
             ("help", "Commands:"),
             ("echo shell-smoke-ok", "shell-smoke-ok"),
@@ -228,6 +235,11 @@ def main():
             ("driverctl list", "ID    STATE"),
             ("storagectl list", "ata0 id=" if attach_disk else PROMPT_NEEDLE),
             ("storagectl root", "rootfs source:"),
+            ("netctl status", f"net: driver={net_driver}"),
+            ("netctl arp 10.0.2.2", "net: arp request sent"),
+            ("netctl poll", "net: poll complete"),
+            ("ping 10.0.2.2", PROMPT_NEEDLE),
+            ("udp send 10.0.2.2 9 shell-smoke", PROMPT_NEEDLE),
             ("install", "K64 installer"),
             ("install ata0 yes", "installer: root filesystem installed") if attach_disk else ("install ata0 yes", "installer: failed"),
             ("pwd", "/"),

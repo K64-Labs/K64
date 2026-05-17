@@ -5,9 +5,12 @@
 #include "k64_fs.h"
 #include "k64_hotreload.h"
 #include "k64_modules.h"
+#include "k64_net.h"
 #include "k64_pit.h"
 #include "k64_pmm.h"
 #include "k64_reload.h"
+#include "k64_e1000.h"
+#include "k64_rtl8139.h"
 #include "k64_shell.h"
 #include "k64_string.h"
 #include "k64_system.h"
@@ -155,6 +158,26 @@ static void svc_write_u32le(uint8_t* buf, size_t off, uint32_t value) {
 static void svc_write_u64le(uint8_t* buf, size_t off, uint64_t value) {
     for (size_t i = 0; i < 8; ++i) {
         buf[off + i] = (uint8_t)((value >> (i * 8u)) & 0xFFu);
+    }
+}
+
+static void netctl_usage(void) {
+    svc_print_line("usage: netctl <status|poll|arp>");
+    svc_print_line("       ping <ipv4>");
+    svc_print_line("       udp send <ipv4> <port> <text>");
+}
+
+static void svc_print_mac(const uint8_t mac[6]) {
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 6; ++i) {
+        char b[3];
+        b[0] = hex[(mac[i] >> 4) & 0x0F];
+        b[1] = hex[mac[i] & 0x0F];
+        b[2] = '\0';
+        k64_term_write(b);
+        if (i != 5) {
+            k64_term_putc(':');
+        }
     }
 }
 
@@ -868,6 +891,123 @@ static bool storagectl_command(const char* command, const char* args) {
     return true;
 }
 
+static bool netctl_command(const char* command, const char* args) {
+    char sub[16];
+    char arg1[32];
+    char arg2[16];
+    uint32_t ip;
+    uint64_t port64;
+    k64_net_status_t st;
+
+    if (command && k64_streq(command, "ping")) {
+        sub[0] = 'p';
+        sub[1] = 'i';
+        sub[2] = 'n';
+        sub[3] = 'g';
+        sub[4] = '\0';
+    } else if (command && k64_streq(command, "udp")) {
+        sub[0] = 'u';
+        sub[1] = 'd';
+        sub[2] = 'p';
+        sub[3] = '\0';
+    } else {
+        args = svc_next_token(args, sub, sizeof(sub));
+    }
+
+    if (!sub[0] || k64_streq(sub, "status")) {
+        char ipbuf[24];
+        if (!k64_net_status(&st) || !st.link_up) {
+            svc_print_line("net: no link");
+            return true;
+        }
+        k64_term_write("net: driver=");
+        k64_term_write(st.driver[0] ? st.driver : "unknown");
+        k64_term_write(" mac=");
+        svc_print_mac(st.mac);
+        k64_net_format_ipv4(st.ipv4, ipbuf, sizeof(ipbuf));
+        k64_term_write(" ip=");
+        k64_term_write(ipbuf);
+        k64_net_format_ipv4(st.gateway, ipbuf, sizeof(ipbuf));
+        k64_term_write(" gateway=");
+        k64_term_write(ipbuf);
+        k64_term_putc('\n');
+        k64_term_write("net: tx=");
+        k64_term_write_dec(st.tx_frames);
+        k64_term_write(" rx=");
+        k64_term_write_dec(st.rx_frames);
+        k64_term_write(" arp=");
+        k64_term_write_dec(st.rx_arp);
+        k64_term_write(" ipv4=");
+        k64_term_write_dec(st.rx_ipv4);
+        k64_term_write(" udp=");
+        k64_term_write_dec(st.rx_udp);
+        k64_term_write(" icmp=");
+        k64_term_write_dec(st.rx_icmp);
+        k64_term_write(" last_eth=");
+        k64_term_write_hex(st.last_ethertype);
+        k64_term_putc('\n');
+        return true;
+    }
+
+    if (k64_streq(sub, "poll")) {
+        k64_rtl8139_poll();
+        k64_e1000_poll();
+        svc_print_line("net: poll complete");
+        return true;
+    }
+
+    if (k64_streq(sub, "arp")) {
+        args = svc_next_token(args, arg1, sizeof(arg1));
+        if (!k64_net_parse_ipv4(arg1, &ip)) {
+            netctl_usage();
+            return true;
+        }
+        if (!k64_net_send_arp_request(ip)) {
+            svc_print_line("net: arp send failed");
+            return true;
+        }
+        svc_print_line("net: arp request sent");
+        return true;
+    }
+
+    if (k64_streq(sub, "ping")) {
+        args = svc_next_token(args, arg1, sizeof(arg1));
+        if (!k64_net_parse_ipv4(arg1, &ip)) {
+            netctl_usage();
+            return true;
+        }
+        if (!k64_net_send_ping(ip, 1)) {
+            svc_print_line("ping: resolving target, retry after netctl poll");
+            return true;
+        }
+        svc_print_line("ping: icmp echo sent");
+        return true;
+    }
+
+    if (k64_streq(sub, "udp")) {
+        args = svc_next_token(args, arg1, sizeof(arg1));
+        if (!k64_streq(arg1, "send")) {
+            netctl_usage();
+            return true;
+        }
+        args = svc_next_token(args, arg1, sizeof(arg1));
+        args = svc_next_token(args, arg2, sizeof(arg2));
+        if (!k64_net_parse_ipv4(arg1, &ip) || !svc_parse_u64(arg2, &port64) || port64 == 0 || port64 > 65535) {
+            netctl_usage();
+            return true;
+        }
+        if (!k64_net_send_udp(ip, (uint16_t)port64, args ? args : "")) {
+            svc_print_line("udp: resolving target, retry after netctl poll");
+            return true;
+        }
+        svc_print_line("udp: packet sent");
+        return true;
+    }
+
+    netctl_usage();
+    return true;
+}
+
 static bool fsctl_pwd_handler(const char* command, const char* args) {
     char buf[256];
     (void)command;
@@ -1162,6 +1302,13 @@ static bool init_start(k64_service_t* service) {
         k64_term_putc('\n');
     }
 
+    result = k64_system_start_service_by_name("netctl");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("init: failed to start netctl: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
     result = k64_system_start_service_by_name("fsctl");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
         k64_term_write("init: failed to start fsctl: ");
@@ -1267,6 +1414,17 @@ static void storagectl_stop(k64_service_t* service) {
     (void)service;
 }
 
+static bool netctl_start(k64_service_t* service) {
+    (void)k64_system_register_command(service->name, "netctl", netctl_command);
+    (void)k64_system_register_command(service->name, "ping", netctl_command);
+    (void)k64_system_register_command(service->name, "udp", netctl_command);
+    return true;
+}
+
+static void netctl_stop(k64_service_t* service) {
+    (void)service;
+}
+
 void k64s_register_builtin_services(void) {
     k64_system_register_service("init",
                                 "k64s/init.k64s",
@@ -1313,6 +1471,18 @@ void k64s_register_builtin_services(void) {
                                 true,
                                 storagectl_start,
                                 storagectl_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("netctl",
+                                "k64s/netctl.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                netctl_start,
+                                netctl_stop,
                                 NULL,
                                 NULL);
 

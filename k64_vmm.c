@@ -16,9 +16,13 @@
 #define K64_SERVICE_VM_HEAP_SIZE  0x0000000000100000ULL
 #define K64_SERVICE_VM_MAX_SLOTS  256
 #define K64_SERVICE_STACK_FRAMES  (K64_SERVICE_VM_STACK_SIZE / K64_PAGE_SIZE)
+#define K64_MMIO_BASE             0x0000000200000000ULL
+#define K64_MMIO_SIZE             0x0000000001000000ULL
 
 static bool service_slot_used[K64_SERVICE_VM_MAX_SLOTS];
 static uint64_t kernel_cr3 = 0;
+static k64_vm_space_t kernel_mapping_space;
+static uint64_t next_mmio_virt = K64_MMIO_BASE;
 
 extern uint64_t k64_vmm_call_asm(uint64_t new_cr3,
                                  uint64_t new_rsp,
@@ -252,11 +256,45 @@ static bool vmm_alloc_space(uint64_t pid, k64_vm_space_t* out_space, uint64_t st
 
 void k64_vmm_init(void) {
     kernel_cr3 = vmm_read_cr3();
+    vmm_clear_space(&kernel_mapping_space);
+    kernel_mapping_space.present = true;
+    kernel_mapping_space.cr3 = kernel_cr3;
     for (size_t i = 0; i < K64_SERVICE_VM_MAX_SLOTS; ++i) {
         service_slot_used[i] = false;
     }
 
     K64_LOG_INFO("VMM: initialized isolated address-space pool.");
+}
+
+void* k64_vmm_map_mmio(uint64_t phys_addr, size_t size) {
+    uint64_t phys = phys_addr & K64_PAGE_MASK;
+    uint64_t end = (phys_addr + size + K64_PAGE_SIZE - 1ULL) & K64_PAGE_MASK;
+    uint64_t virt;
+    uint64_t offset = phys_addr - phys;
+    size_t pages;
+
+    if (size == 0 || end <= phys) {
+        return NULL;
+    }
+
+    pages = (size_t)((end - phys) / K64_PAGE_SIZE);
+    if (next_mmio_virt + (uint64_t)pages * K64_PAGE_SIZE > K64_MMIO_BASE + K64_MMIO_SIZE) {
+        return NULL;
+    }
+
+    virt = next_mmio_virt;
+    next_mmio_virt += (uint64_t)pages * K64_PAGE_SIZE;
+
+    for (size_t i = 0; i < pages; ++i) {
+        if (!vmm_map_page(&kernel_mapping_space,
+                          virt + (uint64_t)i * K64_PAGE_SIZE,
+                          phys + (uint64_t)i * K64_PAGE_SIZE,
+                          K64_PAGE_RW)) {
+            return NULL;
+        }
+    }
+
+    return (void*)(uintptr_t)(virt + offset);
 }
 
 bool k64_vmm_alloc_service_space(uint64_t pid, k64_vm_space_t* out_space) {

@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 void k64_vmm_init(void);
+void* k64_vmm_map_mmio(uint64_t phys_addr, size_t size);
 
 typedef struct {
     bool     present;

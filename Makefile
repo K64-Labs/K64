@@ -85,6 +85,10 @@ K64_SRCS = \
   k64_kernel.c \
   k64_block.c \
   k64_ata.c \
+  k64_pci.c \
+  k64_net.c \
+  k64_rtl8139.c \
+  k64_e1000.c \
   k64_elf.c \
   k64_terminal.c \
   k64_serial.c \
@@ -287,10 +291,10 @@ k64.iso: $(K64_KERNEL_ELF) $(K64FS_IMAGE) $(K64_DISK_IMAGE) $(K64_GRUB_BOOTSTRAP
 iso: k64.iso
 
 run: k64.iso
-	$(QEMU) -boot order=d -cdrom k64.iso -drive file=$(K64_DISK_IMAGE),format=raw,if=ide,index=0 -serial stdio -no-reboot -no-shutdown
+	$(QEMU) -boot order=d -cdrom k64.iso -drive file=$(K64_DISK_IMAGE),format=raw,if=ide,index=0 -netdev user,id=k64net -device rtl8139,netdev=k64net -serial stdio -no-reboot -no-shutdown
 
 run-headless: k64.iso
-	$(QEMU) -boot order=d -cdrom k64.iso -drive file=$(K64_DISK_IMAGE),format=raw,if=ide,index=0 -nographic -no-reboot -no-shutdown
+	$(QEMU) -boot order=d -cdrom k64.iso -drive file=$(K64_DISK_IMAGE),format=raw,if=ide,index=0 -netdev user,id=k64net -device rtl8139,netdev=k64net -nographic -no-reboot -no-shutdown
 
 test: k64.iso
 	bash tests/run_host_tests.sh
@@ -299,6 +303,7 @@ test: k64.iso
 	bash tests/disk_boot_smoke_test.sh
 	$(PYTHON) tests/shell_smoke.py
 	K64_SMOKE_ATTACH_DISK=0 $(PYTHON) tests/shell_smoke.py
+	K64_SMOKE_NET_DEVICE=e1000 $(PYTHON) tests/shell_smoke.py
 	$(PYTHON) tests/user_elf_smoke.py
 	$(PYTHON) tests/persistence_smoke.py
 

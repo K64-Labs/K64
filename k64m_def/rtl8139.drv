@@ -1,0 +1,6 @@
+name=rtl8139
+kind=builtin
+type=driver
+autostart=true
+async=true
+priority=2

@@ -1,0 +1,4 @@
+name=netctl
+kind=builtin
+class=system
+priority=1

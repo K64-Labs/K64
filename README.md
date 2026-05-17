@@ -13,6 +13,7 @@ K64 is currently best understood as:
 - a registry-based service/driver environment
 - a boot image that includes a custom root filesystem format, `K64FS`
 - a writable ATA-backed root path in the default QEMU flow
+- a first RTL8139/e1000-backed Ethernet path for QEMU and VMware-style VM networking
 - a system where user-facing commands are mostly exposed by services rather than hard-coded into the kernel core
 
 It is not yet:
@@ -111,6 +112,8 @@ K64 has two registry-backed runtime layers:
 The built-in kernel code registers internal implementations for several of them, but the naming, packaging, boot exposure, and control-plane model all revolve around those artifacts.
 
 There is now also a small block-device layer under the driver model. The first concrete backend is a built-in ATA PIO driver exposed as `ata.k64m`.
+
+There is also a first network path under the same driver model. The built-in `rtl8139.k64m` and `e1000.k64m` drivers discover compatible PCI NICs, register the first usable device with the kernel network layer, and let the `netctl` service send and receive Ethernet frames.
 
 ### Layer 4: Root filesystem and boot image
 
@@ -401,6 +404,8 @@ The current built-in drivers are:
 - `screen`
 - `keyboard`
 - `fs`
+- `rtl8139`
+- `e1000`
 - any rootfs-native `.k64m` entries discovered under `/k64m`
 
 Driver lifecycle:
@@ -503,6 +508,62 @@ The `storagectl` service exposes that state at runtime:
 
 When booted from the ISO, `install` is the live installer entry point. It lists writable target disks and can write the GRUB BIOS boot area plus the current K64 root filesystem to a device such as `ata0` after explicit confirmation.
 
+### Network devices and `netctl`
+
+Files:
+
+- `k64_pci.c`
+- `k64_pci.h`
+- `k64_rtl8139.c`
+- `k64_rtl8139.h`
+- `k64_e1000.c`
+- `k64_e1000.h`
+- `k64_net.c`
+- `k64_net.h`
+
+K64 now has a first real Ethernet path:
+
+- PCI config-space scanning
+- RTL8139 I/O BAR initialization for QEMU/legacy VM use
+- Intel e1000 MMIO initialization for VMware-compatible VM use
+- MAC address discovery
+- transmit and receive rings/buffers
+- Ethernet frame send/receive
+- ARP request/reply handling
+- static IPv4 configuration for the default QEMU user network
+- ICMP echo packet send and echo-reply response handling
+- UDP packet send support
+
+The default network identity is intentionally simple and matches QEMU user networking:
+
+- IPv4: `10.0.2.15`
+- gateway: `10.0.2.2`
+- netmask: `255.255.255.0`
+
+The `netctl` service exposes the runtime network surface:
+
+```text
+netctl status
+netctl poll
+netctl arp <ipv4>
+ping <ipv4>
+udp send <ipv4> <port> <text>
+```
+
+Examples:
+
+```text
+netctl status
+netctl arp 10.0.2.2
+netctl poll
+ping 10.0.2.2
+udp send 10.0.2.2 9 hello-from-k64
+```
+
+This is not yet a full socket API, DHCP client, DNS resolver, TCP stack, or browser-style internet userland. It is the first working packet path: K64 can initialize a NIC through a `.k64m` driver, send Ethernet/ARP/IPv4/ICMP/UDP packets, poll received packets, and answer basic inbound ARP/ICMP traffic.
+
+For VMware, configure the virtual NIC as `e1000`/Intel E1000 when possible. The default QEMU targets attach an RTL8139 NIC, while the smoke tests can also boot with QEMU's e1000 device.
+
 ## Service Model (`.k64s`)
 
 Files:
@@ -574,6 +635,7 @@ The built-in service registration in `k64s/k64s_builtin.c` currently creates:
 - `servicectl`
 - `driverctl`
 - `storagectl`
+- `netctl`
 - `reload`
 - `fsctl`
 - `userctl`
@@ -589,6 +651,7 @@ What they do:
 - `servicectl`: service management command surface
 - `driverctl`: driver management command surface
 - `storagectl`: block-device inspection and filesystem sync
+- `netctl`: network inspection and packet send/receive commands
 - `reload`: runtime reload request surface
 - `fsctl`: read/write filesystem command surface
 - `userctl`: user/session/privilege command surface
@@ -1082,6 +1145,7 @@ It also exposes service-owned commands, including:
 - `servicectl`
 - `driverctl`
 - `storagectl`
+- `netctl`
 - `reload`
 - `sysfetch`
 - `uname`
@@ -1101,6 +1165,9 @@ It also exposes service-owned commands, including:
 - `mv`
 - `cp`
 - `sync`
+- `netctl`
+- `ping`
+- `udp`
 - `userctl`
 - `users`
 - `groups`
@@ -1487,6 +1554,8 @@ Tests currently cover:
 - userland libc smoke coverage through `/ex/libctest.elf`
 - interactive shell smoke coverage for built-ins, service commands, filesystem commands, user commands, and ELF launch in both disk-root and ISO-only modes
 - persistence across two QEMU boots using the same `build/root.disk`
+- RTL8139-backed network command discovery and basic ARP/ICMP/UDP command paths
+- e1000-backed network command discovery for VMware-compatible NIC behavior
 
 Files:
 
@@ -1588,6 +1657,11 @@ layout de
 servicectl list
 driverctl list
 storagectl list
+netctl status
+netctl arp 10.0.2.2
+netctl poll
+ping 10.0.2.2
+udp send 10.0.2.2 9 hello
 install
 ps
 sync

@@ -12,6 +12,7 @@
 #include "k64_sched.h"
 #include "k64_pit.h"
 #include "k64_modules.h"
+#include "k64_net.h"
 #include "k64_system.h"
 #include "k64_serial.h"
 #include "k64_usermode.h"
@@ -71,6 +72,7 @@ void k64_kernel_main(void) {
     k64_usermode_init();
 
     k64_block_init();
+    k64_net_init();
     k64_modules_registry_init();
     k64_system_registry_init();
     k64_system_register_core_services();
