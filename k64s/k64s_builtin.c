@@ -358,9 +358,9 @@ static bool sysfetch_command(const char* command, const char* args) {
     uint64_t total_mem = (uint64_t)k64_pmm_total_frames() * 4096ULL;
     uint64_t used_mem = (uint64_t)k64_pmm_used_frames() * 4096ULL;
     uint64_t free_mem = total_mem > used_mem ? (total_mem - used_mem) : 0;
-    uint64_t disk_total = (uint64_t)k64_fs_capacity_bytes();
-    uint64_t disk_used = (uint64_t)k64_fs_used_bytes();
-    uint64_t disk_free = disk_total > disk_used ? (disk_total - disk_used) : 0;
+    uint64_t fs_total = (uint64_t)k64_fs_capacity_bytes();
+    uint64_t fs_used = (uint64_t)k64_fs_used_bytes();
+    uint64_t fs_free = fs_total > fs_used ? (fs_total - fs_used) : 0;
 
     (void)command;
     (void)args;
@@ -399,8 +399,10 @@ static bool sysfetch_command(const char* command, const char* args) {
     svc_print_uptime_line();
     svc_print_mib_line("Memory Available", free_mem);
     svc_print_mib_line("Memory Total", total_mem);
-    svc_print_mib_line("Disk Available", disk_free);
-    svc_print_mib_line("Disk Total", disk_total);
+    svc_print_mib_line("K64FS Available", fs_free);
+    svc_print_mib_line("K64FS Volume Total", fs_total);
+    svc_print_mib_line("K64FS Packed Image Used", fs_used);
+    svc_print_mib_line("K64FS Runtime Image Limit", (uint64_t)k64_fs_image_limit_bytes());
     k64_term_write("Drivers Loaded: ");
     k64_term_write_dec(k64_modules_driver_count());
     k64_term_putc('\n');
@@ -1014,6 +1016,8 @@ static bool storagectl_command(const char* command, const char* args) {
         svc_print_size(total > used ? total - used : 0);
         k64_term_write(" total=");
         svc_print_size(total);
+        k64_term_write(" image_limit=");
+        svc_print_size((uint64_t)k64_fs_image_limit_bytes());
         k64_term_putc('\n');
         return true;
     }
@@ -1382,6 +1386,20 @@ static bool fsctl_sync_handler(const char* command, const char* args) {
     return true;
 }
 
+static bool fsctl_grow_handler(const char* command, const char* args) {
+    (void)command;
+    if (args && args[0] && !k64_streq(args, "/")) {
+        fsctl_print("usage: grow /");
+        return true;
+    }
+    if (!k64_fs_grow_root()) {
+        fsctl_print("grow failed");
+        return true;
+    }
+    fsctl_print("grow complete");
+    return true;
+}
+
 static bool fsctl_start(k64_service_t* service) {
     (void)service;
     if (!k64_modules_is_driver_running("fs")) {
@@ -1402,6 +1420,7 @@ static bool fsctl_start(k64_service_t* service) {
     (void)k64_system_register_command("fsctl", "cp", fsctl_cp_handler);
     (void)k64_system_register_command("fsctl", "stat", fsctl_stat_handler);
     (void)k64_system_register_command("fsctl", "sync", fsctl_sync_handler);
+    (void)k64_system_register_command("fsctl", "grow", fsctl_grow_handler);
     return true;
 }
 

@@ -37,5 +37,7 @@ bool k64_fs_sync(void);
 bool k64_fs_is_persistent(void);
 bool k64_fs_mount_source(char* out, int out_size);
 bool k64_fs_install_to_block_device(const char* device_name);
+bool k64_fs_grow_root(void);
 size_t k64_fs_used_bytes(void);
 size_t k64_fs_capacity_bytes(void);
+size_t k64_fs_image_limit_bytes(void);

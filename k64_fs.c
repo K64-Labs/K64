@@ -56,6 +56,7 @@ static uint8_t fs_mutable[K64_FS_MUTABLE_MAX];
 static uint8_t fs_append_buffer[K64_FS_MUTABLE_MAX];
 static uint8_t fs_block_buffer[K64_FS_IMAGE_MAX];
 static size_t fs_image_size = 0;
+static size_t fs_volume_capacity = K64_FS_IMAGE_MAX;
 static size_t fs_mutable_used = 0;
 static bool fs_running = false;
 static bool fs_persistent = false;
@@ -126,6 +127,7 @@ static void fs_reset(void) {
     nodes[0].dirty_offset = -1;
     cwd_index = 0;
     fs_image_size = 0;
+    fs_volume_capacity = K64_FS_IMAGE_MAX;
     fs_mutable_used = 0;
     fs_persistent = false;
     fs_dirty = false;
@@ -459,6 +461,10 @@ static bool fs_mount_from_block_device_at(k64_block_device_t* dev, uint64_t base
     fs_dirty = false;
     fs_block_device = dev;
     fs_block_lba = base_lba;
+    {
+        uint64_t bytes = dev->block_count * (uint64_t)dev->block_size;
+        fs_volume_capacity = bytes > (uint64_t)((size_t)-1) ? (size_t)-1 : (size_t)bytes;
+    }
     fs_copy(fs_mount_name, sizeof(fs_mount_name), dev->name);
     K64_LOG_INFO("K64FS: mounted persistent block root.");
     return true;
@@ -527,6 +533,7 @@ static bool fs_mount_from_multiboot(void) {
                 fs_dirty = false;
                 fs_block_device = NULL;
                 fs_block_lba = 0;
+                fs_volume_capacity = K64_FS_IMAGE_MAX;
                 fs_copy(fs_mount_name, sizeof(fs_mount_name), "multiboot");
                 K64_LOG_INFO("K64FS: mounted root image.");
                 return true;
@@ -1208,16 +1215,25 @@ bool k64_fs_install_to_block_device(const char* device_name) {
     return k64_block_write(dev, K64_FS_PARTITION_LBA, sectors, fs_block_buffer);
 }
 
+bool k64_fs_grow_root(void) {
+    uint64_t bytes;
+
+    if (!fs_persistent || !fs_block_device || fs_block_device->block_size == 0) {
+        return false;
+    }
+    bytes = fs_block_device->block_count * (uint64_t)fs_block_device->block_size;
+    fs_volume_capacity = bytes > (uint64_t)((size_t)-1) ? (size_t)-1 : (size_t)bytes;
+    return true;
+}
+
 size_t k64_fs_used_bytes(void) {
     return fs_image_size;
 }
 
 size_t k64_fs_capacity_bytes(void) {
-    if (fs_block_device && fs_block_device->block_size) {
-        uint64_t bytes = fs_block_device->block_count * (uint64_t)fs_block_device->block_size;
-        if (bytes < K64_FS_IMAGE_MAX) {
-            return (size_t)bytes;
-        }
-    }
+    return fs_volume_capacity;
+}
+
+size_t k64_fs_image_limit_bytes(void) {
     return K64_FS_IMAGE_MAX;
 }

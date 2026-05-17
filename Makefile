@@ -198,7 +198,7 @@ $(K64_BOOT_AREA): $(K64_GRUB_K64FS_MOD) tools/mk_k64_boot_area.py Makefile
 	fi
 	$(PYTHON) tools/mk_k64_boot_area.py --grub-dir $(GRUB_MODDIR) --output $(K64_BOOT_AREA) --disk-size $(K64_DISK_SIZE)
 
-$(K64_GRUB_BOOTSTRAP_CFG): $(K64_GRUB_K64FS_MOD) Makefile
+$(K64_GRUB_BOOTSTRAP_CFG): $(K64_GRUB_K64FS_MOD) $(K64_KERNEL_ELF) Makefile
 	mkdir -p build
 	echo 'set timeout=0' > $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'set default=0' >> $(K64_GRUB_BOOTSTRAP_CFG)

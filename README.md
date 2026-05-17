@@ -507,11 +507,14 @@ The `storagectl` service exposes that state at runtime:
 - `storagectl partition <device> k64 yes`
 - `storagectl root`
 - `storagectl sync`
+- `grow /`
 - `install`
 - `install <device> yes`
 - `sync`
 
-`storagectl list` prints each disk/partition with block counts plus human-readable KiB/MiB/GiB size. `storagectl partitions <device>` reads the disk's MBR and reports each partition plus currently unallocated space. `storagectl root` reports the mounted rootfs source, used bytes, free bytes, and total capacity.
+`storagectl list` prints each disk/partition with block counts plus human-readable KiB/MiB/GiB size. `storagectl partitions <device>` reads the disk's MBR and reports each partition plus currently unallocated space. `storagectl root` reports the mounted rootfs source, used bytes, free bytes, mounted K64FS volume capacity, and the current packed-image runtime limit.
+
+K64FS now distinguishes the mounted volume size from the packed in-memory image size. On an installed 8 GiB disk, a partition such as `ata3p1` can therefore report roughly 7.9 GiB of K64FS volume capacity instead of making the disk look like a 2 MiB device. The current packed image writer still has a bounded in-kernel image buffer, so `image_limit` is shown separately until K64FS grows into a streaming or block-allocation filesystem.
 
 `storagectl partition <device> k64 yes` writes a simple K64 MBR layout: one active Linux-type partition starting at LBA 2048 and using the rest of the disk. This is intentionally confirmation-gated because it overwrites the target disk's partition table.
 
@@ -1322,8 +1325,11 @@ Runtime storage control currently supports:
 
 ```text
 storagectl list
+storagectl partitions <device>
+storagectl partition <device> k64 yes
 storagectl root
 storagectl sync
+grow /
 install
 install <device> yes
 sync
@@ -1331,8 +1337,11 @@ sync
 
 Behavior:
 
-- `list` prints registered block devices, their mode, and geometry
-- `root` prints the current root mount source and whether it is persistent
+- `list` prints registered block devices, their mode, geometry, and human-readable size
+- `partitions` prints MBR partition sizes and unallocated space on a whole disk
+- `partition` writes a simple one-partition K64 MBR layout after explicit confirmation
+- `root` prints the current root mount source, persistent mode, used/free/total K64FS volume size, and packed image limit
+- `grow /` refreshes the mounted K64FS root volume capacity from the backing partition
 - `sync` flushes the mounted `K64FS` image back to the block device when one is active
 - `install` prints installer guidance and writable target disks
 - `install <device> yes` writes the current K64 root filesystem to the target disk
