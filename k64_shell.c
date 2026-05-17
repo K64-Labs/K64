@@ -20,6 +20,7 @@
 #define SHELL_MAX_LINE 128
 #define SHELL_HISTORY_MAX 16
 #define SHELL_EVENTS_PER_POLL 32
+#define SHELL_LAYOUT_CONFIG_PATH "/etc/keyboard/layout.cfg"
 
 typedef struct {
     char line[SHELL_MAX_LINE];
@@ -202,6 +203,53 @@ static bool shell_layout_from_name(const char* name, k64_keyboard_layout_t* out)
         return true;
     }
     return false;
+}
+
+static void shell_trim_line(char* text) {
+    int end = 0;
+
+    if (!text) {
+        return;
+    }
+    while (text[end]) {
+        end++;
+    }
+    while (end > 0 && (text[end - 1] == '\n' || text[end - 1] == '\r' ||
+                       text[end - 1] == ' ' || text[end - 1] == '\t')) {
+        text[--end] = '\0';
+    }
+}
+
+static void shell_load_keyboard_layout_config(void) {
+    char layout_name[32];
+    k64_keyboard_layout_t layout;
+
+    if (!k64_fs_cat(SHELL_LAYOUT_CONFIG_PATH, layout_name, sizeof(layout_name))) {
+        return;
+    }
+    shell_trim_line(layout_name);
+    if (shell_layout_from_name(layout_name, &layout)) {
+        k64_keyboard_set_layout(layout);
+    }
+}
+
+static bool shell_save_keyboard_layout_config(void) {
+    const char* layout_name = k64_keyboard_layout_name();
+    char content[8];
+    int i = 0;
+
+    (void)k64_fs_mkdir("/etc");
+    (void)k64_fs_mkdir("/etc/keyboard");
+    while (layout_name[i] && i + 1 < (int)sizeof(content)) {
+        content[i] = layout_name[i];
+        i++;
+    }
+    content[i] = '\0';
+    if (!k64_fs_write_file(SHELL_LAYOUT_CONFIG_PATH, content)) {
+        return false;
+    }
+    (void)k64_fs_sync();
+    return true;
 }
 
 static void shell_print_help(void) {
@@ -809,6 +857,9 @@ static void shell_handle_command(const char* cmd) {
             k64_keyboard_set_layout(layout);
             k64_term_write("Keyboard layout switched to ");
             k64_term_write(k64_keyboard_layout_name());
+            if (!shell_save_keyboard_layout_config()) {
+                k64_term_write(" (not saved)");
+            }
             k64_term_putc('\n');
             return;
         case K64_SHELL_CMD_SERVICECTL:
@@ -966,6 +1017,7 @@ bool k64_shell_service_start(struct k64_service* service) {
     shell_runtime.active = true;
     shell_runtime.banner_printed = false;
     shell_editor_reset(&shell_runtime.editor);
+    shell_load_keyboard_layout_config();
     shell_history_index = -1;
     shell_saved_line_valid = false;
     return true;

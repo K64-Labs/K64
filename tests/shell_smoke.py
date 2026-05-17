@@ -256,6 +256,7 @@ def main():
             ("sched", "Scheduler stats:"),
             ("layout", "Current layout:"),
             ("layout us", "Keyboard layout switched to us"),
+            ("cat /etc/keyboard/layout.cfg", "us"),
             ("servicectl list", "PID   STATE"),
             ("driverctl list", "ID    STATE"),
             ("storagectl list", "size=" if attach_disk else PROMPT_NEEDLE),

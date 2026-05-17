@@ -1144,6 +1144,8 @@ Keyboard layout switching supports:
 - `us`
 - `de`
 
+The active keyboard layout is loaded from `/etc/keyboard/layout.cfg` when the shell starts. Running `layout us` or `layout de` changes the live layout, writes the new value back to that config file, and syncs the mounted root filesystem when persistence is available.
+
 ### Built-in shell commands
 
 The shell has some built-in commands of its own:
