@@ -1126,6 +1126,30 @@ bool k64_fs_mount_source(char* out, int out_size) {
     return true;
 }
 
+bool k64_fs_install_to_block_device(const char* device_name) {
+    k64_block_device_t* dev;
+    uint32_t sectors;
+
+    if (!device_name || !device_name[0]) {
+        return false;
+    }
+    dev = k64_block_find_device_by_name(device_name);
+    if (!dev || !dev->online || !dev->writable || dev->block_size != K64_FS_BLOCK_SIZE) {
+        return false;
+    }
+    if (!fs_writeback_image()) {
+        return false;
+    }
+    sectors = (uint32_t)((fs_image_size + K64_FS_BLOCK_SIZE - 1u) / K64_FS_BLOCK_SIZE);
+    if (sectors == 0 || (uint64_t)sectors > dev->block_count || (size_t)sectors * K64_FS_BLOCK_SIZE > sizeof(fs_block_buffer)) {
+        return false;
+    }
+    for (size_t i = 0; i < (size_t)sectors * K64_FS_BLOCK_SIZE; ++i) {
+        fs_block_buffer[i] = i < fs_image_size ? fs_image[i] : 0;
+    }
+    return k64_block_write(dev, 0, sectors, fs_block_buffer);
+}
+
 size_t k64_fs_used_bytes(void) {
     return fs_image_size;
 }

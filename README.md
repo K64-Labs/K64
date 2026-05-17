@@ -134,14 +134,13 @@ The ISO-root GRUB config is generated into `build/grub-bootstrap.cfg` and instal
 
 Its job is to:
 
-- load GRUB modules `loopback`, `configfile`, and `k64fs`
+- load GRUB modules `configfile` and `k64fs`
 - remember the ISO root as `k64_iso_root`
 - try `(hd0)/boot/grub/grub.cfg` first
-- loop-mount `/k64fs/root.k64fs`
-- set `root=(loop)`
-- `configfile (loop)/boot/grub/grub.cfg`
+- if a disk root is present, hand off to that config
+- otherwise boot the kernel from the ISO and pass `/k64fs/root.k64fs` directly as a Multiboot module
 
-So the ISO config is only a bootstrap shim. On a system with a writable K64 disk, GRUB prefers the disk copy of `/boot/grub/grub.cfg`. On a pure ISO boot, it falls back to the loop-mounted `root.k64fs` image on the CD.
+So the ISO config is a bootstrap shim with a direct ISO fallback. On a system with a writable K64 disk, GRUB prefers the disk copy of `/boot/grub/grub.cfg`. On a pure ISO boot, including VMware boots without the QEMU `root.disk`, it passes the CD copy of `root.k64fs` to the kernel so `/ex/*.elf`, `/k64s`, and `/k64m` are available.
 
 ### Step 2: Rootfs GRUB config
 
@@ -497,7 +496,11 @@ The `storagectl` service exposes that state at runtime:
 - `storagectl list`
 - `storagectl root`
 - `storagectl sync`
+- `install`
+- `install <device> yes`
 - `sync`
+
+When booted from the ISO, `install` is the live installer entry point. It lists writable target disks and can write the current K64 root filesystem to a device such as `ata0` after explicit confirmation.
 
 ## Service Model (`.k64s`)
 
@@ -1244,6 +1247,8 @@ Runtime storage control currently supports:
 storagectl list
 storagectl root
 storagectl sync
+install
+install <device> yes
 sync
 ```
 
@@ -1252,7 +1257,11 @@ Behavior:
 - `list` prints registered block devices, their mode, and geometry
 - `root` prints the current root mount source and whether it is persistent
 - `sync` flushes the mounted `K64FS` image back to the block device when one is active
+- `install` prints installer guidance and writable target disks
+- `install <device> yes` writes the current K64 root filesystem to the target disk
 - bare `sync` is handled directly by the shell as a global filesystem flush
+
+The installer is confirmation-gated because it overwrites the target disk's existing `K64FS` contents. The current in-kernel installer handles the K64 root filesystem; a fully standalone no-ISO boot also requires a BIOS bootloader on the disk.
 
 ## Reload Paths
 
@@ -1448,6 +1457,8 @@ The ISO build process is:
 
 The default QEMU targets attach both the ISO and `build/root.disk`. The ISO is the boot medium; the raw disk is the persistent root device that the ATA driver mounts as `K64FS`.
 
+If you boot only the ISO in VMware or another VM without attaching `build/root.disk`, K64 now uses the Multiboot `root.k64fs` module from the ISO. That mode is ephemeral, but normal shell commands and `/ex/*.elf` programs are still expected to work.
+
 ### Build targets
 
 - `make`: build `k64.iso`
@@ -1465,11 +1476,12 @@ Tests currently cover:
 - filesystem mutation and lookup behavior
 - generated GRUB config correctness
 - boot smoke behavior in QEMU with an attached writable disk image
+- ISO-only shell boot behavior without an attached writable disk image
 - ring-3 user ELF execution through `elfrun`
 - user process-table visibility through `ps`
 - user-mode console output and read-only file I/O syscalls
 - userland libc smoke coverage through `/ex/libctest.elf`
-- interactive shell smoke coverage for built-ins, service commands, filesystem commands, user commands, and ELF launch
+- interactive shell smoke coverage for built-ins, service commands, filesystem commands, user commands, and ELF launch in both disk-root and ISO-only modes
 - persistence across two QEMU boots using the same `build/root.disk`
 
 Files:
@@ -1571,6 +1583,7 @@ layout de
 servicectl list
 driverctl list
 storagectl list
+install
 ps
 sync
 users

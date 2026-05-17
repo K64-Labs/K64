@@ -14,19 +14,26 @@ except ImportError:
     termios = None
 
 
-QEMU_BASE_CMD = [
-    "qemu-system-x86_64",
-    "-cdrom",
-    "k64.iso",
-    "-drive",
-    "file=build/root.disk,format=raw,if=ide,index=0",
-    "-display",
-    "none",
-    "-monitor",
-    "none",
-    "-no-reboot",
-    "-no-shutdown",
-]
+def qemu_base_cmd():
+    cmd = [
+        "qemu-system-x86_64",
+        "-cdrom",
+        "k64.iso",
+    ]
+    if os.environ.get("K64_SMOKE_ATTACH_DISK", "1") != "0":
+        cmd += [
+            "-drive",
+            "file=build/root.disk,format=raw,if=ide,index=0",
+        ]
+    cmd += [
+        "-display",
+        "none",
+        "-monitor",
+        "none",
+        "-no-reboot",
+        "-no-shutdown",
+    ]
+    return cmd
 
 PTY_RE = re.compile(r"char device redirected to (?P<path>/dev/pts/\d+)")
 BOOT_NEEDLE = "K64 shell started. Type 'help' for commands."
@@ -114,7 +121,7 @@ class Guest:
 
     def _start_pty(self):
         self.proc = subprocess.Popen(
-            QEMU_BASE_CMD + ["-serial", "pty"],
+            qemu_base_cmd() + ["-serial", "pty"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -145,7 +152,7 @@ class Guest:
     def _start_tcp(self):
         port = free_tcp_port()
         self.proc = subprocess.Popen(
-            QEMU_BASE_CMD + ["-serial", f"tcp:127.0.0.1:{port},server=on,wait=off"],
+            qemu_base_cmd() + ["-serial", f"tcp:127.0.0.1:{port},server=on,wait=off"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -194,11 +201,12 @@ class Guest:
 
 
 def main():
-    if shutil.which(QEMU_BASE_CMD[0]) is None:
+    if shutil.which("qemu-system-x86_64") is None:
         print("qemu-system-x86_64 not found; skipping shell smoke test")
         return 0
-    if not os.path.isfile("k64.iso") or not os.path.isfile("build/root.disk"):
-        print("k64.iso or build/root.disk missing; skipping shell smoke test")
+    attach_disk = os.environ.get("K64_SMOKE_ATTACH_DISK", "1") != "0"
+    if not os.path.isfile("k64.iso") or (attach_disk and not os.path.isfile("build/root.disk")):
+        print("required boot artifacts missing; skipping shell smoke test")
         return 0
 
     with Guest() as guest:
@@ -216,8 +224,10 @@ def main():
             ("layout us", "Keyboard layout switched to us"),
             ("servicectl list", "PID   STATE"),
             ("driverctl list", "ID    STATE"),
-            ("storagectl list", "ata0 id="),
+            ("storagectl list", "ata0 id=" if attach_disk else PROMPT_NEEDLE),
             ("storagectl root", "rootfs source:"),
+            ("install", "K64 installer"),
+            ("install ata0 yes", "installer: root filesystem installed") if attach_disk else ("install ata0 yes", "installer: failed"),
             ("pwd", "/"),
             ("ls /", "etc/"),
             ("stat /etc/motd", "file /etc/motd"),

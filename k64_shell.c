@@ -222,6 +222,7 @@ static void shell_print_help(void) {
     k64_term_write("  servicectl <cmd> - manage services\n");
     k64_term_write("  driverctl <cmd>  - manage drivers\n");
     k64_term_write("  storagectl <cmd> - manage block storage and sync\n");
+    k64_term_write("  install          - guide disk installation from the live ISO\n");
     k64_term_write("  reload <target>  - reload drivers or kernel runtime\n");
     k64_term_write("  whoami id users groups - inspect users, groups, and the current session\n");
     k64_term_write("  login logout su        - switch the current session\n");

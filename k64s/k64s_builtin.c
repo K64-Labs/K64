@@ -65,7 +65,9 @@ static void driverctl_usage(void) {
 }
 
 static void storagectl_usage(void) {
-    svc_print_line("usage: storagectl <list|sync|root>");
+    svc_print_line("usage: storagectl <list|sync|root|install>");
+    svc_print_line("       install");
+    svc_print_line("       install <device> yes");
 }
 
 static void svc_print_uptime_line(void) {
@@ -749,6 +751,8 @@ static void fsctl_print(const char* text) {
 
 static bool storagectl_command(const char* command, const char* args) {
     char sub[32];
+    char dev_name[32];
+    char confirm[16];
 
     if (command && k64_streq(command, "sync")) {
         sub[0] = 's';
@@ -756,6 +760,15 @@ static bool storagectl_command(const char* command, const char* args) {
         sub[2] = 'n';
         sub[3] = 'c';
         sub[4] = '\0';
+    } else if (command && k64_streq(command, "install")) {
+        sub[0] = 'i';
+        sub[1] = 'n';
+        sub[2] = 's';
+        sub[3] = 't';
+        sub[4] = 'a';
+        sub[5] = 'l';
+        sub[6] = 'l';
+        sub[7] = '\0';
     } else {
         args = svc_next_token(args, sub, sizeof(sub));
     }
@@ -783,6 +796,48 @@ static bool storagectl_command(const char* command, const char* args) {
             k64_term_write_dec(dev->block_size);
             k64_term_putc('\n');
         }
+        return true;
+    }
+
+    if (k64_streq(sub, "install")) {
+        args = svc_next_token(args, dev_name, sizeof(dev_name));
+        args = svc_next_token(args, confirm, sizeof(confirm));
+        if (!dev_name[0]) {
+            svc_print_line("K64 installer");
+            svc_print_line("This writes the current K64 root filesystem to a writable disk.");
+            svc_print_line("Available target disks:");
+            for (size_t i = 0; i < k64_block_device_count(); ++i) {
+                k64_block_device_t* dev = k64_block_device_at(i);
+                if (!dev || !dev->online || !dev->writable) {
+                    continue;
+                }
+                k64_term_write("  ");
+                k64_term_write(dev->name);
+                k64_term_write(" blocks=");
+                k64_term_write_dec(dev->block_count);
+                k64_term_write(" block_size=");
+                k64_term_write_dec(dev->block_size);
+                k64_term_putc('\n');
+            }
+            svc_print_line("To install, run: install <device> yes");
+            svc_print_line("Example: install ata0 yes");
+            return true;
+        }
+        if (!k64_streq(confirm, "yes")) {
+            svc_print_line("installer: refusing without confirmation");
+            svc_print_line("Run exactly: install <device> yes");
+            return true;
+        }
+        k64_term_write("installer: writing K64FS root to ");
+        k64_term_write(dev_name);
+        k64_term_write("...\n");
+        if (!k64_fs_install_to_block_device(dev_name)) {
+            svc_print_line("installer: failed");
+            return true;
+        }
+        svc_print_line("installer: root filesystem installed");
+        svc_print_line("installer: sync complete");
+        svc_print_line("installer: remove the ISO and boot from the target disk if a BIOS bootloader is present");
         return true;
     }
 
@@ -1204,6 +1259,7 @@ static void reload_poll(k64_service_t* service, uint64_t now_ticks) {
 static bool storagectl_start(k64_service_t* service) {
     (void)k64_system_register_command(service->name, "storagectl", storagectl_command);
     (void)k64_system_register_command(service->name, "sync", storagectl_command);
+    (void)k64_system_register_command(service->name, "install", storagectl_command);
     return true;
 }
 
