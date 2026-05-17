@@ -11,6 +11,7 @@ LD   := $(call detect_tool,x86_64-elf-ld,ld)
 CLANG := $(call detect_tool,clang,)
 LD_LLD := $(call detect_tool,ld.lld,)
 GRUB_MKRESCUE := $(call detect_tool,grub-mkrescue,$(call detect_tool,grub2-mkrescue,))
+GRUB_MKIMAGE  := $(call detect_tool,grub-mkimage,$(call detect_tool,grub2-mkimage,))
 GRUB_FILE     := $(call detect_tool,grub-file,$(call detect_tool,grub2-file,))
 QEMU ?= qemu-system-x86_64
 PYTHON ?= python3
@@ -78,6 +79,7 @@ K64_GRUB_BOOTSTRAP_CFG := build/grub-bootstrap.cfg
 K64_GRUB_ROOT_CFG := build/grub-root.cfg
 K64_GRUB_ISO_CFG := build/grub-iso.cfg
 K64_GRUB_K64FS_MOD := $(GRUB_MODDIR)/k64fs.mod
+K64_BOOT_AREA := build/k64-boot-area.bin
 
 K64_SRCS = \
   k64_kernel.c \
@@ -184,6 +186,13 @@ $(K64_GRUB_K64FS_MOD): grub/k64fs.c tools/build_grub_k64fs.sh
 	cp -a /usr/lib/grub/i386-pc $(GRUB_MODDIR)
 	bash tools/build_grub_k64fs.sh $(GRUB_MODDIR) $(GRUB_BUILD_WORK)
 
+$(K64_BOOT_AREA): $(K64_GRUB_K64FS_MOD) tools/mk_k64_boot_area.py
+	@if [ -z "$(GRUB_MKIMAGE)" ]; then \
+		echo "Missing GRUB image builder. Install grub-mkimage/grub2-mkimage."; \
+		exit 1; \
+	fi
+	$(PYTHON) tools/mk_k64_boot_area.py --grub-dir $(GRUB_MODDIR) --output $(K64_BOOT_AREA)
+
 $(K64_GRUB_BOOTSTRAP_CFG): $(K64_GRUB_K64FS_MOD) Makefile
 	mkdir -p build
 	echo 'set timeout=0' > $(K64_GRUB_BOOTSTRAP_CFG)
@@ -193,18 +202,12 @@ $(K64_GRUB_BOOTSTRAP_CFG): $(K64_GRUB_K64FS_MOD) Makefile
 	echo 'terminal_input console' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'terminal_output console' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'insmod loopback' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo 'insmod configfile' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'insmod k64fs' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'set k64_iso_root=$$root' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo 'if [ -f (hd0)/boot/grub/grub.cfg ]; then' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo '  set root=(hd0)' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo '  configfile /boot/grub/grub.cfg' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo 'else' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo '  set root=$${k64_iso_root}' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo '  multiboot /boot/$(K64_KERNEL_ELF) pit_hz=1000 log_level=debug' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo '  module /k64fs/root.k64fs /k64fs/root.k64fs' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo '  boot' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo 'fi' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo 'set root=$${k64_iso_root}' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo 'multiboot /boot/$(K64_KERNEL_ELF) pit_hz=1000 log_level=debug' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo 'module /k64fs/root.k64fs /k64fs/root.k64fs' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo 'boot' >> $(K64_GRUB_BOOTSTRAP_CFG)
 
 $(K64_GRUB_ROOT_CFG): $(K64_KERNEL_ELF) Makefile
 	mkdir -p build
@@ -217,10 +220,6 @@ $(K64_GRUB_ROOT_CFG): $(K64_KERNEL_ELF) Makefile
 	echo '' >> $(K64_GRUB_ROOT_CFG)
 	echo 'menuentry "K64 Kernel" {' >> $(K64_GRUB_ROOT_CFG)
 	echo '  multiboot /boot/$(K64_KERNEL_ELF) pit_hz=1000 log_level=debug' >> $(K64_GRUB_ROOT_CFG)
-	echo '  if [ x$$k64_iso_root != x ]; then' >> $(K64_GRUB_ROOT_CFG)
-	echo '    set root=$${k64_iso_root}' >> $(K64_GRUB_ROOT_CFG)
-	echo '    module /k64fs/root.k64fs /k64fs/root.k64fs' >> $(K64_GRUB_ROOT_CFG)
-	echo '  fi' >> $(K64_GRUB_ROOT_CFG)
 	echo '}' >> $(K64_GRUB_ROOT_CFG)
 
 $(K64_GRUB_ISO_CFG): $(K64_KERNEL_ELF) Makefile
@@ -245,7 +244,7 @@ $(K64M_BUILD_DIR)/%.k64m: k64m_def/%.drv tools/build_k64x.py
 	mkdir -p $(K64M_BUILD_DIR)
 	$(PYTHON) tools/build_k64x.py driver $< $@
 
-$(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(USER_ELFS) $(K64_GRUB_ROOT_CFG) tools/mk_k64fs.py tools/build_k64x.py $(shell find rootfs -type f 2>/dev/null) $(K64S_DEF_SRCS) $(K64M_DEF_SRCS) $(K64S_BINS) $(K64M_BINS)
+$(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(USER_ELFS) $(K64_GRUB_ROOT_CFG) $(K64_BOOT_AREA) tools/mk_k64fs.py tools/build_k64x.py $(shell find rootfs -type f 2>/dev/null) $(K64S_DEF_SRCS) $(K64M_DEF_SRCS) $(K64S_BINS) $(K64M_BINS)
 	rm -rf $(K64FS_STAGE_ROOT)
 	mkdir -p $(K64FS_STAGE_ROOT)/boot
 	mkdir -p $(K64FS_STAGE_ROOT)/boot/grub
@@ -255,6 +254,7 @@ $(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(USER_ELFS) $(K64_GRUB_ROOT_
 	rsync -a $(K64FS_SRC_ROOT)/ $(K64FS_STAGE_ROOT)/
 	cp $(K64_KERNEL_ELF) $(K64FS_STAGE_ROOT)/boot/$(K64_KERNEL_ELF)
 	cp $(K64_GRUB_ROOT_CFG) $(K64FS_STAGE_ROOT)/boot/grub/grub.cfg
+	cp $(K64_BOOT_AREA) $(K64FS_STAGE_ROOT)/boot/grub/k64-boot-area.bin
 	if [ -n "$(K64S_BINS)" ]; then cp $(K64S_BINS) $(K64FS_STAGE_ROOT)/k64s/; fi
 	if [ -n "$(K64M_BINS)" ]; then cp $(K64M_BINS) $(K64FS_STAGE_ROOT)/k64m/; fi
 	if [ -n "$(EX_ELFS) $(USER_ELFS)" ]; then cp $(EX_ELFS) $(USER_ELFS) $(K64FS_STAGE_ROOT)/ex/; fi
@@ -268,7 +268,8 @@ $(K64_DISK_IMAGE): $(K64FS_IMAGE)
 	mkdir -p build
 	rm -f $(K64_DISK_IMAGE)
 	truncate -s 32M $(K64_DISK_IMAGE)
-	dd if=$(K64FS_IMAGE) of=$(K64_DISK_IMAGE) conv=notrunc status=none
+	dd if=$(K64_BOOT_AREA) of=$(K64_DISK_IMAGE) conv=notrunc status=none
+	dd if=$(K64FS_IMAGE) of=$(K64_DISK_IMAGE) bs=512 seek=2048 conv=notrunc status=none
 
 k64.iso: $(K64_KERNEL_ELF) $(K64FS_IMAGE) $(K64_DISK_IMAGE) $(K64_GRUB_BOOTSTRAP_CFG) $(K64_GRUB_K64FS_MOD) $(K64_GRUB_ROOT_CFG) $(K64_GRUB_ISO_CFG)
 	@if [ -z "$(GRUB_MKRESCUE)" ]; then \
@@ -286,15 +287,16 @@ k64.iso: $(K64_KERNEL_ELF) $(K64FS_IMAGE) $(K64_DISK_IMAGE) $(K64_GRUB_BOOTSTRAP
 iso: k64.iso
 
 run: k64.iso
-	$(QEMU) -cdrom k64.iso -drive file=$(K64_DISK_IMAGE),format=raw,if=ide,index=0 -serial stdio -no-reboot -no-shutdown
+	$(QEMU) -boot order=d -cdrom k64.iso -drive file=$(K64_DISK_IMAGE),format=raw,if=ide,index=0 -serial stdio -no-reboot -no-shutdown
 
 run-headless: k64.iso
-	$(QEMU) -cdrom k64.iso -drive file=$(K64_DISK_IMAGE),format=raw,if=ide,index=0 -nographic -no-reboot -no-shutdown
+	$(QEMU) -boot order=d -cdrom k64.iso -drive file=$(K64_DISK_IMAGE),format=raw,if=ide,index=0 -nographic -no-reboot -no-shutdown
 
 test: k64.iso
 	bash tests/run_host_tests.sh
 	bash tests/check_grub_cfg.sh
 	bash tests/boot_smoke_test.sh
+	bash tests/disk_boot_smoke_test.sh
 	$(PYTHON) tests/shell_smoke.py
 	K64_SMOKE_ATTACH_DISK=0 $(PYTHON) tests/shell_smoke.py
 	$(PYTHON) tests/user_elf_smoke.py

@@ -16,6 +16,8 @@ except ImportError:
 
 QEMU_BASE_CMD = [
     "qemu-system-x86_64",
+    "-boot",
+    "order=d",
     "-cdrom",
     "k64.iso",
     "-drive",

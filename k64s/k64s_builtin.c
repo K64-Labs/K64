@@ -836,8 +836,8 @@ static bool storagectl_command(const char* command, const char* args) {
             return true;
         }
         svc_print_line("installer: root filesystem installed");
-        svc_print_line("installer: sync complete");
-        svc_print_line("installer: remove the ISO and boot from the target disk if a BIOS bootloader is present");
+        svc_print_line("installer: BIOS boot area installed");
+        svc_print_line("installer: remove the ISO and boot from the target disk");
         return true;
     }
 

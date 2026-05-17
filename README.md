@@ -140,7 +140,7 @@ Its job is to:
 - if a disk root is present, hand off to that config
 - otherwise boot the kernel from the ISO and pass `/k64fs/root.k64fs` directly as a Multiboot module
 
-So the ISO config is a bootstrap shim with a direct ISO fallback. On a system with a writable K64 disk, GRUB prefers the disk copy of `/boot/grub/grub.cfg`. On a pure ISO boot, including VMware boots without the QEMU `root.disk`, it passes the CD copy of `root.k64fs` to the kernel so `/ex/*.elf`, `/k64s`, and `/k64m` are available.
+So the ISO config is a direct live-boot shim. It always boots the kernel from the ISO and passes the CD copy of `root.k64fs` as a Multiboot module. If a writable K64 disk is attached, the kernel mounts that disk as the persistent root after startup.
 
 ### Step 2: Rootfs GRUB config
 
@@ -149,11 +149,10 @@ The “real” GRUB config is generated into `build/grub-root.cfg` and copied in
 The default menu entry does:
 
 - `multiboot /boot/k64-kernel-v<version>.elf pit_hz=1000 log_level=debug`
-- conditionally pass `/k64fs/root.k64fs` as a Multiboot module only when booting through the ISO fallback path
 
 That means the kernel can boot in two modes:
 
-- persistent disk-root mode, where `fs.k64m` mounts the raw `K64FS` volume directly from the ATA disk
+- persistent disk-root mode, where GRUB boots from `build/root.disk` and `fs.k64m` mounts the K64FS partition on the ATA disk
 - ISO fallback mode, where GRUB passes `root.k64fs` in as a Multiboot module and the kernel mounts that image in memory
 
 The binary `.k64s` and `.k64m` files are discovered from the mounted rootfs by the native loaders in both modes.
@@ -163,6 +162,8 @@ The binary `.k64s` and `.k64m` files are discovered from the mounted rootfs by t
 `k64_fs_driver_start()` mounts in this order:
 
 1. first compatible writable block device with a valid `K64FS` header
+   - raw `K64FS` at LBA 0 for older disk images
+   - installed `K64FS` at LBA 2048 behind the BIOS boot area
 2. first Multiboot module whose path ends in `.k64fs`
 3. tiny in-memory fallback tree
 
@@ -500,7 +501,7 @@ The `storagectl` service exposes that state at runtime:
 - `install <device> yes`
 - `sync`
 
-When booted from the ISO, `install` is the live installer entry point. It lists writable target disks and can write the current K64 root filesystem to a device such as `ata0` after explicit confirmation.
+When booted from the ISO, `install` is the live installer entry point. It lists writable target disks and can write the GRUB BIOS boot area plus the current K64 root filesystem to a device such as `ata0` after explicit confirmation.
 
 ## Service Model (`.k64s`)
 
@@ -789,7 +790,7 @@ That means `K64FS` now behaves as a real read/write filesystem for everyday shel
 
 Current boundaries:
 
-- the persistent path is a raw unpartitioned `K64FS` volume, not a partitioned disk format
+- the persistent path supports both older raw `K64FS` disks and the current BIOS-bootable disk layout
 - the first implemented backend is ATA PIO, not AHCI or NVMe
 - there is no journal or crash-recovery layer
 
@@ -1261,7 +1262,7 @@ Behavior:
 - `install <device> yes` writes the current K64 root filesystem to the target disk
 - bare `sync` is handled directly by the shell as a global filesystem flush
 
-The installer is confirmation-gated because it overwrites the target disk's existing `K64FS` contents. The current in-kernel installer handles the K64 root filesystem; a fully standalone no-ISO boot also requires a BIOS bootloader on the disk.
+The installer is confirmation-gated because it overwrites the target disk's boot area and K64FS contents. After `install <device> yes`, remove the ISO and boot from the target disk.
 
 ## Reload Paths
 
@@ -1451,11 +1452,13 @@ The ISO build process is:
 2. build the GRUB `k64fs.mod`
 3. generate bootstrap and root GRUB configs
 4. build `root.k64fs`
-5. create `build/root.disk` as a raw writable `K64FS` volume
+5. create `build/root.disk` with a BIOS boot area and K64FS partition
 6. assemble the `iso/` tree
 7. run `grub-mkrescue`
 
-The default QEMU targets attach both the ISO and `build/root.disk`. The ISO is the boot medium; the raw disk is the persistent root device that the ATA driver mounts as `K64FS`.
+The default QEMU targets attach both the ISO and `build/root.disk`, forcing CD boot with `-boot order=d`. The ISO is the boot medium; the disk is the persistent root device that the ATA driver mounts as `K64FS`.
+
+`build/root.disk` is also bootable by itself in BIOS/legacy mode. The build embeds a GRUB BIOS boot area in the first MiB and stores the K64FS root at LBA 2048, so the disk can be attached as the primary boot device without the ISO.
 
 If you boot only the ISO in VMware or another VM without attaching `build/root.disk`, K64 now uses the Multiboot `root.k64fs` module from the ISO. That mode is ephemeral, but normal shell commands and `/ex/*.elf` programs are still expected to work.
 
@@ -1476,6 +1479,7 @@ Tests currently cover:
 - filesystem mutation and lookup behavior
 - generated GRUB config correctness
 - boot smoke behavior in QEMU with an attached writable disk image
+- direct disk boot smoke behavior from `build/root.disk` without the ISO
 - ISO-only shell boot behavior without an attached writable disk image
 - ring-3 user ELF execution through `elfrun`
 - user process-table visibility through `ps`
@@ -1489,6 +1493,7 @@ Files:
 - `tests/run_host_tests.sh`
 - `tests/check_grub_cfg.sh`
 - `tests/boot_smoke_test.sh`
+- `tests/disk_boot_smoke_test.sh`
 - `tests/shell_smoke.py`
 - `tests/user_elf_smoke.py`
 - `tests/persistence_smoke.py`
@@ -1522,9 +1527,9 @@ Services and ELF-backed executables now get separate page tables and private sta
 
 ### 2. Persistent storage is intentionally simple
 
-The persistent path is now a raw `K64FS` image on an ATA block device. That is enough for real reboot-persistent writes in the default QEMU flow, but it is still a minimal design:
+The persistent path is now a K64FS image on an ATA block device, with the default disk image using a BIOS boot area plus a K64FS partition. That is enough for reboot-persistent writes and direct BIOS disk boot in the default QEMU flow, but it is still a minimal design:
 
-- no partition table support
+- MBR-only partition support for the K64 boot disk path
 - no journal
 - no crash recovery
 - no AHCI or NVMe backend yet

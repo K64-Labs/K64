@@ -17,6 +17,8 @@ except ImportError:
 def qemu_base_cmd():
     cmd = [
         "qemu-system-x86_64",
+        "-boot",
+        "order=d",
         "-cdrom",
         "k64.iso",
     ]

@@ -9,6 +9,8 @@
 #define K64_FS_IMAGE_MAX   (2 * 1024 * 1024)
 #define K64_FS_MUTABLE_MAX (512 * 1024)
 #define K64_FS_BLOCK_SIZE  512u
+#define K64_FS_PARTITION_LBA 2048u
+#define K64_FS_BOOT_AREA_SECTORS K64_FS_PARTITION_LBA
 #define K64FS_MAGIC_0      0x4B363446u
 #define K64FS_MAGIC_1      0x00010053u
 #define K64FS_TYPE_DIR     1u
@@ -59,6 +61,7 @@ static bool fs_running = false;
 static bool fs_persistent = false;
 static bool fs_dirty = false;
 static k64_block_device_t* fs_block_device = NULL;
+static uint64_t fs_block_lba = 0;
 static char fs_mount_name[32];
 static int cwd_index = 0;
 
@@ -127,6 +130,7 @@ static void fs_reset(void) {
     fs_persistent = false;
     fs_dirty = false;
     fs_block_device = NULL;
+    fs_block_lba = 0;
     fs_mount_name[0] = '\0';
 }
 
@@ -410,7 +414,7 @@ static bool fs_mount_image(const void* image, size_t size) {
     return fs_parse_loaded_image(size);
 }
 
-static bool fs_mount_from_block_device(k64_block_device_t* dev) {
+static bool fs_mount_from_block_device_at(k64_block_device_t* dev, uint64_t base_lba) {
     k64fs_header_t hdr;
     uint32_t image_size;
     uint32_t sectors;
@@ -418,7 +422,7 @@ static bool fs_mount_from_block_device(k64_block_device_t* dev) {
     if (!dev || dev->block_size != K64_FS_BLOCK_SIZE) {
         return false;
     }
-    if (!k64_block_read(dev, 0, 1, fs_block_buffer)) {
+    if (!k64_block_read(dev, base_lba, 1, fs_block_buffer)) {
         K64_LOG_WARN("K64FS: block root probe read failed.");
         return false;
     }
@@ -438,11 +442,11 @@ static bool fs_mount_from_block_device(k64_block_device_t* dev) {
     }
 
     sectors = (image_size + K64_FS_BLOCK_SIZE - 1u) / K64_FS_BLOCK_SIZE;
-    if ((uint64_t)sectors > dev->block_count) {
+    if (base_lba >= dev->block_count || (uint64_t)sectors > dev->block_count - base_lba) {
         K64_LOG_WARN("K64FS: block root exceeds device size.");
         return false;
     }
-    if (!k64_block_read(dev, 0, sectors, fs_block_buffer)) {
+    if (!k64_block_read(dev, base_lba, sectors, fs_block_buffer)) {
         K64_LOG_WARN("K64FS: block root image read failed.");
         return false;
     }
@@ -454,9 +458,17 @@ static bool fs_mount_from_block_device(k64_block_device_t* dev) {
     fs_persistent = true;
     fs_dirty = false;
     fs_block_device = dev;
+    fs_block_lba = base_lba;
     fs_copy(fs_mount_name, sizeof(fs_mount_name), dev->name);
     K64_LOG_INFO("K64FS: mounted persistent block root.");
     return true;
+}
+
+static bool fs_mount_from_block_device(k64_block_device_t* dev) {
+    if (fs_mount_from_block_device_at(dev, 0)) {
+        return true;
+    }
+    return fs_mount_from_block_device_at(dev, K64_FS_PARTITION_LBA);
 }
 
 static bool fs_mount_from_blocks(void) {
@@ -504,6 +516,7 @@ static bool fs_mount_from_multiboot(void) {
                 fs_persistent = false;
                 fs_dirty = false;
                 fs_block_device = NULL;
+                fs_block_lba = 0;
                 fs_copy(fs_mount_name, sizeof(fs_mount_name), "multiboot");
                 K64_LOG_INFO("K64FS: mounted root image.");
                 return true;
@@ -610,6 +623,7 @@ static int fs_used_count(void) {
 static bool fs_writeback_image(void) {
     bool was_persistent = fs_persistent;
     k64_block_device_t* saved_block_device = fs_block_device;
+    uint64_t saved_block_lba = fs_block_lba;
     char saved_mount_name[32];
     k64fs_header_t* hdr;
     k64fs_entry_t* entries;
@@ -712,6 +726,7 @@ static bool fs_writeback_image(void) {
     }
     fs_persistent = was_persistent;
     fs_block_device = saved_block_device;
+    fs_block_lba = saved_block_lba;
     fs_copy(fs_mount_name, sizeof(fs_mount_name), saved_mount_name);
     fs_dirty = true;
     if (fs_persistent) {
@@ -1096,13 +1111,15 @@ static bool fs_flush_block_device(void) {
     }
     bytes = (fs_image_size + K64_FS_BLOCK_SIZE - 1u) / K64_FS_BLOCK_SIZE * K64_FS_BLOCK_SIZE;
     sectors = (uint32_t)(bytes / K64_FS_BLOCK_SIZE);
-    if ((uint64_t)sectors > fs_block_device->block_count || bytes > sizeof(fs_block_buffer)) {
+    if (fs_block_lba >= fs_block_device->block_count ||
+        (uint64_t)sectors > fs_block_device->block_count - fs_block_lba ||
+        bytes > sizeof(fs_block_buffer)) {
         return false;
     }
     for (size_t i = 0; i < bytes; ++i) {
         fs_block_buffer[i] = i < fs_image_size ? fs_image[i] : 0;
     }
-    if (!k64_block_write(fs_block_device, 0, sectors, fs_block_buffer)) {
+    if (!k64_block_write(fs_block_device, fs_block_lba, sectors, fs_block_buffer)) {
         K64_LOG_WARN("K64FS: writeback to block device failed.");
         return false;
     }
@@ -1128,6 +1145,8 @@ bool k64_fs_mount_source(char* out, int out_size) {
 
 bool k64_fs_install_to_block_device(const char* device_name) {
     k64_block_device_t* dev;
+    const uint8_t* boot_area;
+    size_t boot_area_size;
     uint32_t sectors;
 
     if (!device_name || !device_name[0]) {
@@ -1137,17 +1156,30 @@ bool k64_fs_install_to_block_device(const char* device_name) {
     if (!dev || !dev->online || !dev->writable || dev->block_size != K64_FS_BLOCK_SIZE) {
         return false;
     }
+    if (dev->block_count <= K64_FS_PARTITION_LBA) {
+        return false;
+    }
+    if (!k64_fs_read_file_raw("/boot/grub/k64-boot-area.bin", &boot_area, &boot_area_size) ||
+        boot_area_size != (size_t)K64_FS_BOOT_AREA_SECTORS * K64_FS_BLOCK_SIZE ||
+        boot_area[510] != 0x55 || boot_area[511] != 0xAA) {
+        return false;
+    }
     if (!fs_writeback_image()) {
         return false;
     }
     sectors = (uint32_t)((fs_image_size + K64_FS_BLOCK_SIZE - 1u) / K64_FS_BLOCK_SIZE);
-    if (sectors == 0 || (uint64_t)sectors > dev->block_count || (size_t)sectors * K64_FS_BLOCK_SIZE > sizeof(fs_block_buffer)) {
+    if (sectors == 0 ||
+        (uint64_t)sectors > dev->block_count - K64_FS_PARTITION_LBA ||
+        (size_t)sectors * K64_FS_BLOCK_SIZE > sizeof(fs_block_buffer)) {
+        return false;
+    }
+    if (!k64_block_write(dev, 0, K64_FS_BOOT_AREA_SECTORS, boot_area)) {
         return false;
     }
     for (size_t i = 0; i < (size_t)sectors * K64_FS_BLOCK_SIZE; ++i) {
         fs_block_buffer[i] = i < fs_image_size ? fs_image[i] : 0;
     }
-    return k64_block_write(dev, 0, sectors, fs_block_buffer);
+    return k64_block_write(dev, K64_FS_PARTITION_LBA, sectors, fs_block_buffer);
 }
 
 size_t k64_fs_used_bytes(void) {
