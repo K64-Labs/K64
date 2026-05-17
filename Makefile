@@ -73,6 +73,7 @@ K64FS_STAGE_ROOT := build/rootfs
 K64FS_STAGE_STAMP := build/rootfs.stamp
 K64FS_IMAGE := build/root.k64fs
 K64_DISK_IMAGE := build/root.disk
+K64_DISK_SIZE ?= 32M
 GRUB_MODDIR := build/grub/i386-pc
 GRUB_BUILD_WORK := build/grub-build
 K64_GRUB_BOOTSTRAP_CFG := build/grub-bootstrap.cfg
@@ -190,12 +191,12 @@ $(K64_GRUB_K64FS_MOD): grub/k64fs.c tools/build_grub_k64fs.sh
 	cp -a /usr/lib/grub/i386-pc $(GRUB_MODDIR)
 	bash tools/build_grub_k64fs.sh $(GRUB_MODDIR) $(GRUB_BUILD_WORK)
 
-$(K64_BOOT_AREA): $(K64_GRUB_K64FS_MOD) tools/mk_k64_boot_area.py
+$(K64_BOOT_AREA): $(K64_GRUB_K64FS_MOD) tools/mk_k64_boot_area.py Makefile
 	@if [ -z "$(GRUB_MKIMAGE)" ]; then \
 		echo "Missing GRUB image builder. Install grub-mkimage/grub2-mkimage."; \
 		exit 1; \
 	fi
-	$(PYTHON) tools/mk_k64_boot_area.py --grub-dir $(GRUB_MODDIR) --output $(K64_BOOT_AREA)
+	$(PYTHON) tools/mk_k64_boot_area.py --grub-dir $(GRUB_MODDIR) --output $(K64_BOOT_AREA) --disk-size $(K64_DISK_SIZE)
 
 $(K64_GRUB_BOOTSTRAP_CFG): $(K64_GRUB_K64FS_MOD) Makefile
 	mkdir -p build
@@ -271,7 +272,7 @@ $(K64FS_IMAGE): $(K64FS_STAGE_STAMP)
 $(K64_DISK_IMAGE): $(K64FS_IMAGE)
 	mkdir -p build
 	rm -f $(K64_DISK_IMAGE)
-	truncate -s 32M $(K64_DISK_IMAGE)
+	truncate -s $(K64_DISK_SIZE) $(K64_DISK_IMAGE)
 	dd if=$(K64_BOOT_AREA) of=$(K64_DISK_IMAGE) conv=notrunc status=none
 	dd if=$(K64FS_IMAGE) of=$(K64_DISK_IMAGE) bs=512 seek=2048 conv=notrunc status=none
 

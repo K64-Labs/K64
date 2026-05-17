@@ -5,6 +5,8 @@
 
 #define ATA_PRIMARY_IO      0x1F0
 #define ATA_PRIMARY_CTRL    0x3F6
+#define ATA_SECONDARY_IO    0x170
+#define ATA_SECONDARY_CTRL  0x376
 #define ATA_REG_DATA        0
 #define ATA_REG_ERROR       1
 #define ATA_REG_FEATURES    1
@@ -30,12 +32,15 @@
 typedef struct {
     bool               present;
     k64_block_device_t* dev;
+    const char*         name;
     uint16_t           io_base;
     uint16_t           ctrl_base;
+    uint8_t            drive_select;
+    uint8_t            lba_select;
     uint64_t           sector_count;
 } k64_ata_device_t;
 
-static k64_ata_device_t ata_primary_master;
+static k64_ata_device_t ata_devices[4];
 
 static inline void io_wait(void) {
     __asm__ volatile("outb %%al, $0x80" : : "a"(0));
@@ -93,7 +98,7 @@ static bool ata_identify(k64_ata_device_t* dev) {
     uint32_t sectors28;
     uint8_t status;
 
-    outb(dev->io_base + ATA_REG_HDDEVSEL, 0xA0);
+    outb(dev->io_base + ATA_REG_HDDEVSEL, dev->drive_select);
     io_wait();
     outb(dev->io_base + ATA_REG_SECCOUNT0, 0);
     outb(dev->io_base + ATA_REG_LBA0, 0);
@@ -140,7 +145,7 @@ static bool ata_pio_rw(k64_ata_device_t* dev, uint64_t lba, uint32_t count, void
         uint64_t current_lba = lba + sector;
         uint16_t* words = (uint16_t*)(bytes + (size_t)sector * 512u);
 
-        outb(dev->io_base + ATA_REG_HDDEVSEL, (uint8_t)(0xE0u | ((current_lba >> 24) & 0x0Fu)));
+        outb(dev->io_base + ATA_REG_HDDEVSEL, (uint8_t)(dev->lba_select | ((current_lba >> 24) & 0x0Fu)));
         outb(dev->io_base + ATA_REG_SECCOUNT0, 1);
         outb(dev->io_base + ATA_REG_LBA0, (uint8_t)(current_lba & 0xFFu));
         outb(dev->io_base + ATA_REG_LBA1, (uint8_t)((current_lba >> 8) & 0xFFu));
@@ -179,40 +184,60 @@ static bool ata_block_write(void* ctx, uint64_t lba, uint32_t count, const void*
 }
 
 bool k64_ata_driver_start(void) {
-    ata_primary_master.present = false;
-    ata_primary_master.dev = NULL;
-    ata_primary_master.io_base = ATA_PRIMARY_IO;
-    ata_primary_master.ctrl_base = ATA_PRIMARY_CTRL;
-    ata_primary_master.sector_count = 0;
+    size_t found = 0;
+    const char* names[4] = {"ata0", "ata1", "ata2", "ata3"};
+    uint16_t ios[4] = {ATA_PRIMARY_IO, ATA_PRIMARY_IO, ATA_SECONDARY_IO, ATA_SECONDARY_IO};
+    uint16_t ctrls[4] = {ATA_PRIMARY_CTRL, ATA_PRIMARY_CTRL, ATA_SECONDARY_CTRL, ATA_SECONDARY_CTRL};
+    uint8_t selects[4] = {0xA0, 0xB0, 0xA0, 0xB0};
+    uint8_t lba_selects[4] = {0xE0, 0xF0, 0xE0, 0xF0};
 
-    if (!ata_identify(&ata_primary_master)) {
-        K64_LOG_INFO("ATA: no primary master disk found.");
-        return false;
-    }
+    for (size_t i = 0; i < 4; ++i) {
+        ata_devices[i].present = false;
+        ata_devices[i].dev = NULL;
+        ata_devices[i].name = names[i];
+        ata_devices[i].io_base = ios[i];
+        ata_devices[i].ctrl_base = ctrls[i];
+        ata_devices[i].drive_select = selects[i];
+        ata_devices[i].lba_select = lba_selects[i];
+        ata_devices[i].sector_count = 0;
 
-    ata_primary_master.dev = k64_block_register_device("ata0",
+        if (!ata_identify(&ata_devices[i])) {
+            continue;
+        }
+
+        ata_devices[i].dev = k64_block_register_device(names[i],
                                                        "k64m/ata.k64m",
                                                        512,
-                                                       ata_primary_master.sector_count,
+                                                       ata_devices[i].sector_count,
                                                        true,
-                                                       &ata_primary_master,
+                                                       &ata_devices[i],
                                                        ata_block_read,
                                                        ata_block_write);
-    if (!ata_primary_master.dev) {
-        K64_LOG_WARN("ATA: failed to register block device.");
-        return false;
+        if (!ata_devices[i].dev) {
+            K64_LOG_WARN("ATA: failed to register block device.");
+            continue;
+        }
+
+        ata_devices[i].present = true;
+        k64_block_scan_partitions(ata_devices[i].dev);
+        found++;
     }
 
-    ata_primary_master.present = true;
-    K64_LOG_INFO("ATA: primary master disk ready.");
+    if (found == 0) {
+        K64_LOG_INFO("ATA: no disks found.");
+        return false;
+    }
+    K64_LOG_INFO("ATA: disks ready.");
     return true;
 }
 
 void k64_ata_driver_stop(void) {
-    if (ata_primary_master.dev) {
-        k64_block_unregister_device("ata0");
+    for (size_t i = 0; i < 4; ++i) {
+        if (ata_devices[i].dev) {
+            k64_block_unregister_device(ata_devices[i].name);
+        }
+        ata_devices[i].present = false;
+        ata_devices[i].dev = NULL;
+        ata_devices[i].sector_count = 0;
     }
-    ata_primary_master.present = false;
-    ata_primary_master.dev = NULL;
-    ata_primary_master.sector_count = 0;
 }

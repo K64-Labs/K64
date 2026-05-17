@@ -59,6 +59,40 @@ static bool svc_parse_u64(const char* text, uint64_t* out) {
     return true;
 }
 
+static uint32_t svc_read_u32le(const uint8_t* p) {
+    return ((uint32_t)p[0]) |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static void svc_print_size(uint64_t bytes) {
+    const char* unit = " B";
+    uint64_t whole = bytes;
+    uint64_t frac = 0;
+
+    if (bytes >= 1024ULL * 1024ULL * 1024ULL) {
+        unit = " GiB";
+        whole = bytes / (1024ULL * 1024ULL * 1024ULL);
+        frac = ((bytes % (1024ULL * 1024ULL * 1024ULL)) * 10ULL) / (1024ULL * 1024ULL * 1024ULL);
+    } else if (bytes >= 1024ULL * 1024ULL) {
+        unit = " MiB";
+        whole = bytes / (1024ULL * 1024ULL);
+        frac = ((bytes % (1024ULL * 1024ULL)) * 10ULL) / (1024ULL * 1024ULL);
+    } else if (bytes >= 1024ULL) {
+        unit = " KiB";
+        whole = bytes / 1024ULL;
+        frac = ((bytes % 1024ULL) * 10ULL) / 1024ULL;
+    }
+
+    k64_term_write_dec(whole);
+    if (frac) {
+        k64_term_putc('.');
+        k64_term_write_dec(frac);
+    }
+    k64_term_write(unit);
+}
+
 static void servicectl_usage(void) {
     svc_print_line("usage: servicectl <list|stopped|start|stop|restart> [pid]");
 }
@@ -68,7 +102,9 @@ static void driverctl_usage(void) {
 }
 
 static void storagectl_usage(void) {
-    svc_print_line("usage: storagectl <list|sync|root|install>");
+    svc_print_line("usage: storagectl <list|partitions|partition|sync|root|install>");
+    svc_print_line("       storagectl partitions <device>");
+    svc_print_line("       storagectl partition <device> k64 yes");
     svc_print_line("       install");
     svc_print_line("       install <device> yes");
 }
@@ -803,22 +839,106 @@ static bool storagectl_command(const char* command, const char* args) {
     if (k64_streq(sub, "list")) {
         for (size_t i = 0; i < k64_block_device_count(); ++i) {
             k64_block_device_t* dev = k64_block_device_at(i);
+            uint64_t bytes;
             if (!dev) {
                 continue;
             }
+            bytes = dev->block_count * (uint64_t)dev->block_size;
             k64_term_write(dev->name);
             k64_term_write(" id=");
             k64_term_write_dec(dev->id);
+            k64_term_write(dev->is_partition ? " kind=partition" : " kind=disk");
             k64_term_write(" state=");
             k64_term_write(dev->online ? "online" : "offline");
             k64_term_write(" mode=");
             k64_term_write(dev->writable ? "rw" : "ro");
+            k64_term_write(" size=");
+            svc_print_size(bytes);
             k64_term_write(" blocks=");
             k64_term_write_dec(dev->block_count);
             k64_term_write(" block_size=");
             k64_term_write_dec(dev->block_size);
+            if (dev->is_partition) {
+                k64_term_write(" start_lba=");
+                k64_term_write_dec(dev->start_lba);
+                k64_term_write(" type=");
+                k64_term_write_hex(dev->partition_type);
+            }
             k64_term_putc('\n');
         }
+        return true;
+    }
+
+    if (k64_streq(sub, "partitions") || k64_streq(sub, "partition")) {
+        k64_block_device_t* dev;
+        uint8_t mbr[512];
+        uint64_t used_blocks = 0;
+        uint64_t free_blocks;
+
+        args = svc_next_token(args, dev_name, sizeof(dev_name));
+        if (!dev_name[0]) {
+            storagectl_usage();
+            return true;
+        }
+        dev = k64_block_find_device_by_name(dev_name);
+        if (!dev || dev->is_partition || !dev->online || dev->block_size != 512) {
+            svc_print_line("storagectl: disk not found");
+            return true;
+        }
+
+        if (k64_streq(sub, "partition")) {
+            char scheme[16];
+            args = svc_next_token(args, scheme, sizeof(scheme));
+            args = svc_next_token(args, confirm, sizeof(confirm));
+            if (!k64_streq(scheme, "k64") || !k64_streq(confirm, "yes")) {
+                svc_print_line("usage: storagectl partition <device> k64 yes");
+                return true;
+            }
+            if (!k64_block_write_k64_mbr(dev)) {
+                svc_print_line("storagectl: partition failed");
+                return true;
+            }
+            svc_print_line("storagectl: wrote one K64 partition using remaining disk space");
+            return true;
+        }
+
+        if (!k64_block_read(dev, 0, 1, mbr) || mbr[510] != 0x55 || mbr[511] != 0xAA) {
+            k64_term_write(dev->name);
+            k64_term_write(": no MBR partition table, free=");
+            svc_print_size(dev->block_count * (uint64_t)dev->block_size);
+            k64_term_putc('\n');
+            return true;
+        }
+
+        k64_term_write(dev->name);
+        k64_term_write(": size=");
+        svc_print_size(dev->block_count * (uint64_t)dev->block_size);
+        k64_term_putc('\n');
+        for (uint8_t i = 0; i < 4; ++i) {
+            size_t off = 446u + (size_t)i * 16u;
+            uint8_t type = mbr[off + 4];
+            uint32_t start = svc_read_u32le(mbr + off + 8);
+            uint32_t count = svc_read_u32le(mbr + off + 12);
+            if (type == 0 || count == 0) {
+                continue;
+            }
+            used_blocks += count;
+            k64_term_write("  p");
+            k64_term_write_dec(i + 1);
+            k64_term_write(" type=");
+            k64_term_write_hex(type);
+            k64_term_write(" start=");
+            k64_term_write_dec(start);
+            k64_term_write(" blocks=");
+            k64_term_write_dec(count);
+            k64_term_write(" size=");
+            svc_print_size((uint64_t)count * dev->block_size);
+            k64_term_putc('\n');
+        }
+        free_blocks = dev->block_count > used_blocks ? dev->block_count - used_blocks : 0;
+        k64_term_write("  unallocated=");
+        svc_print_size(free_blocks * (uint64_t)dev->block_size);
+        k64_term_putc('\n');
         return true;
     }
 
@@ -831,11 +951,14 @@ static bool storagectl_command(const char* command, const char* args) {
             svc_print_line("Available target disks:");
             for (size_t i = 0; i < k64_block_device_count(); ++i) {
                 k64_block_device_t* dev = k64_block_device_at(i);
-                if (!dev || !dev->online || !dev->writable) {
+                if (!dev || dev->is_partition || !dev->online || !dev->writable) {
                     continue;
                 }
                 k64_term_write("  ");
                 k64_term_write(dev->name);
+                k64_term_write(dev->is_partition ? " partition" : " disk");
+                k64_term_write(" size=");
+                svc_print_size(dev->block_count * (uint64_t)dev->block_size);
                 k64_term_write(" blocks=");
                 k64_term_write_dec(dev->block_count);
                 k64_term_write(" block_size=");
@@ -875,6 +998,8 @@ static bool storagectl_command(const char* command, const char* args) {
 
     if (k64_streq(sub, "root")) {
         char source[32];
+        uint64_t total = (uint64_t)k64_fs_capacity_bytes();
+        uint64_t used = (uint64_t)k64_fs_used_bytes();
         k64_term_write("rootfs source: ");
         if (k64_fs_mount_source(source, sizeof(source))) {
             k64_term_write(source);
@@ -883,6 +1008,12 @@ static bool storagectl_command(const char* command, const char* args) {
         }
         k64_term_write(" mode=");
         k64_term_write(k64_fs_is_persistent() ? "persistent" : "ephemeral");
+        k64_term_write(" used=");
+        svc_print_size(used);
+        k64_term_write(" free=");
+        svc_print_size(total > used ? total - used : 0);
+        k64_term_write(" total=");
+        svc_print_size(total);
         k64_term_putc('\n');
         return true;
     }

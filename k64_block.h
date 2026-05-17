@@ -12,6 +12,9 @@ typedef struct k64_block_device {
     char                source[48];
     uint32_t            block_size;
     uint64_t            block_count;
+    uint64_t            start_lba;
+    uint8_t             partition_type;
+    bool                is_partition;
     bool                writable;
     bool                online;
     void*               context;
@@ -35,3 +38,5 @@ k64_block_device_t* k64_block_find_device_by_name(const char* name);
 k64_block_device_t* k64_block_first_writable(void);
 bool k64_block_read(k64_block_device_t* dev, uint64_t lba, uint32_t count, void* buffer);
 bool k64_block_write(k64_block_device_t* dev, uint64_t lba, uint32_t count, const void* buffer);
+void k64_block_scan_partitions(k64_block_device_t* dev);
+bool k64_block_write_k64_mbr(k64_block_device_t* dev);

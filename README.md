@@ -494,19 +494,28 @@ The block layer provides:
 - block-device registration
 - read/write dispatch by LBA
 - simple device enumeration for services and the filesystem layer
+- partition views on top of whole-disk devices
 
-The first backend is the built-in ATA PIO driver. In the default QEMU flow, `make` attaches `build/root.disk` as an IDE hard disk, the ATA driver registers it as `ata0`, and `fs.k64m` mounts the `K64FS` volume from it.
+The first backend is the built-in ATA PIO driver. It now probes the primary and secondary IDE channels and can register multiple disks as `ata0`, `ata1`, `ata2`, and `ata3`. MBR partitions are exposed as child block devices such as `ata0p1`.
+
+In the default QEMU flow, `make` attaches `build/root.disk` as an IDE hard disk, the ATA driver registers it as `ata0`, scans its MBR, and the filesystem driver mounts the K64FS partition from `ata0p1`.
 
 The `storagectl` service exposes that state at runtime:
 
 - `storagectl list`
+- `storagectl partitions <device>`
+- `storagectl partition <device> k64 yes`
 - `storagectl root`
 - `storagectl sync`
 - `install`
 - `install <device> yes`
 - `sync`
 
-When booted from the ISO, `install` is the live installer entry point. It lists writable target disks and can write the GRUB BIOS boot area plus the current K64 root filesystem to a device such as `ata0` after explicit confirmation.
+`storagectl list` prints each disk/partition with block counts plus human-readable KiB/MiB/GiB size. `storagectl partitions <device>` reads the disk's MBR and reports each partition plus currently unallocated space. `storagectl root` reports the mounted rootfs source, used bytes, free bytes, and total capacity.
+
+`storagectl partition <device> k64 yes` writes a simple K64 MBR layout: one active Linux-type partition starting at LBA 2048 and using the rest of the disk. This is intentionally confirmation-gated because it overwrites the target disk's partition table.
+
+When booted from the ISO, `install` is the live installer entry point. It lists writable target disks and can write the GRUB BIOS boot area plus the current K64 root filesystem to a whole disk such as `ata0` after explicit confirmation. The installer patches the installed MBR partition size to match the actual target disk, so the target disk can be larger than the default development image.
 
 ### Network devices and `netctl`
 
@@ -1527,6 +1536,14 @@ The default QEMU targets attach both the ISO and `build/root.disk`, forcing CD b
 
 `build/root.disk` is also bootable by itself in BIOS/legacy mode. The build embeds a GRUB BIOS boot area in the first MiB and stores the K64FS root at LBA 2048, so the disk can be attached as the primary boot device without the ISO.
 
+The generated disk image size is configurable:
+
+```powershell
+wsl.exe -d FedoraLinux-43 -e bash -lc "cd /mnt/c/Users/linob/Downloads/K64 && K64_DISK_SIZE=128M make k64.iso"
+```
+
+The MBR partition size inside the boot area follows `K64_DISK_SIZE`. The default remains `32M`.
+
 If you boot only the ISO in VMware or another VM without attaching `build/root.disk`, K64 now uses the Multiboot `root.k64fs` module from the ISO. That mode is ephemeral, but normal shell commands and `/ex/*.elf` programs are still expected to work.
 
 ### Build targets
@@ -1657,6 +1674,8 @@ layout de
 servicectl list
 driverctl list
 storagectl list
+storagectl partitions ata0
+storagectl root
 netctl status
 netctl arp 10.0.2.2
 netctl poll
@@ -1703,6 +1722,7 @@ The cleanest extension points today are:
 If you want to turn K64 into a more complete OS, the highest-value next steps are probably:
 
 - AHCI/NVMe backends on top of the block layer
+- USB controller and USB mass-storage drivers on top of the now multi-device block layer
 - true per-process page tables and context isolation
 - UEFI boot support
 - USB input support

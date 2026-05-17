@@ -10,7 +10,22 @@ from pathlib import Path
 BOOT_AREA_SIZE = 1024 * 1024
 SECTOR_SIZE = 512
 PARTITION_LBA = 2048
-DISK_SECTORS = (32 * 1024 * 1024) // SECTOR_SIZE
+DEFAULT_DISK_SECTORS = (32 * 1024 * 1024) // SECTOR_SIZE
+
+
+def parse_size(text):
+    raw = text.strip()
+    mult = 1
+    if raw[-1:].lower() == "k":
+        mult = 1024
+        raw = raw[:-1]
+    elif raw[-1:].lower() == "m":
+        mult = 1024 * 1024
+        raw = raw[:-1]
+    elif raw[-1:].lower() == "g":
+        mult = 1024 * 1024 * 1024
+        raw = raw[:-1]
+    return int(raw) * mult
 
 
 def find_tool(names):
@@ -22,8 +37,8 @@ def find_tool(names):
     return None
 
 
-def write_partition_table(mbr):
-    part_sectors = DISK_SECTORS - PARTITION_LBA
+def write_partition_table(mbr, disk_sectors):
+    part_sectors = disk_sectors - PARTITION_LBA
     entry = bytearray(16)
     entry[0] = 0x80
     entry[1:4] = b"\x00\x02\x00"
@@ -41,10 +56,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--grub-dir", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--disk-size", default="32M")
     args = parser.parse_args()
 
     grub_dir = Path(args.grub_dir)
     output = Path(args.output)
+    disk_sectors = parse_size(args.disk_size) // SECTOR_SIZE
     boot_img = grub_dir / "boot.img"
     mkimage = find_tool(["grub-mkimage", "grub2-mkimage"])
 
@@ -87,7 +104,11 @@ def main():
         if len(core_bytes) > BOOT_AREA_SIZE - SECTOR_SIZE:
             raise SystemExit("GRUB core image is too large for the K64 boot area")
         area[:SECTOR_SIZE] = boot_bytes
-        write_partition_table(area)
+        if disk_sectors <= PARTITION_LBA:
+            raise SystemExit("disk size is too small for K64 boot layout")
+        if disk_sectors > 0xFFFFFFFF:
+            raise SystemExit("MBR disk size must be below 2 TiB")
+        write_partition_table(area, disk_sectors)
         area[SECTOR_SIZE:SECTOR_SIZE + len(core_bytes)] = core_bytes
         output.write_bytes(area)
         print(f"wrote {output} ({len(area)} bytes, core {len(core_bytes)} bytes)")

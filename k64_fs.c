@@ -476,7 +476,17 @@ static bool fs_mount_from_blocks(void) {
 
     for (size_t i = 0; i < k64_block_device_count(); ++i) {
         k64_block_device_t* dev = k64_block_device_at(i);
-        if (!dev || !dev->online || dev->block_size != K64_FS_BLOCK_SIZE) {
+        if (!dev || !dev->online || !dev->is_partition || dev->block_size != K64_FS_BLOCK_SIZE) {
+            continue;
+        }
+        saw_device = true;
+        if (fs_mount_from_block_device(dev)) {
+            return true;
+        }
+    }
+    for (size_t i = 0; i < k64_block_device_count(); ++i) {
+        k64_block_device_t* dev = k64_block_device_at(i);
+        if (!dev || !dev->online || dev->is_partition || dev->block_size != K64_FS_BLOCK_SIZE) {
             continue;
         }
         saw_device = true;
@@ -1153,7 +1163,7 @@ bool k64_fs_install_to_block_device(const char* device_name) {
         return false;
     }
     dev = k64_block_find_device_by_name(device_name);
-    if (!dev || !dev->online || !dev->writable || dev->block_size != K64_FS_BLOCK_SIZE) {
+    if (!dev || dev->is_partition || !dev->online || !dev->writable || dev->block_size != K64_FS_BLOCK_SIZE) {
         return false;
     }
     if (dev->block_count <= K64_FS_PARTITION_LBA) {
@@ -1173,7 +1183,23 @@ bool k64_fs_install_to_block_device(const char* device_name) {
         (size_t)sectors * K64_FS_BLOCK_SIZE > sizeof(fs_block_buffer)) {
         return false;
     }
-    if (!k64_block_write(dev, 0, K64_FS_BOOT_AREA_SECTORS, boot_area)) {
+    for (size_t i = 0; i < boot_area_size; ++i) {
+        fs_block_buffer[i] = boot_area[i];
+    }
+    {
+        uint32_t part_sectors = (uint32_t)(dev->block_count - K64_FS_PARTITION_LBA);
+        fs_block_buffer[446] = 0x80;
+        fs_block_buffer[450] = 0x83;
+        fs_block_buffer[454] = (uint8_t)(K64_FS_PARTITION_LBA & 0xFFu);
+        fs_block_buffer[455] = (uint8_t)((K64_FS_PARTITION_LBA >> 8) & 0xFFu);
+        fs_block_buffer[456] = (uint8_t)((K64_FS_PARTITION_LBA >> 16) & 0xFFu);
+        fs_block_buffer[457] = (uint8_t)((K64_FS_PARTITION_LBA >> 24) & 0xFFu);
+        fs_block_buffer[458] = (uint8_t)(part_sectors & 0xFFu);
+        fs_block_buffer[459] = (uint8_t)((part_sectors >> 8) & 0xFFu);
+        fs_block_buffer[460] = (uint8_t)((part_sectors >> 16) & 0xFFu);
+        fs_block_buffer[461] = (uint8_t)((part_sectors >> 24) & 0xFFu);
+    }
+    if (!k64_block_write(dev, 0, K64_FS_BOOT_AREA_SECTORS, fs_block_buffer)) {
         return false;
     }
     for (size_t i = 0; i < (size_t)sectors * K64_FS_BLOCK_SIZE; ++i) {
