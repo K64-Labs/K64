@@ -545,7 +545,7 @@ K64 now has a first real Ethernet path:
 - DHCP discover/request handling with QEMU/VM NAT defaults as fallback
 - ICMP echo packet send and echo-reply response handling
 - UDP packet send support with checksums
-- DNS A-query plumbing and cache
+- DNS A-query resolver and cache using DHCP-provided DNS settings
 - a minimal TCP client path for outbound HTTP
 - a `kcurl` HTTP/1.0 client command for plain `http://` URLs
 
@@ -577,12 +577,12 @@ netctl dhcp
 netctl resolve example.com
 netctl arp 10.0.2.2
 netctl poll
-ping 10.0.2.2
-kcurl http://10.0.2.2:8080/
+ping example.com
+kcurl example.com
 udp send 10.0.2.2 9 hello-from-k64
 ```
 
-This is not yet a POSIX socket API or TLS stack. It is now a usable VM internet foundation: K64 can initialize a NIC through a `.k64m` driver, acquire VM network settings with DHCP, send Ethernet/ARP/IPv4/ICMP/UDP/TCP packets, poll received packets, answer basic inbound ARP/ICMP traffic, and fetch plain HTTP resources with `kcurl`. HTTPS URLs are intentionally rejected until K64 has TLS support.
+This is not yet a POSIX socket API or TLS stack. It is now a usable VM internet foundation: K64 can initialize a NIC through a `.k64m` driver, acquire VM network settings with DHCP, resolve names through DNS, send Ethernet/ARP/IPv4/ICMP/UDP/TCP packets, poll received packets, answer basic inbound ARP/ICMP traffic, and fetch plain HTTP resources with `kcurl`. HTTPS URLs are intentionally rejected until K64 has TLS support.
 
 For VMware, configure the virtual NIC as `e1000`/Intel E1000 when possible. The default QEMU targets attach an RTL8139 NIC, while the smoke tests can also boot with QEMU's e1000 device.
 
@@ -1700,8 +1700,8 @@ netctl dhcp
 netctl resolve example.com
 netctl arp 10.0.2.2
 netctl poll
-ping 10.0.2.2
-kcurl http://10.0.2.2:8080/
+ping example.com
+kcurl example.com
 udp send 10.0.2.2 9 hello
 install
 ps

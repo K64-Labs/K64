@@ -299,6 +299,9 @@ def main():
             ]
             if net_driver == "rtl8139":
                 checks.insert(25, (f"kcurl http://10.0.2.2:{http_port}/", "k64-http-ok"))
+            if os.environ.get("K64_SMOKE_EXTERNAL_NET") == "1":
+                checks.insert(25, ("netctl resolve example.com", "resolve: example.com ->"))
+                checks.insert(26, ("kcurl example.com", "Example Domain"))
             for cmd, expected in checks:
                 guest.command(cmd, expected)
     finally:

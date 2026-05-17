@@ -212,6 +212,37 @@ static void svc_net_poll_many(int count) {
     }
 }
 
+static void svc_net_poll_for_ms(uint64_t ms) {
+    uint64_t hz = k64_config.pit_hz ? k64_config.pit_hz : 1000;
+    uint64_t ticks = (hz * ms) / 1000ULL;
+    uint64_t deadline = k64_pit_get_ticks() + (ticks ? ticks : 1);
+    uint64_t spins = 0;
+
+    while (k64_pit_get_ticks() < deadline && spins < 250000ULL) {
+        svc_net_poll_many(1);
+        spins++;
+    }
+    svc_net_poll_many(16);
+}
+
+static bool svc_net_autoconfig(void) {
+    k64_net_status_t before;
+    k64_net_status_t after;
+
+    if (!k64_net_status(&before) || !before.link_up) {
+        return false;
+    }
+    if (!k64_net_dhcp_discover()) {
+        return true;
+    }
+    svc_net_poll_for_ms(750);
+    if (k64_net_status(&after) && after.link_up &&
+        (after.ipv4 != before.ipv4 || after.gateway != before.gateway || after.dns_server != before.dns_server)) {
+        return true;
+    }
+    return true;
+}
+
 static bool svc_parse_http_url(const char* url, char* host, int host_size, char* path, int path_size, uint16_t* port) {
     const char* p = url;
     int i = 0;
@@ -1185,6 +1216,9 @@ static bool netctl_command(const char* command, const char* args) {
             netctl_usage();
             return true;
         }
+        if (!k64_net_parse_ipv4(host, &ip)) {
+            (void)svc_net_autoconfig();
+        }
         for (int i = 0; i < 24; ++i) {
             if (k64_net_resolve_host(host, &ip, &pending)) {
                 char ipbuf[24];
@@ -1196,9 +1230,9 @@ static bool netctl_command(const char* command, const char* args) {
                 k64_term_putc('\n');
                 return true;
             }
-            svc_net_poll_many(64);
+            svc_net_poll_for_ms(125);
         }
-        svc_print_line("resolve: no answer");
+        svc_print_line("resolve: no DNS answer");
         return true;
     }
 
@@ -1218,22 +1252,29 @@ static bool netctl_command(const char* command, const char* args) {
 
     if (k64_streq(sub, "ping")) {
         args = svc_next_token(args, arg1, sizeof(arg1));
-        if (!k64_net_resolve_host(arg1, &ip, &pending)) {
-            svc_net_poll_many(128);
-        }
-        if (!k64_net_resolve_host(arg1, &ip, &pending)) {
+        if (!arg1[0]) {
             netctl_usage();
             return true;
         }
+        if (!k64_net_parse_ipv4(arg1, &ip)) {
+            (void)svc_net_autoconfig();
+        }
+        if (!k64_net_resolve_host(arg1, &ip, &pending)) {
+            svc_net_poll_for_ms(500);
+        }
+        if (!k64_net_resolve_host(arg1, &ip, &pending)) {
+            svc_print_line("ping: resolve failed");
+            return true;
+        }
         if (!k64_net_send_ping(ip, 1)) {
-            svc_net_poll_many(128);
+            svc_net_poll_for_ms(500);
             if (!k64_net_send_ping(ip, 1)) {
                 svc_print_line("ping: resolving target, retry after netctl poll");
                 return true;
             }
         }
         for (int i = 0; i < 128; ++i) {
-            svc_net_poll_many(8);
+            svc_net_poll_many(4);
         }
         svc_print_line("ping: icmp echo sent");
         return true;
@@ -1245,7 +1286,8 @@ static bool netctl_command(const char* command, const char* args) {
             svc_print_line("kcurl: only plain http://host[:port]/path URLs are supported");
             return true;
         }
-        for (int i = 0; i < 160; ++i) {
+        (void)svc_net_autoconfig();
+        for (int i = 0; i < 80; ++i) {
             if (k64_net_http_get(host, path, http_port, response, sizeof(response), &state)) {
                 k64_term_write(response[0] ? response : "kcurl: empty response");
                 if (response[0] && response[k64_strlen(response) - 1] != '\n') {
@@ -1253,7 +1295,7 @@ static bool netctl_command(const char* command, const char* args) {
                 }
                 return true;
             }
-            svc_net_poll_many(64);
+            svc_net_poll_for_ms(100);
         }
         k64_term_write("kcurl: ");
         k64_term_write(state ? state : "no response");

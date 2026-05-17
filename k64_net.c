@@ -70,6 +70,7 @@ typedef struct {
     dns_cache_entry_t     dns_cache[8];
     uint8_t               dns_count;
     uint16_t              pending_dns_id;
+    uint8_t               pending_dns_waits;
     char                  pending_dns_name[64];
     http_client_t         http;
 } k64_net_state_t;
@@ -360,6 +361,7 @@ static bool send_dns_query(const char* host) {
     size_t label_start;
     size_t label_len_pos;
     uint16_t dns_id;
+    bool sent = false;
 
     if (!host || !host[0]) {
         return false;
@@ -393,13 +395,20 @@ static bool send_dns_query(const char* host) {
     len += 2;
     wr16be(packet + len, 1);
     len += 2;
-    wr16be(packet + 4, (uint16_t)(len - 8));
+    wr16be(packet + 4, (uint16_t)len);
     wr16be(packet + 6, 0);
     wr16be(packet + 6, udp_checksum(net.ipv4, net.dns_server, packet, (uint16_t)len));
 
     net.pending_dns_id = dns_id;
+    net.pending_dns_waits = 0;
     copy_text(net.pending_dns_name, sizeof(net.pending_dns_name), host);
-    return send_ipv4(dst_mac, net.dns_server, IP_PROTO_UDP, packet, (uint16_t)len);
+    sent = send_ipv4(dst_mac, net.dns_server, IP_PROTO_UDP, packet, (uint16_t)len);
+    if (net.gateway && net.gateway != net.dns_server) {
+        wr16be(packet + 6, 0);
+        wr16be(packet + 6, udp_checksum(net.ipv4, net.gateway, packet, (uint16_t)len));
+        sent = send_ipv4(dst_mac, net.gateway, IP_PROTO_UDP, packet, (uint16_t)len) || sent;
+    }
+    return sent;
 }
 
 static size_t dns_skip_name(const uint8_t* dns, size_t dns_len, size_t pos) {
@@ -466,6 +475,7 @@ static void handle_dns_payload(const uint8_t* udp, uint16_t udp_len) {
         if (type == 1 && class_id == 1 && rdlen == 4) {
             dns_cache_put(net.pending_dns_name, rd32be(dns + pos));
             net.pending_dns_name[0] = '\0';
+            net.pending_dns_waits = 0;
             net.stats.rx_dns++;
             return;
         }
@@ -892,6 +902,13 @@ bool k64_net_resolve_host(const char* host, uint32_t* out_ip, bool* pending) {
     }
     if (dns_cache_lookup(host, out_ip)) {
         return true;
+    }
+    if (text_eq(net.pending_dns_name, host) && net.pending_dns_waits < 8) {
+        net.pending_dns_waits++;
+        if (pending) {
+            *pending = true;
+        }
+        return false;
     }
     if (send_dns_query(host)) {
         if (pending) {
