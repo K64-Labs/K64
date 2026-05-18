@@ -148,7 +148,7 @@ static bool shell_parse_u64(const char* s, uint64_t* out) {
     return true;
 }
 
-static bool shell_try_execute_elf(const char* name) {
+static bool shell_try_execute_elf(const char* name, const char* args) {
     char path[96];
 
     if (!name || !name[0]) {
@@ -174,7 +174,7 @@ static bool shell_try_execute_elf(const char* name) {
         path[pos] = '\0';
     }
 
-    return k64_elf_execute_user_path(path);
+    return k64_elf_spawn_user_path_args(path, args);
 }
 
 static const char* shell_next_token(const char* s, char* token, int token_size) {
@@ -259,7 +259,7 @@ static void shell_print_help(void) {
     k64_term_write("  sysfetch         - show system summary and splash\n");
     k64_term_write("  uname            - show kernel identity\n");
     k64_term_write("  k64cc            - build stub ELF files and K64 manifests\n");
-    k64_term_write("  elfrun <path>    - execute an ELF file directly\n");
+    k64_term_write("  elfrun <path>    - execute a user ELF process\n");
     k64_term_write("  ticks            - show PIT tick counter\n");
     k64_term_write("  task             - print current task id\n");
     k64_term_write("  ps               - list user ELF processes\n");
@@ -837,8 +837,12 @@ static void shell_handle_command(const char* cmd) {
                 k64_term_write("Usage: elfrun </path/to/file.elf>\n");
                 return;
             }
-            if (!k64_elf_execute_user_path(arg)) {
-                k64_term_write("elfrun failed\n");
+            {
+                char elf_path[96];
+                const char* elf_args = shell_next_token(arg, elf_path, sizeof(elf_path));
+                if (!elf_path[0] || !k64_elf_spawn_user_path_args(elf_path, elf_args)) {
+                    k64_term_write("elfrun failed\n");
+                }
             }
             return;
         case K64_SHELL_CMD_YIELD:
@@ -945,7 +949,7 @@ static void shell_handle_command(const char* cmd) {
                 }
             }
 
-            if (shell_try_execute_elf(unknown_cmd)) {
+            if (shell_try_execute_elf(unknown_cmd, unknown_args)) {
                 return;
             }
 

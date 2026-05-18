@@ -18,6 +18,8 @@
 #define K64_ELF_VM_STRIDE 0x0000000001000000ULL
 #define K64_ELF_VM_MAX_SLOTS 256ULL
 #define K64_ELF_PID_BASE 0x100000000ULL
+#define K64_ELF_ARG_MAX 16
+#define K64_ELF_ARG_TEXT_MAX 384
 
 typedef struct {
     unsigned char e_ident[16];
@@ -47,6 +49,12 @@ typedef struct {
     uint64_t p_align;
 } __attribute__((packed)) k64_elf64_phdr_t;
 
+typedef struct {
+    int argc;
+    char text[K64_ELF_ARG_TEXT_MAX];
+    char* argv[K64_ELF_ARG_MAX];
+} k64_elf_args_t;
+
 static uint64_t elf_align_up(uint64_t value, uint64_t align) {
     return (value + align - 1ULL) & ~(align - 1ULL);
 }
@@ -61,7 +69,103 @@ static uint64_t elf_pid_for_entry(uint64_t fallback_pid, uint64_t entry) {
     return fallback_pid;
 }
 
-static bool elf_execute_impl(const char* path, bool user_mode) {
+static size_t elf_strlen(const char* s) {
+    size_t len = 0;
+
+    while (s && s[len]) {
+        len++;
+    }
+    return len;
+}
+
+static void elf_copy(char* dst, size_t dst_size, const char* src) {
+    size_t i = 0;
+
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    if (!src) {
+        src = "";
+    }
+    while (src[i] && i + 1 < dst_size) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+static void elf_parse_args(k64_elf_args_t* out, const char* path, const char* args) {
+    size_t pos = 0;
+
+    if (!out) {
+        return;
+    }
+    out->argc = 0;
+    for (int i = 0; i < K64_ELF_ARG_MAX; ++i) {
+        out->argv[i] = NULL;
+    }
+    out->text[0] = '\0';
+
+    out->argv[out->argc++] = &out->text[pos];
+    elf_copy(&out->text[pos], sizeof(out->text) - pos, path ? path : "");
+    pos += elf_strlen(&out->text[pos]) + 1;
+
+    while (args && *args && out->argc < K64_ELF_ARG_MAX && pos + 1 < sizeof(out->text)) {
+        while (*args == ' ' || *args == '\t') {
+            args++;
+        }
+        if (!*args) {
+            break;
+        }
+        out->argv[out->argc++] = &out->text[pos];
+        while (*args && *args != ' ' && *args != '\t' && pos + 1 < sizeof(out->text)) {
+            out->text[pos++] = *args++;
+        }
+        out->text[pos++] = '\0';
+    }
+}
+
+static bool elf_write_initial_stack(const k64_vm_space_t* space,
+                                    uint64_t stack_top,
+                                    const k64_elf_args_t* args,
+                                    uint64_t* out_stack) {
+    uint64_t argv_user[K64_ELF_ARG_MAX + 1];
+    uint64_t sp = stack_top;
+    uint64_t value;
+
+    if (!space || !args || !out_stack || args->argc < 1) {
+        return false;
+    }
+
+    for (int i = args->argc - 1; i >= 0; --i) {
+        size_t len = elf_strlen(args->argv[i]) + 1;
+        sp -= len;
+        if (!k64_vmm_write_user(space, sp, args->argv[i], len)) {
+            return false;
+        }
+        argv_user[i] = sp;
+    }
+    argv_user[args->argc] = 0;
+
+    sp &= ~0xFULL;
+    for (int i = args->argc; i >= 0; --i) {
+        sp -= sizeof(uint64_t);
+        value = argv_user[i];
+        if (!k64_vmm_write_user(space, sp, &value, sizeof(value))) {
+            return false;
+        }
+    }
+    sp -= sizeof(uint64_t);
+    value = (uint64_t)(uint32_t)args->argc;
+    if (!k64_vmm_write_user(space, sp, &value, sizeof(value))) {
+        return false;
+    }
+
+    *out_stack = sp;
+    return true;
+}
+
+static bool elf_execute_impl(const char* path, bool user_mode, const char* args_text) {
     const uint8_t* file_data = NULL;
     size_t file_size = 0;
     const k64_elf64_ehdr_t* ehdr;
@@ -71,6 +175,7 @@ static bool elf_execute_impl(const char* path, bool user_mode) {
     k64_vm_space_t app_space;
     static uint64_t next_ephemeral_pid = K64_ELF_PID_BASE;
     uint64_t app_pid;
+    k64_elf_args_t args;
     int rc;
 
     if (!path || !path[0]) {
@@ -163,6 +268,12 @@ static bool elf_execute_impl(const char* path, bool user_mode) {
     }
     if (user_mode) {
         uint64_t user_stack_top = app_space.stack_base + app_space.stack_size - 16ULL;
+        elf_parse_args(&args, path, args_text);
+        if (!elf_write_initial_stack(&app_space, user_stack_top, &args, &user_stack_top)) {
+            k64_term_write("ELF: failed to prepare process arguments\n");
+            k64_vmm_release_service_space(&app_space);
+            return false;
+        }
         rc = (int)k64_usermode_execute_named(&app_space, ehdr->e_entry, user_stack_top, path);
     } else {
         rc = (int)k64_vmm_call_isolated(&app_space, ehdr->e_entry, 0, 0, 0);
@@ -175,9 +286,30 @@ static bool elf_execute_impl(const char* path, bool user_mode) {
 }
 
 bool k64_elf_execute_path(const char* path) {
-    return elf_execute_impl(path, false);
+    return elf_execute_impl(path, false, "");
 }
 
 bool k64_elf_execute_user_path(const char* path) {
-    return elf_execute_impl(path, true);
+    return elf_execute_impl(path, true, "");
+}
+
+bool k64_elf_execute_user_path_args(const char* path, const char* args) {
+    return elf_execute_impl(path, true, args);
+}
+
+bool k64_elf_spawn_user_path(const char* path) {
+    return k64_elf_spawn_user_path_args(path, "");
+}
+
+bool k64_elf_spawn_user_path_args(const char* path, const char* args) {
+    k64_fs_stat_t st;
+
+    if (!path || !path[0]) {
+        return false;
+    }
+    if (!k64_fs_stat(path, &st) || !st.exists || st.is_dir) {
+        K64_LOG_WARN("ELF: file unavailable.");
+        return false;
+    }
+    return k64_elf_execute_user_path_args(path, args);
 }

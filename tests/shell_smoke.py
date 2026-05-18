@@ -298,7 +298,9 @@ def main():
             ("id", "real=guest"),
             ("users", "guest"),
             ("groups", "guest"),
+            ("args alpha beta", "argv[2]=beta"),
             ("elfrun /ex/procinfo.elf", "procinfo: pid="),
+            ("elfrun /ex/args.elf one two", "argv[2]=two"),
             ("elfrun /ex/libctest.elf", "libctest: OK"),
             ("unknown-smoke-command", "Unknown command: unknown-smoke-command"),
             ]
@@ -309,6 +311,17 @@ def main():
                 checks.insert(26, ("kcurl example.com", "Example Domain"))
             for cmd, expected in checks:
                 guest.command(cmd, expected)
+
+            guest.send("edit /tmp/edit-smoke.txt\n")
+            guest.read_until("K64 edit - /tmp/edit-smoke.txt", 10)
+            guest.send("hello from edit\nsecond line")
+            time.sleep(0.2)
+            guest.send("@s")
+            guest.read_until("Saved", 10)
+            guest.send("@q")
+            guest.read_until(PROMPT_NEEDLE, 10)
+            guest.send("cat /tmp/edit-smoke.txt\n")
+            guest.read_until("second line", 10)
     finally:
         http_server.shutdown()
         http_server.server_close()

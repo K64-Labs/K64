@@ -733,6 +733,17 @@ static bool http_find_body(size_t* header_size, uint16_t* status, size_t* conten
     return false;
 }
 
+static bool http_response_has_complete_body(void) {
+    size_t header_size = 0;
+    size_t content_length = 0;
+    bool has_content_length = false;
+
+    if (!http_find_body(&header_size, NULL, &content_length, &has_content_length) || !has_content_length) {
+        return false;
+    }
+    return net.http.response_len >= header_size + content_length;
+}
+
 static size_t http_append_dec(char* out, size_t out_size, size_t value) {
     char tmp[24];
     size_t n = 0;
@@ -800,6 +811,15 @@ static void handle_tcp_payload(const uint8_t* ip_payload, uint16_t payload_len, 
         if (seq == net.http.ack) {
             http_append(data, data_len);
             net.http.ack = seq + data_len;
+        } else if (seq < net.http.ack) {
+            uint32_t seen = net.http.ack - seq;
+            if (seen < data_len) {
+                http_append(data + seen, (uint16_t)(data_len - seen));
+                net.http.ack += (uint32_t)(data_len - seen);
+            }
+        }
+        if (http_response_has_complete_body()) {
+            net.http.state = HTTP_DONE;
         }
         (void)send_tcp(net.http.ip, net.http.port, net.http.local_port, net.http.seq, net.http.ack, TCP_FLAG_ACK, NULL, 0);
     }
@@ -1209,6 +1229,13 @@ done:
         net.http.state = HTTP_ERROR;
         if (state) {
             *state = "http status error";
+        }
+        return false;
+    }
+    if (net.http.use_range && status != 206) {
+        net.http.state = HTTP_ERROR;
+        if (state) {
+            *state = "range unsupported";
         }
         return false;
     }

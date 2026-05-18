@@ -7,7 +7,8 @@
 #include "k64_terminal.h"
 #include "k64_usermode.h"
 
-#define K64_TASK_STACK_SIZE 4096
+#define K64_TASK_STACK_FRAMES 4
+#define K64_TASK_STACK_SIZE (4096 * K64_TASK_STACK_FRAMES)
 #define K64_DEFAULT_TIMESLICE 2U
 #define K64_MAX_PRIORITY 5
 
@@ -15,7 +16,9 @@ static k64_task_t* current_task = NULL;
 static k64_task_t* task_list    = NULL;
 static uint64_t    next_task_id = 1;
 
-static void k64_task_trampoline(void (*entry)(void*), void* arg);
+void k64_task_exit_current(void);
+void k64_task_park_current(void) __attribute__((noreturn));
+extern void k64_task_return_asm(void);
 static void on_tick_accounting(void);
 static uint64_t read_cr3(void);
 
@@ -30,7 +33,7 @@ static uint32_t timeslice_for_priority(int priority) {
 }
 
 static int build_initial_stack(k64_task_t* t, void (*entry)(void*), void* arg) {
-    void* stack_base = k64_pmm_alloc_frame();
+    void* stack_base = k64_pmm_alloc_contiguous(K64_TASK_STACK_FRAMES);
     if (!stack_base) {
         K64_LOG_ERROR("Scheduler: failed to allocate stack frame for task.");
         return 0;
@@ -43,19 +46,19 @@ static int build_initial_stack(k64_task_t* t, void (*entry)(void*), void* arg) {
      * Reserve one extra slot so the task sees the SysV-required stack
      * alignment on first entry.
      */
-    *--sp = 0;
-    uint64_t rflags = (1ULL << 9); // IF=1
+    *--sp = (uint64_t)k64_task_return_asm;
+    uint64_t rflags = 0x202ULL; // Reserved bit + IF.
     *--sp = rflags;
     *--sp = 0x08;
-    *--sp = (uint64_t)k64_task_trampoline;
+    *--sp = (uint64_t)entry;
 
     *--sp = 0; // RAX
     *--sp = 0; // RCX
     *--sp = 0; // RDX
     *--sp = 0; // RBX
     *--sp = 0; // RBP
-    *--sp = (uint64_t)arg; // RSI
-    *--sp = (uint64_t)entry; // RDI -> task entry for SysV ABI
+    *--sp = 0; // RSI
+    *--sp = (uint64_t)arg; // RDI -> task argument for SysV ABI
     *--sp = 0; // R8
     *--sp = 0; // R9
     *--sp = 0; // R10
@@ -93,23 +96,18 @@ static void on_tick_accounting(void) {
     } while (task && task != task_list);
 }
 
-__attribute__((noreturn))
-static void task_entry_trampoline(void (*entry)(void*), void* arg) {
-    K64_LOG_INFO("Scheduler: entered task trampoline.");
-    entry(arg);
+void k64_task_exit_current(void) {
     if (current_task) {
         current_task->state = K64_TASK_STATE_ZOMBIE;
-    }
-    K64_LOG_INFO("Task finished, parking task.");
-    for (;;) {
-        k64_sched_yield();
-        __asm__ __volatile__("hlt");
     }
 }
 
 __attribute__((noreturn))
-static void k64_task_trampoline(void (*entry)(void*), void* arg) {
-    task_entry_trampoline(entry, arg);
+void k64_task_park_current(void) {
+    for (;;) {
+        k64_sched_yield();
+        __asm__ __volatile__("hlt");
+    }
 }
 
 static uint64_t read_cr3(void) {

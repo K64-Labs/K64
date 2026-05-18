@@ -2,11 +2,15 @@
 
 #define K64_SYSCALL_EXIT   0ULL
 #define K64_SYSCALL_WRITE  1ULL
+#define K64_SYSCALL_YIELD  2ULL
+#define K64_SYSCALL_SLEEP  3ULL
 #define K64_SYSCALL_OPEN   4ULL
 #define K64_SYSCALL_READ   5ULL
 #define K64_SYSCALL_CLOSE  6ULL
 #define K64_SYSCALL_GETPID 7ULL
 #define K64_SYSCALL_UPTIME 8ULL
+#define K64_SYSCALL_WRITEFILE 9ULL
+#define K64_SYSCALL_CLEAR 10ULL
 
 int64_t k64_syscall3(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2) {
     int64_t ret;
@@ -24,8 +28,20 @@ void k64_exit(int code) {
     }
 }
 
+int64_t k64_write_fd(int fd, const void* data, size_t len) {
+    return k64_syscall3(K64_SYSCALL_WRITE, (uint64_t)(int64_t)fd, (uint64_t)(uintptr_t)data, (uint64_t)len);
+}
+
 int64_t k64_write(const void* data, size_t len) {
-    return k64_syscall3(K64_SYSCALL_WRITE, (uint64_t)(uintptr_t)data, (uint64_t)len, 0);
+    return k64_write_fd(K64_STDOUT, data, len);
+}
+
+void k64_yield(void) {
+    (void)k64_syscall3(K64_SYSCALL_YIELD, 0, 0, 0);
+}
+
+void k64_sleep(uint64_t ticks) {
+    (void)k64_syscall3(K64_SYSCALL_SLEEP, ticks, 0, 0);
 }
 
 int64_t k64_open(const char* path) {
@@ -38,6 +54,21 @@ int64_t k64_read(int fd, void* data, size_t len) {
 
 int64_t k64_close(int fd) {
     return k64_syscall3(K64_SYSCALL_CLOSE, (uint64_t)(int64_t)fd, 0, 0);
+}
+
+int64_t k64_read_stdin(void* data, size_t len) {
+    return k64_read(K64_STDIN, data, len);
+}
+
+int64_t k64_write_file(const char* path, const void* data, size_t len) {
+    return k64_syscall3(K64_SYSCALL_WRITEFILE,
+                        (uint64_t)(uintptr_t)path,
+                        (uint64_t)(uintptr_t)data,
+                        (uint64_t)len);
+}
+
+void k64_clear_screen(void) {
+    (void)k64_syscall3(K64_SYSCALL_CLEAR, 0, 0, 0);
 }
 
 int64_t k64_getpid(void) {
@@ -149,6 +180,58 @@ char* k64_strcpy(char* dst, const char* src) {
         dst[i] = src[i];
     } while (src[i++] != '\0');
     return dst;
+}
+
+char* k64_strncpy(char* dst, const char* src, size_t len) {
+    size_t i = 0;
+
+    if (!dst || len == 0) {
+        return dst;
+    }
+    if (!src) {
+        src = "";
+    }
+    while (i < len && src[i]) {
+        dst[i] = src[i];
+        i++;
+    }
+    while (i < len) {
+        dst[i++] = '\0';
+    }
+    return dst;
+}
+
+char* k64_strcat(char* dst, const char* src) {
+    size_t pos;
+
+    if (!dst) {
+        return dst;
+    }
+    pos = k64_strlen(dst);
+    k64_strcpy(dst + pos, src ? src : "");
+    return dst;
+}
+
+int k64_atoi(const char* text) {
+    int sign = 1;
+    int value = 0;
+
+    while (text && (*text == ' ' || *text == '\t')) {
+        text++;
+    }
+    if (text && *text == '-') {
+        sign = -1;
+        text++;
+    }
+    while (text && *text >= '0' && *text <= '9') {
+        value = value * 10 + (*text - '0');
+        text++;
+    }
+    return value * sign;
+}
+
+void k64_putc(char ch) {
+    (void)k64_write(&ch, 1);
 }
 
 void k64_puts(const char* text) {

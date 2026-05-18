@@ -549,6 +549,8 @@ K64 now has a first real Ethernet path:
 - a minimal TCP client path for outbound HTTP
 - a `kcurl` HTTP/1.0 client command for plain `http://` URLs
 
+The HTTP client is binary-safe. It tracks `Content-Length`, can complete a response before the peer closes the connection, validates range responses as real `206 Partial Content` replies, and preserves embedded zero bytes for package downloads. The TCP receive path also tolerates overlapping retransmits so repeated packet delivery does not corrupt HTTP bodies.
+
 The fallback network identity is intentionally simple and matches QEMU user networking:
 
 - IPv4: `10.0.2.15`
@@ -584,7 +586,7 @@ udp send 10.0.2.2 9 hello-from-k64
 
 This is not yet a POSIX socket API or TLS stack. It is now a usable VM internet foundation: K64 can initialize a NIC through a `.k64m` driver, acquire VM network settings with DHCP, resolve names through DNS, send Ethernet/ARP/IPv4/ICMP/UDP/TCP packets, poll received packets, answer basic inbound ARP/ICMP traffic, and fetch plain HTTP resources with `kcurl`. HTTPS URLs are intentionally rejected until K64 has TLS support.
 
-For VMware, configure the virtual NIC as `e1000`/Intel E1000 when possible. The default QEMU targets attach an RTL8139 NIC, while the smoke tests can also boot with QEMU's e1000 device.
+For VMware, configure the virtual NIC as `e1000`/Intel E1000 when possible. The default QEMU targets attach an RTL8139 NIC, while the smoke tests can also boot with QEMU's e1000 device. The RTL8139 driver uses a 32 KiB receive ring so package-sized HTTP downloads do not overflow the old small receive window.
 
 ### KPM package manager client
 
@@ -637,7 +639,7 @@ KPG version 1 is binary-safe. The package contains a packed header with `KPG1` m
 
 The installer downloads to `/tmp/kpm/<package>-<version>.kpg` first and only writes the final destination after validation. Existing final files are backed up during replacement so a failed install does not leave a broken final file behind. Successful installs update `/var/lib/kpm/installed.db` and call `k64_fs_sync()`.
 
-KPM uses plain `http://` only for now. `https://` sources are rejected until K64 has TLS support. Binary package downloads use the raw HTTP path and range-based chunking, so packages are not passed through string-oriented buffers and embedded zero bytes are preserved.
+KPM uses plain `http://` only for now. `https://` sources are rejected until K64 has TLS support. Binary package downloads use the raw HTTP path, first attempting a complete package download and falling back to validated range requests when needed, so packages are not passed through string-oriented buffers and embedded zero bytes are preserved.
 
 ## Service Model (`.k64s`)
 
@@ -997,6 +999,8 @@ The repository currently ships these sample executables:
 
 - `/ex/hello.elf`
 - `/ex/catmotd.elf`
+- `/ex/args.elf`
+- `/ex/edit.elf`
 - `/ex/procinfo.elf`
 - `/ex/libctest.elf`
 
@@ -1342,6 +1346,10 @@ hello
 `catmotd.elf` is also staged into `/ex` and demonstrates user-mode file I/O by opening and reading `/etc/motd` through the syscall layer.
 
 `procinfo.elf` is built from C under `userland/bin/` and linked against the small K64 libc shim. It demonstrates the C userland path plus `getpid()` and uptime syscalls.
+
+`args.elf` demonstrates normal shell-style argument passing. For example, `args alpha beta` runs `/ex/args.elf` and receives `argc=3`.
+
+`edit.elf` is a small nano-like text editor for K64. Run it as `edit /tmp/note.txt`, type text, use `Esc+s` or `@s` to save, and `Esc+q` or `@q` to quit. The editor uses userland stdin and write-file syscalls, so it runs as a normal `/ex` program rather than a kernel built-in.
 
 `libctest.elf` is also built from C and exercises the userland libc shim in ring 3. It checks string helpers, memory helpers, file open/read/close, process IDs, and uptime output.
 

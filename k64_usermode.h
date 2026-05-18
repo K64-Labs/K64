@@ -12,6 +12,8 @@
 #define K64_SYSCALL_CLOSE 6ULL
 #define K64_SYSCALL_GETPID 7ULL
 #define K64_SYSCALL_UPTIME 8ULL
+#define K64_SYSCALL_WRITEFILE 9ULL
+#define K64_SYSCALL_CLEAR 10ULL
 
 void k64_usermode_init(void);
 int64_t k64_usermode_execute(const k64_vm_space_t* space, uint64_t entry, uint64_t user_stack_top);

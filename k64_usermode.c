@@ -1,9 +1,11 @@
 #include "k64_usermode.h"
 #include "k64_fs.h"
 #include "k64_idt.h"
+#include "k64_keyboard.h"
 #include "k64_log.h"
 #include "k64_pit.h"
 #include "k64_sched.h"
+#include "k64_serial.h"
 #include "k64_terminal.h"
 #include "k64_string.h"
 
@@ -251,10 +253,24 @@ static int alloc_fd(const uint8_t* data, size_t size) {
             active_ctx.fds[i].data = data;
             active_ctx.fds[i].size = size;
             active_ctx.fds[i].offset = 0;
-            return (int)i;
+            return (int)i + 3;
         }
     }
     return -1;
+}
+
+static char read_stdin_char_blocking(void) {
+    char ch;
+
+    for (;;) {
+        if (k64_serial_get_char(&ch)) {
+            return ch;
+        }
+        if (k64_keyboard_get_char(&ch)) {
+            return ch;
+        }
+        __asm__ volatile("pause");
+    }
 }
 
 int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
@@ -270,6 +286,10 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             k64_user_return_asm(&active_ctx, active_ctx.result);
             break;
         case K64_SYSCALL_WRITE:
+            if (frame->rdi <= 2 && frame->rdx > 0) {
+                write_text((const char*)(uintptr_t)frame->rsi, (size_t)frame->rdx);
+                return (int64_t)frame->rdx;
+            }
             write_text((const char*)(uintptr_t)frame->rdi, (size_t)frame->rsi);
             return (int64_t)frame->rsi;
         case K64_SYSCALL_YIELD:
@@ -297,29 +317,55 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             uint64_t fd = frame->rdi;
             uint8_t* buf = (uint8_t*)(uintptr_t)frame->rsi;
             size_t want = (size_t)frame->rdx;
+            size_t fd_index;
             size_t remaining;
             size_t count;
 
-            if (fd >= (sizeof(active_ctx.fds) / sizeof(active_ctx.fds[0])) || !active_ctx.fds[fd].used || !buf) {
+            if (!buf || want == 0) {
+                return 0;
+            }
+            if (fd == 0) {
+                buf[0] = (uint8_t)read_stdin_char_blocking();
+                count = 1;
+                while (count < want) {
+                    char ch;
+                    if (k64_serial_get_char(&ch) || k64_keyboard_get_char(&ch)) {
+                        buf[count++] = (uint8_t)ch;
+                    } else {
+                        break;
+                    }
+                }
+                return (int64_t)count;
+            }
+            if (fd < 3) {
                 return -1;
             }
-            remaining = active_ctx.fds[fd].size - active_ctx.fds[fd].offset;
+            fd_index = (size_t)(fd - 3);
+            if (fd_index >= (sizeof(active_ctx.fds) / sizeof(active_ctx.fds[0])) || !active_ctx.fds[fd_index].used) {
+                return -1;
+            }
+            remaining = active_ctx.fds[fd_index].size - active_ctx.fds[fd_index].offset;
             count = want < remaining ? want : remaining;
             for (size_t i = 0; i < count; ++i) {
-                buf[i] = active_ctx.fds[fd].data[active_ctx.fds[fd].offset + i];
+                buf[i] = active_ctx.fds[fd_index].data[active_ctx.fds[fd_index].offset + i];
             }
-            active_ctx.fds[fd].offset += count;
+            active_ctx.fds[fd_index].offset += count;
             return (int64_t)count;
         }
         case K64_SYSCALL_CLOSE: {
             uint64_t fd = frame->rdi;
-            if (fd >= (sizeof(active_ctx.fds) / sizeof(active_ctx.fds[0])) || !active_ctx.fds[fd].used) {
+            size_t fd_index;
+            if (fd < 3) {
                 return -1;
             }
-            active_ctx.fds[fd].used = false;
-            active_ctx.fds[fd].data = NULL;
-            active_ctx.fds[fd].size = 0;
-            active_ctx.fds[fd].offset = 0;
+            fd_index = (size_t)(fd - 3);
+            if (fd_index >= (sizeof(active_ctx.fds) / sizeof(active_ctx.fds[0])) || !active_ctx.fds[fd_index].used) {
+                return -1;
+            }
+            active_ctx.fds[fd_index].used = false;
+            active_ctx.fds[fd_index].data = NULL;
+            active_ctx.fds[fd_index].size = 0;
+            active_ctx.fds[fd_index].offset = 0;
             return 0;
         }
         case K64_SYSCALL_GETPID:
@@ -331,6 +377,18 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             return (int64_t)process_table[active_ctx.process_index].pid;
         case K64_SYSCALL_UPTIME:
             return (int64_t)k64_pit_get_ticks();
+        case K64_SYSCALL_WRITEFILE: {
+            char path[256];
+            if (!copy_user_string((const char*)(uintptr_t)frame->rdi, path, sizeof(path))) {
+                return -1;
+            }
+            return k64_fs_write_file_raw(path,
+                                         (const uint8_t*)(uintptr_t)frame->rsi,
+                                         (size_t)frame->rdx) ? 0 : -1;
+        }
+        case K64_SYSCALL_CLEAR:
+            k64_term_clear();
+            return 0;
         default:
             return -1;
     }

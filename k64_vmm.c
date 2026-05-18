@@ -451,6 +451,84 @@ bool k64_vmm_is_mapped(const k64_vm_space_t* space, uint64_t virt_addr, bool req
     return (entry & (K64_PAGE_PRESENT | user_mask)) == (K64_PAGE_PRESENT | user_mask);
 }
 
+static bool vmm_translate(const k64_vm_space_t* space,
+                          uint64_t virt_addr,
+                          bool require_user,
+                          uint64_t* out_phys) {
+    uint64_t* pml4;
+    uint64_t* pdpt;
+    uint64_t* pdt;
+    uint64_t* pt;
+    uint64_t entry;
+    uint64_t user_mask = require_user ? K64_PAGE_USER : 0;
+
+    if (!space || !space->present || space->cr3 == 0 || !out_phys) {
+        return false;
+    }
+
+    pml4 = (uint64_t*)(uintptr_t)space->cr3;
+    entry = pml4[(virt_addr >> 39) & 0x1FFULL];
+    if ((entry & (K64_PAGE_PRESENT | user_mask)) != (K64_PAGE_PRESENT | user_mask)) {
+        return false;
+    }
+    pdpt = (uint64_t*)(uintptr_t)(entry & K64_PAGE_MASK);
+
+    entry = pdpt[(virt_addr >> 30) & 0x1FFULL];
+    if ((entry & (K64_PAGE_PRESENT | user_mask)) != (K64_PAGE_PRESENT | user_mask)) {
+        return false;
+    }
+    if ((entry & (1ULL << 7)) != 0) {
+        *out_phys = (entry & 0xFFFFFC0000000ULL) + (virt_addr & ((1ULL << 30) - 1ULL));
+        return true;
+    }
+    pdt = (uint64_t*)(uintptr_t)(entry & K64_PAGE_MASK);
+
+    entry = pdt[(virt_addr >> 21) & 0x1FFULL];
+    if ((entry & (K64_PAGE_PRESENT | user_mask)) != (K64_PAGE_PRESENT | user_mask)) {
+        return false;
+    }
+    if ((entry & (1ULL << 7)) != 0) {
+        *out_phys = (entry & 0xFFFFFFE00000ULL) + (virt_addr & ((1ULL << 21) - 1ULL));
+        return true;
+    }
+    pt = (uint64_t*)(uintptr_t)(entry & K64_PAGE_MASK);
+
+    entry = pt[(virt_addr >> 12) & 0x1FFULL];
+    if ((entry & (K64_PAGE_PRESENT | user_mask)) != (K64_PAGE_PRESENT | user_mask)) {
+        return false;
+    }
+    *out_phys = (entry & K64_PAGE_MASK) + (virt_addr & (K64_PAGE_SIZE - 1ULL));
+    return true;
+}
+
+bool k64_vmm_write_user(const k64_vm_space_t* space, uint64_t virt_addr, const void* data, size_t size) {
+    const uint8_t* src = (const uint8_t*)data;
+    size_t done = 0;
+
+    if (!data && size != 0) {
+        return false;
+    }
+    while (done < size) {
+        uint64_t phys;
+        size_t page_off = (size_t)((virt_addr + done) & (K64_PAGE_SIZE - 1ULL));
+        size_t chunk = K64_PAGE_SIZE - page_off;
+        uint8_t* dst;
+
+        if (chunk > size - done) {
+            chunk = size - done;
+        }
+        if (!vmm_translate(space, virt_addr + done, true, &phys)) {
+            return false;
+        }
+        dst = (uint8_t*)(uintptr_t)phys;
+        for (size_t i = 0; i < chunk; ++i) {
+            dst[i] = src[done + i];
+        }
+        done += chunk;
+    }
+    return true;
+}
+
 uint64_t k64_vmm_call_isolated(const k64_vm_space_t* space,
                                uint64_t entry,
                                uint64_t arg0,

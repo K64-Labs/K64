@@ -14,7 +14,7 @@
 #define KPM_TEXT_MAX 8192
 #define KPM_MAX_SOURCES 8
 #define KPM_HTTP_TRIES 120
-#define KPM_DOWNLOAD_CHUNK 1024u
+#define KPM_DOWNLOAD_CHUNK (16u * 1024u)
 
 typedef struct {
     char name[32];
@@ -479,6 +479,22 @@ static bool kpm_fetch_package(kpm_source_t* src, const char* package, const char
     kpm_append(suffix, sizeof(suffix), "/package.kpg");
     kpm_join_path(path, sizeof(path), src->url.base_path, suffix);
 
+    for (int i = 0; i < KPM_HTTP_TRIES; ++i) {
+        if (k64_net_http_get_raw(src->url.host, path, src->url.port, kpm_pkg_buf, sizeof(kpm_pkg_buf), &got, &state) &&
+            got >= sizeof(kpm_package_header_t)) {
+            const kpm_package_header_t* hdr = (const kpm_package_header_t*)kpm_pkg_buf;
+            if (hdr->magic == KPM_MAGIC &&
+                hdr->payload_size <= sizeof(kpm_pkg_buf) - sizeof(kpm_package_header_t) &&
+                got == sizeof(kpm_package_header_t) + (size_t)hdr->payload_size) {
+                *out_size = got;
+                return true;
+            }
+        }
+        kpm_poll_net_ms(100);
+    }
+
+    got = 0;
+    state = NULL;
     for (int i = 0; i < KPM_HTTP_TRIES; ++i) {
         if (k64_net_http_get_range_raw(src->url.host, path, src->url.port, 0, sizeof(kpm_package_header_t) - 1u,
                                        kpm_pkg_buf, sizeof(kpm_package_header_t), &got, &state) &&

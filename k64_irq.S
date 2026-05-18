@@ -4,6 +4,8 @@
 
 .extern k64_sched_handle_timer
 .extern k64_keyboard_on_interrupt
+.extern k64_task_exit_current
+.extern k64_task_park_current
 
 .macro PUSH_ALL
     pushq %rax
@@ -60,3 +62,8 @@ k64_irq1_stub:
     addq $8, %rsp
     POP_ALL
     iretq
+
+.global k64_task_return_asm
+k64_task_return_asm:
+    call k64_task_exit_current
+    call k64_task_park_current

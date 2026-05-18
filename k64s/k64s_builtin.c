@@ -396,12 +396,16 @@ static void k64cc_usage(void) {
 }
 
 static bool elfctl_command(const char* command, const char* args) {
+    char path[96];
+    const char* elf_args;
+
     (void)command;
     if (!args || !args[0]) {
         svc_print_line("usage: elfrun </path/to/file.elf>");
         return true;
     }
-    if (!k64_elf_execute_user_path(args)) {
+    elf_args = svc_next_token(args, path, sizeof(path));
+    if (!path[0] || !k64_elf_spawn_user_path_args(path, elf_args)) {
         svc_print_line("elfrun failed");
         return true;
     }

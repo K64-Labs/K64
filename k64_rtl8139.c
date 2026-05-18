@@ -25,8 +25,9 @@
 #define CMD_TX_EN 0x04u
 #define CMD_RX_EMPTY 0x01u
 
-#define RX_BUFFER_SIZE 8192u
+#define RX_BUFFER_SIZE 32768u
 #define RX_STORAGE_SIZE (RX_BUFFER_SIZE + 16u + 1500u)
+#define RCR_RX_BUF_32K (2u << 11)
 
 typedef struct {
     bool     present;
@@ -180,7 +181,7 @@ bool k64_rtl8139_driver_start(void) {
     memset(rtl_rx_buffer, 0, sizeof(rtl_rx_buffer));
     outl(rtl.io_base + REG_RX_BUF, (uint32_t)(uintptr_t)rtl_rx_buffer);
     outw(rtl.io_base + REG_IMR, 0x0000);
-    outl(rtl.io_base + REG_RCR, 0x0000008Fu);
+    outl(rtl.io_base + REG_RCR, 0x0000008Fu | RCR_RX_BUF_32K);
     outl(rtl.io_base + REG_TCR, 0x00000000u);
     outb(rtl.io_base + REG_CHIP_CMD, CMD_RX_EN | CMD_TX_EN);
 

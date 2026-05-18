@@ -90,7 +90,7 @@ def run_smoke(read_until, send_line):
     boot = read_until("K64 shell started. Type 'help' for commands.", 25)
     send_line("\n")
     combined = boot
-    requested = os.environ.get("K64_SMOKE_ELFS", "hello,catmotd,procinfo,libctest")
+    requested = os.environ.get("K64_SMOKE_ELFS", "hello,catmotd,procinfo,args,libctest")
     elfs = [name.strip() for name in requested.split(",") if name.strip()]
 
     if "hello" in elfs:
@@ -111,6 +111,12 @@ def run_smoke(read_until, send_line):
         if "procinfo: pid=" not in combined or "uptime_ticks=" not in combined:
             raise RuntimeError(f"user libc/procinfo output missing\nCaptured:\n{combined}")
 
+    if "args" in elfs:
+        send_line("elfrun /ex/args.elf alpha beta\n")
+        combined += read_until("ELF: exit code 0", 15)
+        if "args: argc=3" not in combined or "argv[1]=alpha" not in combined or "argv[2]=beta" not in combined:
+            raise RuntimeError(f"user argv output missing\nCaptured:\n{combined}")
+
     if "libctest" in elfs:
         send_line("elfrun /ex/libctest.elf\n")
         combined += read_until("ELF: exit code 0", 15)
@@ -120,8 +126,9 @@ def run_smoke(read_until, send_line):
     send_line("ps\n")
     combined += read_until("PID   STATE", 10)
     expected_proc = "/ex/libctest.elf" if "libctest" in elfs else (
-        "/ex/procinfo.elf" if "procinfo" in elfs else (
-            "/ex/hello.elf" if "hello" in elfs else "/ex/catmotd.elf"))
+        "/ex/args.elf" if "args" in elfs else (
+            "/ex/procinfo.elf" if "procinfo" in elfs else (
+                "/ex/hello.elf" if "hello" in elfs else "/ex/catmotd.elf")))
     combined += read_until(expected_proc, 10)
     if "EXITED" not in combined:
         raise RuntimeError(f"user process table missing exited process\nCaptured:\n{combined}")

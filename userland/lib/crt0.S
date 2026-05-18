@@ -3,8 +3,8 @@
 .type _start, @function
 
 _start:
-    xor %rdi, %rdi
-    xor %rsi, %rsi
+    mov (%rsp), %rdi
+    lea 8(%rsp), %rsi
     call main
     mov %rax, %rdi
     call k64_exit
