@@ -4,10 +4,10 @@
 #include "k64_multiboot.h"
 #include "k64_string.h"
 
-#define K64_FS_MAX_NODES   256
-#define K64_FS_NAME_MAX    32
-#define K64_FS_IMAGE_MAX   (2 * 1024 * 1024)
-#define K64_FS_MUTABLE_MAX (512 * 1024)
+#define K64_FS_MAX_NODES   1024
+#define K64_FS_NAME_MAX    64
+#define K64_FS_IMAGE_MAX   (16 * 1024 * 1024)
+#define K64_FS_MUTABLE_MAX K64_FS_IMAGE_MAX
 #define K64_FS_BLOCK_SIZE  512u
 #define K64_FS_PARTITION_LBA 2048u
 #define K64_FS_BOOT_AREA_SECTORS K64_FS_PARTITION_LBA
@@ -54,7 +54,9 @@ static uint8_t fs_image[K64_FS_IMAGE_MAX];
 static uint8_t fs_image_scratch[K64_FS_IMAGE_MAX];
 static uint8_t fs_mutable[K64_FS_MUTABLE_MAX];
 static uint8_t fs_append_buffer[K64_FS_MUTABLE_MAX];
-static uint8_t fs_block_buffer[K64_FS_IMAGE_MAX];
+static uint8_t fs_block_buffer[K64_FS_BOOT_AREA_SECTORS * K64_FS_BLOCK_SIZE];
+static k64_fs_node_t fs_compact_buffer[K64_FS_MAX_NODES];
+static int fs_remap_buffer[K64_FS_MAX_NODES];
 static size_t fs_image_size = 0;
 static size_t fs_volume_capacity = K64_FS_IMAGE_MAX;
 static size_t fs_mutable_used = 0;
@@ -268,8 +270,8 @@ static void fs_remove_node(int index) {
 }
 
 static bool fs_compact_nodes(void) {
-    k64_fs_node_t compacted[K64_FS_MAX_NODES];
-    int remap[K64_FS_MAX_NODES];
+    k64_fs_node_t* compacted = fs_compact_buffer;
+    int* remap = fs_remap_buffer;
 
     for (int i = 0; i < K64_FS_MAX_NODES; ++i) {
         remap[i] = -1;
@@ -448,11 +450,11 @@ static bool fs_mount_from_block_device_at(k64_block_device_t* dev, uint64_t base
         K64_LOG_WARN("K64FS: block root exceeds device size.");
         return false;
     }
-    if (!k64_block_read(dev, base_lba, sectors, fs_block_buffer)) {
+    if (!k64_block_read(dev, base_lba, sectors, fs_image)) {
         K64_LOG_WARN("K64FS: block root image read failed.");
         return false;
     }
-    if (!fs_mount_image(fs_block_buffer, image_size)) {
+    if (!fs_parse_loaded_image(image_size)) {
         K64_LOG_WARN("K64FS: block root parse failed.");
         return false;
     }
@@ -463,7 +465,8 @@ static bool fs_mount_from_block_device_at(k64_block_device_t* dev, uint64_t base
     fs_block_lba = base_lba;
     {
         uint64_t bytes = dev->block_count * (uint64_t)dev->block_size;
-        fs_volume_capacity = bytes > (uint64_t)((size_t)-1) ? (size_t)-1 : (size_t)bytes;
+        size_t usable = bytes > (uint64_t)((size_t)-1) ? (size_t)-1 : (size_t)bytes;
+        fs_volume_capacity = usable < K64_FS_IMAGE_MAX ? usable : K64_FS_IMAGE_MAX;
     }
     fs_copy(fs_mount_name, sizeof(fs_mount_name), dev->name);
     K64_LOG_INFO("K64FS: mounted persistent block root.");
@@ -675,7 +678,7 @@ static bool fs_writeback_image(void) {
     strings_offset = sizeof(k64fs_header_t) + (size_t)entry_count * sizeof(k64fs_entry_t);
     data_offset = strings_offset + strings_size;
     total_size = data_offset + data_size;
-    if (total_size > K64_FS_IMAGE_MAX) {
+    if (total_size > K64_FS_IMAGE_MAX || total_size > fs_volume_capacity) {
         K64_LOG_WARN("K64FS: writeback image exceeds limit.");
         return false;
     }
@@ -1130,13 +1133,15 @@ static bool fs_flush_block_device(void) {
     sectors = (uint32_t)(bytes / K64_FS_BLOCK_SIZE);
     if (fs_block_lba >= fs_block_device->block_count ||
         (uint64_t)sectors > fs_block_device->block_count - fs_block_lba ||
-        bytes > sizeof(fs_block_buffer)) {
+        bytes > K64_FS_IMAGE_MAX) {
         return false;
     }
-    for (size_t i = 0; i < bytes; ++i) {
-        fs_block_buffer[i] = i < fs_image_size ? fs_image[i] : 0;
+    if (bytes > fs_image_size) {
+        for (size_t i = fs_image_size; i < bytes; ++i) {
+            fs_image[i] = 0;
+        }
     }
-    if (!k64_block_write(fs_block_device, fs_block_lba, sectors, fs_block_buffer)) {
+    if (!k64_block_write(fs_block_device, fs_block_lba, sectors, fs_image)) {
         K64_LOG_WARN("K64FS: writeback to block device failed.");
         return false;
     }
@@ -1187,7 +1192,7 @@ bool k64_fs_install_to_block_device(const char* device_name) {
     sectors = (uint32_t)((fs_image_size + K64_FS_BLOCK_SIZE - 1u) / K64_FS_BLOCK_SIZE);
     if (sectors == 0 ||
         (uint64_t)sectors > dev->block_count - K64_FS_PARTITION_LBA ||
-        (size_t)sectors * K64_FS_BLOCK_SIZE > sizeof(fs_block_buffer)) {
+        (size_t)sectors * K64_FS_BLOCK_SIZE > K64_FS_IMAGE_MAX) {
         return false;
     }
     for (size_t i = 0; i < boot_area_size; ++i) {
@@ -1210,9 +1215,9 @@ bool k64_fs_install_to_block_device(const char* device_name) {
         return false;
     }
     for (size_t i = 0; i < (size_t)sectors * K64_FS_BLOCK_SIZE; ++i) {
-        fs_block_buffer[i] = i < fs_image_size ? fs_image[i] : 0;
+        fs_image[i] = i < fs_image_size ? fs_image[i] : 0;
     }
-    return k64_block_write(dev, K64_FS_PARTITION_LBA, sectors, fs_block_buffer);
+    return k64_block_write(dev, K64_FS_PARTITION_LBA, sectors, fs_image);
 }
 
 bool k64_fs_grow_root(void) {
@@ -1222,7 +1227,10 @@ bool k64_fs_grow_root(void) {
         return false;
     }
     bytes = fs_block_device->block_count * (uint64_t)fs_block_device->block_size;
-    fs_volume_capacity = bytes > (uint64_t)((size_t)-1) ? (size_t)-1 : (size_t)bytes;
+    {
+        size_t usable = bytes > (uint64_t)((size_t)-1) ? (size_t)-1 : (size_t)bytes;
+        fs_volume_capacity = usable < K64_FS_IMAGE_MAX ? usable : K64_FS_IMAGE_MAX;
+    }
     return true;
 }
 

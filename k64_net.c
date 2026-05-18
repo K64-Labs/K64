@@ -1,4 +1,5 @@
 #include "k64_net.h"
+#include "k64_fs.h"
 #include "k64_string.h"
 
 #define ETH_TYPE_ARP  0x0806u
@@ -16,7 +17,7 @@
 #define TCP_FLAG_ACK  0x10u
 #define DNS_PORT      53u
 #define DNS_SRC_PORT  49153u
-#define HTTP_BUF_SIZE 1024u
+#define HTTP_BUF_SIZE (16u * 1024u * 1024u)
 
 typedef enum {
     HTTP_IDLE = 0,
@@ -41,9 +42,12 @@ typedef struct {
     uint32_t     ip;
     uint16_t     port;
     uint16_t     local_port;
+    bool         use_range;
+    size_t       range_start;
+    size_t       range_end;
     uint32_t     seq;
     uint32_t     ack;
-    char         response[HTTP_BUF_SIZE];
+    uint8_t      response[HTTP_BUF_SIZE];
     size_t       response_len;
 } http_client_t;
 
@@ -640,6 +644,119 @@ static void http_append(const uint8_t* payload, uint16_t len) {
     net.http.response[net.http.response_len] = '\0';
 }
 
+static bool http_find_body(size_t* header_size, uint16_t* status, size_t* content_length, bool* has_content_length) {
+    size_t i;
+
+    if (header_size) {
+        *header_size = 0;
+    }
+    if (status) {
+        *status = 0;
+    }
+    if (content_length) {
+        *content_length = 0;
+    }
+    if (has_content_length) {
+        *has_content_length = false;
+    }
+    for (i = 0; i + 3 < net.http.response_len; ++i) {
+        if (net.http.response[i] == '\r' && net.http.response[i + 1] == '\n' &&
+            net.http.response[i + 2] == '\r' && net.http.response[i + 3] == '\n') {
+            size_t pos = 0;
+            if (header_size) {
+                *header_size = i + 4;
+            }
+            if (net.http.response_len >= 12 &&
+                net.http.response[0] == 'H' && net.http.response[1] == 'T' &&
+                net.http.response[2] == 'T' && net.http.response[3] == 'P') {
+                size_t code_pos = 0;
+                while (code_pos < i && net.http.response[code_pos] != ' ' && net.http.response[code_pos] != '\t') {
+                    code_pos++;
+                }
+                while (code_pos < i && (net.http.response[code_pos] == ' ' || net.http.response[code_pos] == '\t')) {
+                    code_pos++;
+                }
+                if (code_pos + 2 < i &&
+                    net.http.response[code_pos] >= '0' && net.http.response[code_pos] <= '9' &&
+                    net.http.response[code_pos + 1] >= '0' && net.http.response[code_pos + 1] <= '9' &&
+                    net.http.response[code_pos + 2] >= '0' && net.http.response[code_pos + 2] <= '9') {
+                    if (status) {
+                        *status = (uint16_t)((net.http.response[code_pos] - '0') * 100 +
+                                             (net.http.response[code_pos + 1] - '0') * 10 +
+                                             (net.http.response[code_pos + 2] - '0'));
+                    }
+                }
+            }
+            while (pos + 16 < i) {
+                bool at_line = pos == 0 || (net.http.response[pos - 1] == '\n');
+                if (at_line &&
+                    (net.http.response[pos + 0] == 'C' || net.http.response[pos + 0] == 'c') &&
+                    (net.http.response[pos + 1] == 'o' || net.http.response[pos + 1] == 'O') &&
+                    (net.http.response[pos + 2] == 'n' || net.http.response[pos + 2] == 'N') &&
+                    (net.http.response[pos + 3] == 't' || net.http.response[pos + 3] == 'T') &&
+                    (net.http.response[pos + 4] == 'e' || net.http.response[pos + 4] == 'E') &&
+                    (net.http.response[pos + 5] == 'n' || net.http.response[pos + 5] == 'N') &&
+                    (net.http.response[pos + 6] == 't' || net.http.response[pos + 6] == 'T') &&
+                    net.http.response[pos + 7] == '-' &&
+                    (net.http.response[pos + 8] == 'L' || net.http.response[pos + 8] == 'l')) {
+                    while (pos < i && net.http.response[pos] != ':') {
+                        pos++;
+                    }
+                    if (pos < i && net.http.response[pos] == ':') {
+                        size_t value = 0;
+                        pos++;
+                        while (pos < i && (net.http.response[pos] == ' ' || net.http.response[pos] == '\t')) {
+                            pos++;
+                        }
+                        while (pos < i && net.http.response[pos] >= '0' && net.http.response[pos] <= '9') {
+                            value = value * 10u + (size_t)(net.http.response[pos] - '0');
+                            pos++;
+                        }
+                        if (content_length) {
+                            *content_length = value;
+                        }
+                        if (has_content_length) {
+                            *has_content_length = true;
+                        }
+                    }
+                }
+                while (pos < i && net.http.response[pos] != '\n') {
+                    pos++;
+                }
+                if (pos < i) {
+                    pos++;
+                }
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+static size_t http_append_dec(char* out, size_t out_size, size_t value) {
+    char tmp[24];
+    size_t n = 0;
+    size_t pos = 0;
+
+    if (value == 0) {
+        if (out_size > 1) {
+            out[0] = '0';
+            out[1] = '\0';
+            return 1;
+        }
+        return 0;
+    }
+    while (value && n < sizeof(tmp)) {
+        tmp[n++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    }
+    while (n && pos + 1 < out_size) {
+        out[pos++] = tmp[--n];
+    }
+    out[pos] = '\0';
+    return pos;
+}
+
 static void handle_tcp_payload(const uint8_t* ip_payload, uint16_t payload_len, uint32_t src_ip) {
     uint16_t src_port;
     uint16_t dst_port;
@@ -680,12 +797,16 @@ static void handle_tcp_payload(const uint8_t* ip_payload, uint16_t payload_len, 
         return;
     }
     if ((net.http.state == HTTP_REQUEST_SENT || net.http.state == HTTP_ESTABLISHED) && data_len) {
-        http_append(data, data_len);
-        net.http.ack = seq + data_len;
+        if (seq == net.http.ack) {
+            http_append(data, data_len);
+            net.http.ack = seq + data_len;
+        }
         (void)send_tcp(net.http.ip, net.http.port, net.http.local_port, net.http.seq, net.http.ack, TCP_FLAG_ACK, NULL, 0);
     }
     if ((flags & TCP_FLAG_FIN) != 0) {
-        net.http.ack = seq + data_len + 1u;
+        if (seq + data_len == net.http.ack) {
+            net.http.ack++;
+        }
         (void)send_tcp(net.http.ip, net.http.port, net.http.local_port, net.http.seq, net.http.ack, TCP_FLAG_ACK, NULL, 0);
         net.http.state = HTTP_DONE;
     }
@@ -919,16 +1040,49 @@ bool k64_net_resolve_host(const char* host, uint32_t* out_ip, bool* pending) {
 }
 
 bool k64_net_http_get(const char* host, const char* path, uint16_t port, char* out, size_t out_size, const char** state) {
+    uint8_t raw[1024];
+    size_t raw_size = 0;
+
+    if (!k64_net_http_get_raw(host, path, port, raw, sizeof(raw), &raw_size, state)) {
+        if (out && out_size) {
+            size_t copy = raw_size + 1 < out_size ? raw_size : out_size - 1;
+            for (size_t i = 0; i < copy; ++i) {
+                out[i] = (char)raw[i];
+            }
+            out[copy] = '\0';
+        }
+        return false;
+    }
+    if (out && out_size) {
+        size_t copy = raw_size + 1 < out_size ? raw_size : out_size - 1;
+        for (size_t i = 0; i < copy; ++i) {
+            out[i] = (char)raw[i];
+        }
+        out[copy] = '\0';
+    }
+    return true;
+}
+
+bool k64_net_http_get_raw(const char* host, const char* path, uint16_t port, uint8_t* out, size_t out_capacity, size_t* out_size, const char** state) {
+    return k64_net_http_get_range_raw(host, path, port, 0, 0, out, out_capacity, out_size, state);
+}
+
+bool k64_net_http_get_range_raw(const char* host, const char* path, uint16_t port, size_t range_start, size_t range_end, uint8_t* out, size_t out_capacity, size_t* out_size, const char** state) {
     uint8_t mac[6];
     char request[256];
     size_t len = 0;
     bool pending = false;
+    bool use_range = range_end >= range_start && (range_start != 0 || range_end != 0);
+    size_t header_size = 0;
+    size_t content_length = 0;
+    bool has_content_length = false;
+    uint16_t status = 0;
 
     if (state) {
         *state = "idle";
     }
-    if (out && out_size) {
-        out[0] = '\0';
+    if (out_size) {
+        *out_size = 0;
     }
     if (!host || !host[0]) {
         if (state) {
@@ -942,22 +1096,23 @@ bool k64_net_http_get(const char* host, const char* path, uint16_t port, char* o
     if (port == 0) {
         port = 80;
     }
-    if (net.http.state == HTTP_DONE && text_eq(net.http.host, host) && text_eq(net.http.path, path) && net.http.port == port) {
-        if (out && out_size) {
-            copy_text(out, out_size, net.http.response);
-        }
-        if (state) {
-            *state = "done";
-        }
-        return true;
+    if (net.http.state == HTTP_DONE && text_eq(net.http.host, host) && text_eq(net.http.path, path) &&
+        net.http.port == port && net.http.use_range == use_range &&
+        (!use_range || (net.http.range_start == range_start && net.http.range_end == range_end))) {
+        goto done;
     }
     if (net.http.state == HTTP_IDLE || net.http.state == HTTP_ERROR ||
-        !text_eq(net.http.host, host) || !text_eq(net.http.path, path) || net.http.port != port) {
+        !text_eq(net.http.host, host) || !text_eq(net.http.path, path) || net.http.port != port ||
+        net.http.use_range != use_range ||
+        (use_range && (net.http.range_start != range_start || net.http.range_end != range_end))) {
         memset(&net.http, 0, sizeof(net.http));
         net.http.state = HTTP_RESOLVE;
         copy_text(net.http.host, sizeof(net.http.host), host);
         copy_text(net.http.path, sizeof(net.http.path), path);
         net.http.port = port;
+        net.http.use_range = use_range;
+        net.http.range_start = range_start;
+        net.http.range_end = range_end;
         net.http.local_port = net.next_tcp_port++;
         net.http.seq = 0x4B640000u + net.http.local_port;
     }
@@ -995,12 +1150,29 @@ bool k64_net_http_get(const char* host, const char* path, uint16_t port, char* o
     if (net.http.state == HTTP_ESTABLISHED) {
         const char* a = "GET ";
         const char* b = " HTTP/1.0\r\nHost: ";
-        const char* c = "\r\nUser-Agent: K64-kcurl/1.0\r\nConnection: close\r\n\r\n";
+        const char* c = "\r\nUser-Agent: K64-kcurl/1.0\r\n";
+        const char* d = "Connection: close\r\n\r\n";
         for (size_t i = 0; a[i] && len + 1 < sizeof(request); ++i) request[len++] = a[i];
         for (size_t i = 0; net.http.path[i] && len + 1 < sizeof(request); ++i) request[len++] = net.http.path[i];
         for (size_t i = 0; b[i] && len + 1 < sizeof(request); ++i) request[len++] = b[i];
         for (size_t i = 0; net.http.host[i] && len + 1 < sizeof(request); ++i) request[len++] = net.http.host[i];
         for (size_t i = 0; c[i] && len + 1 < sizeof(request); ++i) request[len++] = c[i];
+        if (net.http.use_range && len + 48 < sizeof(request)) {
+            const char* r = "Range: bytes=";
+            char num[24];
+            size_t n;
+            for (size_t i = 0; r[i] && len + 1 < sizeof(request); ++i) request[len++] = r[i];
+            n = http_append_dec(num, sizeof(num), net.http.range_start);
+            for (size_t i = 0; i < n && len + 1 < sizeof(request); ++i) request[len++] = num[i];
+            if (len + 1 < sizeof(request)) request[len++] = '-';
+            n = http_append_dec(num, sizeof(num), net.http.range_end);
+            for (size_t i = 0; i < n && len + 1 < sizeof(request); ++i) request[len++] = num[i];
+            if (len + 2 < sizeof(request)) {
+                request[len++] = '\r';
+                request[len++] = '\n';
+            }
+        }
+        for (size_t i = 0; d[i] && len + 1 < sizeof(request); ++i) request[len++] = d[i];
         request[len] = '\0';
         if (!send_tcp(net.http.ip, net.http.port, net.http.local_port, net.http.seq, net.http.ack, TCP_FLAG_PSH | TCP_FLAG_ACK, (const uint8_t*)request, (uint16_t)len)) {
             if (state) {
@@ -1012,27 +1184,89 @@ bool k64_net_http_get(const char* host, const char* path, uint16_t port, char* o
         net.http.state = HTTP_REQUEST_SENT;
     }
     if (net.http.state == HTTP_REQUEST_SENT) {
-        if (net.http.response_len && out && out_size) {
-            copy_text(out, out_size, net.http.response);
-        }
         if (state) {
             *state = net.http.response_len ? "receiving" : "waiting";
         }
         return false;
     }
     if (net.http.state == HTTP_DONE) {
-        if (out && out_size) {
-            copy_text(out, out_size, net.http.response);
-        }
-        if (state) {
-            *state = "done";
-        }
-        return true;
+        goto done;
     }
     if (state) {
         *state = "error";
     }
     return false;
+
+done:
+    if (!http_find_body(&header_size, &status, &content_length, &has_content_length)) {
+        net.http.state = HTTP_ERROR;
+        if (state) {
+            *state = "bad http response";
+        }
+        return false;
+    }
+    if (status < 200 || status >= 300) {
+        net.http.state = HTTP_ERROR;
+        if (state) {
+            *state = "http status error";
+        }
+        return false;
+    }
+    if (has_content_length && net.http.response_len - header_size != content_length) {
+        net.http.state = HTTP_ERROR;
+        if (state) {
+            *state = "incomplete download";
+        }
+        return false;
+    }
+    if (net.http.response_len < header_size) {
+        return false;
+    }
+    content_length = net.http.response_len - header_size;
+    if (out_size) {
+        *out_size = content_length;
+    }
+    if (out && out_capacity) {
+        size_t copy = content_length < out_capacity ? content_length : out_capacity;
+        for (size_t i = 0; i < copy; ++i) {
+            out[i] = net.http.response[header_size + i];
+        }
+        if (copy < content_length) {
+            net.http.state = HTTP_ERROR;
+            if (state) {
+                *state = "buffer too small";
+            }
+            return false;
+        }
+    }
+    if (state) {
+        *state = "done";
+    }
+    return true;
+}
+
+bool k64_net_http_download_to_file(const char* host, const char* path, uint16_t port, const char* dst_path, size_t max_size_or_0, const char** state) {
+    size_t body_size = 0;
+
+    if (!k64_net_http_get_raw(host, path, port, NULL, 0, &body_size, state)) {
+        return false;
+    }
+    if (max_size_or_0 && body_size > max_size_or_0) {
+        if (state) {
+            *state = "download too large";
+        }
+        return false;
+    }
+    if (!k64_fs_write_file_raw(dst_path, net.http.response + (net.http.response_len - body_size), body_size)) {
+        if (state) {
+            *state = "write failed";
+        }
+        return false;
+    }
+    if (state) {
+        *state = "done";
+    }
+    return true;
 }
 
 bool k64_net_status(k64_net_status_t* out) {

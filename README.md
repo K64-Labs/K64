@@ -586,6 +586,59 @@ This is not yet a POSIX socket API or TLS stack. It is now a usable VM internet 
 
 For VMware, configure the virtual NIC as `e1000`/Intel E1000 when possible. The default QEMU targets attach an RTL8139 NIC, while the smoke tests can also boot with QEMU's e1000 device.
 
+### KPM package manager client
+
+Files:
+
+- `k64_kpm.c`
+- `k64_kpm.h`
+- `k64s_def/kpm.svc`
+
+K64 includes the K64 Package Manager client as the `kpm` service command. KPM consumes an already-running static HTTP package source; K64 does not host or generate the external repository server.
+
+KPM client state lives in:
+
+- `/etc/kpm/sources.cfg`
+- `/var/lib/kpm/installed.db`
+- `/tmp/kpm/`
+
+Source entries are client-side base URLs:
+
+```text
+kpm source add main http://repo.k64os.org
+kpm source add local http://192.168.178.50:8080
+kpm source list
+kpm sources
+kpm source del main
+```
+
+Package discovery and install commands:
+
+```text
+kpm list
+kpm versions hello
+kpm install hello
+kpm install hello -v 1.0.0
+```
+
+KPM consumes this repository layout:
+
+```text
+/packages.json
+/<package>/versions.json
+/<package>/<version>/package.kpg
+```
+
+KPG version 1 is binary-safe. The package contains a packed header with `KPG1` magic, package name, version, install name, payload size, kind, and CRC32, followed by payload bytes. KPM validates the header, rejects unsafe install names such as names with `/`, `\`, `..`, or control characters, verifies the payload CRC32, then installs by kind:
+
+- ELF -> `/ex/<install_name>.elf`
+- K64S -> `/k64s/<install_name>.k64s`
+- K64M -> `/k64m/<install_name>.k64m`
+
+The installer downloads to `/tmp/kpm/<package>-<version>.kpg` first and only writes the final destination after validation. Existing final files are backed up during replacement so a failed install does not leave a broken final file behind. Successful installs update `/var/lib/kpm/installed.db` and call `k64_fs_sync()`.
+
+KPM uses plain `http://` only for now. `https://` sources are rejected until K64 has TLS support. Binary package downloads use the raw HTTP path and range-based chunking, so packages are not passed through string-oriented buffers and embedded zero bytes are preserved.
+
 ## Service Model (`.k64s`)
 
 Files:
@@ -658,6 +711,7 @@ The built-in service registration in `k64s/k64s_builtin.c` currently creates:
 - `driverctl`
 - `storagectl`
 - `netctl`
+- `kpm`
 - `reload`
 - `fsctl`
 - `userctl`
@@ -674,6 +728,7 @@ What they do:
 - `driverctl`: driver management command surface
 - `storagectl`: block-device inspection and filesystem sync
 - `netctl`: network inspection and packet send/receive commands
+- `kpm`: package source, listing, version, and install command surface
 - `reload`: runtime reload request surface
 - `fsctl`: read/write filesystem command surface
 - `userctl`: user/session/privilege command surface
@@ -1191,6 +1246,8 @@ It also exposes service-owned commands, including:
 - `sync`
 - `netctl`
 - `ping`
+- `kcurl`
+- `kpm`
 - `udp`
 - `userctl`
 - `users`

@@ -276,6 +276,7 @@ static void shell_print_help(void) {
     k64_term_write("  netctl resolve <host> - resolve a host name\n");
     k64_term_write("  ping <ip|host>   - send an ICMP echo packet\n");
     k64_term_write("  kcurl http://host[:port]/path - fetch a plain HTTP URL\n");
+    k64_term_write("  kpm <cmd>        - install KPG packages from configured HTTP sources\n");
     k64_term_write("  udp send <ip> <port> <text> - send a UDP packet\n");
     k64_term_write("  reload <target>  - reload drivers or kernel runtime\n");
     k64_term_write("  whoami id users groups - inspect users, groups, and the current session\n");

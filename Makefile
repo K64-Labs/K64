@@ -97,6 +97,7 @@ K64_SRCS = \
   k64_string.c \
   k64_config.c \
   k64_fs.c \
+  k64_kpm.c \
   k64_power.c \
   k64_reload.c \
   k64_hotreload.c \

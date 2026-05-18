@@ -4,6 +4,7 @@
 #include "k64_config.h"
 #include "k64_fs.h"
 #include "k64_hotreload.h"
+#include "k64_kpm.h"
 #include "k64_modules.h"
 #include "k64_net.h"
 #include "k64_pit.h"
@@ -1649,6 +1650,13 @@ static bool init_start(k64_service_t* service) {
         k64_term_putc('\n');
     }
 
+    result = k64_system_start_service_by_name("kpm");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("init: failed to start kpm: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
     result = k64_system_start_service_by_name("fsctl");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
         k64_term_write("init: failed to start fsctl: ");
@@ -1824,6 +1832,18 @@ void k64s_register_builtin_services(void) {
                                 true,
                                 netctl_start,
                                 netctl_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("kpm",
+                                "k64s/kpm.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                k64_kpm_service_start,
+                                k64_kpm_service_stop,
                                 NULL,
                                 NULL);
 
