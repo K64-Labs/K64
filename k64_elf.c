@@ -185,7 +185,11 @@ static bool elf_write_initial_stack(const k64_vm_space_t* space,
     return true;
 }
 
-static bool elf_execute_impl(const char* path, bool user_mode, const char* args_text) {
+static bool elf_execute_impl_ex(const char* path,
+                                bool user_mode,
+                                const char* args_text,
+                                uint64_t parent_pid,
+                                uint64_t pid) {
     const uint8_t* file_data = NULL;
     size_t file_size = 0;
     const k64_elf64_ehdr_t* ehdr;
@@ -317,7 +321,12 @@ static bool elf_execute_impl(const char* path, bool user_mode, const char* args_
             k64_vmm_release_service_space(&elf_app_space);
             return false;
         }
-        rc = (int)k64_usermode_execute_named(&elf_app_space, ehdr->e_entry, user_stack_top, path);
+        rc = (int)k64_usermode_execute_named_ex(&elf_app_space,
+                                                ehdr->e_entry,
+                                                user_stack_top,
+                                                path,
+                                                parent_pid,
+                                                pid);
     } else {
         rc = (int)k64_vmm_call_isolated(&elf_app_space, ehdr->e_entry, 0, 0, 0);
     }
@@ -329,15 +338,15 @@ static bool elf_execute_impl(const char* path, bool user_mode, const char* args_
 }
 
 bool k64_elf_execute_path(const char* path) {
-    return elf_execute_impl(path, false, "");
+    return elf_execute_impl_ex(path, false, "", 0, 0);
 }
 
 bool k64_elf_execute_user_path(const char* path) {
-    return elf_execute_impl(path, true, "");
+    return elf_execute_impl_ex(path, true, "", 0, 0);
 }
 
 bool k64_elf_execute_user_path_args(const char* path, const char* args) {
-    return elf_execute_impl(path, true, args);
+    return elf_execute_impl_ex(path, true, args, 0, 0);
 }
 
 bool k64_elf_spawn_user_path(const char* path) {
@@ -349,4 +358,11 @@ bool k64_elf_spawn_user_path_args(const char* path, const char* args) {
         return false;
     }
     return k64_elf_execute_user_path_args(path, args);
+}
+
+bool k64_elf_spawn_user_path_args_ex(const char* path, const char* args, uint64_t parent_pid, uint64_t pid) {
+    if (!path || !path[0]) {
+        return false;
+    }
+    return elf_execute_impl_ex(path, true, args, parent_pid, pid);
 }

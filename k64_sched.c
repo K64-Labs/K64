@@ -22,6 +22,21 @@ extern void k64_task_return_asm(void);
 static void on_tick_accounting(void);
 static uint64_t read_cr3(void);
 
+static const char* task_state_name(k64_task_state_t state) {
+    switch (state) {
+        case K64_TASK_STATE_READY:
+            return "READY";
+        case K64_TASK_STATE_RUNNING:
+            return "RUNNING";
+        case K64_TASK_STATE_BLOCKED:
+            return "BLOCKED";
+        case K64_TASK_STATE_ZOMBIE:
+            return "ZOMBIE";
+        default:
+            return "UNUSED";
+    }
+}
+
 static uint32_t timeslice_for_priority(int priority) {
     if (priority < 0) {
         priority = 0;
@@ -190,32 +205,36 @@ k64_task_t* k64_task_create(void (*entry)(void)) {
 
 static uint64_t pick_next_rsp(void) {
     uint64_t target_cr3;
+    k64_task_t* selected = NULL;
+    uint64_t selected_score = 0;
 
     if (!current_task || !current_task->next) {
         return current_task ? current_task->rsp : 0;
     }
 
-    k64_task_t* candidate = current_task;
-    for (;;) {
-        candidate = candidate->next;
-        if (candidate->state == K64_TASK_STATE_READY) {
-            if (current_task->state == K64_TASK_STATE_RUNNING) {
-                current_task->state = K64_TASK_STATE_READY;
-            }
-            candidate->state = K64_TASK_STATE_RUNNING;
-            candidate->remaining_ticks = candidate->base_timeslice;
-            current_task = candidate;
-            break;
-        }
-        if (candidate == current_task) {
-            if (current_task->state != K64_TASK_STATE_RUNNING) {
-                current_task = task_list;
-                current_task->state = K64_TASK_STATE_RUNNING;
-                current_task->remaining_ticks = current_task->base_timeslice;
-            }
-            break;
-        }
+    if (current_task->state == K64_TASK_STATE_RUNNING) {
+        current_task->state = K64_TASK_STATE_READY;
     }
+
+    k64_task_t* candidate = task_list;
+    do {
+        if (candidate->id != 0 && candidate->state == K64_TASK_STATE_READY) {
+            uint64_t score = ((uint64_t)(uint32_t)candidate->priority * 1024ULL) + candidate->wait_ticks;
+            if (!selected || score > selected_score) {
+                selected = candidate;
+                selected_score = score;
+            }
+        }
+        candidate = candidate->next;
+    } while (candidate && candidate != task_list);
+
+    if (!selected) {
+        selected = task_list;
+    }
+    selected->state = K64_TASK_STATE_RUNNING;
+    selected->remaining_ticks = selected->base_timeslice;
+    selected->wait_ticks = 0;
+    current_task = selected;
 
     target_cr3 = current_task->cr3 ? current_task->cr3 : read_cr3();
     if (target_cr3 != read_cr3()) {
@@ -296,8 +315,15 @@ void k64_sched_dump_stats(void) {
     do {
         k64_term_write("  task=");
         k64_term_write_dec(t->id);
+        k64_term_write(t == current_task ? "*" : " ");
+        k64_term_write(" state=");
+        k64_term_write(task_state_name(t->state));
         k64_term_write(" prio=");
         k64_term_write_dec((uint64_t)t->priority);
+        k64_term_write(" slice=");
+        k64_term_write_dec(t->remaining_ticks);
+        k64_term_write("/");
+        k64_term_write_dec(t->base_timeslice);
         k64_term_write(" run=");
         k64_term_write_dec(t->runtime_ticks);
         k64_term_write(" wait=");

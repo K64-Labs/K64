@@ -6,6 +6,7 @@
 #define K64_SYSCALL_WRITEFILE 9ULL
 #define K64_SYSCALL_FBINFO 14ULL
 #define K64_SYSCALL_LISTDIR 18ULL
+#define K64_SYSCALL_PROCINFO 20ULL
 
 static int expect_fail(const char* name, int64_t rc) {
     if (rc >= 0) {
@@ -44,6 +45,11 @@ int main(int argc, char** argv) {
                                          (uint64_t)(uintptr_t)"/",
                                          (uint64_t)(uintptr_t)BAD_USER_PTR,
                                          64));
+    failures += expect_fail("proc_info bad output",
+                            k64_syscall3(K64_SYSCALL_PROCINFO,
+                                         0,
+                                         (uint64_t)(uintptr_t)BAD_USER_PTR,
+                                         0));
 
     fd = k64_open("/etc/motd");
     if (fd < 0) {

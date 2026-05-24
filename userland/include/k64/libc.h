@@ -5,6 +5,21 @@
 #define K64_STDIN  0
 #define K64_STDOUT 1
 #define K64_STDERR 2
+#define K64_PROC_PATH_MAX 96
+
+typedef struct {
+    uint64_t pid;
+    uint64_t parent_pid;
+    uint64_t task_id;
+    uint64_t state;
+    int64_t  exit_code;
+    uint64_t start_tick;
+    uint64_t end_tick;
+    uint64_t runtime_ticks;
+    uint64_t fault_vector;
+    uint64_t fault_rip;
+    char     path[K64_PROC_PATH_MAX];
+} k64_proc_info_t;
 
 typedef struct {
     uint32_t width;
@@ -48,6 +63,8 @@ int64_t  k64_spawn(const char* path, const char* args);
 int64_t  k64_list_dir(const char* path, char* out, size_t len);
 int64_t  k64_move(const char* src, const char* dst);
 int64_t  k64_getpid(void);
+int64_t  k64_proc_info(uint64_t pid, k64_proc_info_t* info);
+int64_t  k64_waitpid(uint64_t pid, int64_t* exit_code);
 uint64_t k64_uptime_ticks(void);
 size_t   k64_strlen(const char* text);
 int      k64_strcmp(const char* a, const char* b);

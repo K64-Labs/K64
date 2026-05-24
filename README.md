@@ -257,9 +257,11 @@ The scheduler now drives runtime work more directly than before. The important p
 
 - async services and async drivers are launched as worker tasks
 - worker tasks can yield or sleep on PIT ticks
-- timer IRQs perform round-robin task switching across runnable contexts
+- timer IRQs perform priority and wait-time aware task switching across runnable contexts
+- runnable tasks accumulate wait ticks, so the picker favors higher-priority work without permanently starving older ready tasks
+- `sched` output shows task state, current task marker, priority, remaining/base slice, run ticks, and wait ticks
 
-That still does not make K64 a full Unix-style process runtime. It remains a small kernel with cooperative service logic and a simple round-robin scheduler, not a full fork/exec/process-tree model.
+That still does not make K64 a full Unix-style process runtime. It remains a small kernel with cooperative service logic and a compact priority/aging scheduler, not a full fork/exec/process-tree model.
 
 ### User mode and syscalls
 
@@ -303,8 +305,12 @@ Current syscall ABI:
 - `17`: `read_key_nonblock()`
 - `18`: `list_dir(path, out, len)`
 - `19`: `move(src, dst)`
+- `20`: `proc_info(pid, out)` where `pid = 0` means the current process
+- `21`: `waitpid(pid, out_exit_code)` returning `-2` while the process is still running
 
-This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64FS`, save complete files, use structured key input, move files, list directories, spawn another `/ex` program through the kernel worker queue, and draw text-mode cell regions. It is not a POSIX-compatible libc and there is no Unix process tree, dynamic linker, pipe model, or fork/exec ABI. The current process table is accounting and lifecycle visibility for K64-native ELF runs.
+This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64FS`, save complete files, use structured key input, move files, list directories, spawn another `/ex` program through the kernel worker queue, query process metadata, wait for completed process records, and draw text-mode cell regions. It is not a POSIX-compatible libc and there is no Unix process tree, dynamic linker, pipe model, or fork/exec ABI.
+
+The process model now records a stable PID, parent PID, scheduler task ID, state, exit code, start/end ticks, runtime ticks, fault vector, fault RIP, and image path for each K64-native ELF run. `spawn()` returns the child PID rather than an internal queue slot, so user programs can treat spawned work as a process identity even though execution is still backed by the current kernel worker queue.
 
 Security boundary:
 
@@ -329,8 +335,9 @@ The current libc layer is intentionally tiny:
 
 - `_start` calls `main()` and exits through the kernel syscall ABI
 - syscall wrappers for console output, file open/read/write-file, directory listing, file move, key events, cursor control, text cell blitting, process spawning, getpid, and uptime
+- process wrappers for `proc_info()` and `waitpid()`
 - minimal string, memory, decimal, and hexadecimal print helpers
-- a ring-3 `libctest.elf` smoke program that validates libc helpers and read-only file I/O
+- ring-3 smoke programs that validate libc helpers, read-only file I/O, process metadata, wait semantics, and checked syscall memory failures
 
 This is not a full C library yet. It is the first stable nongraphical ABI surface for growing a real K64 userland without writing every program in assembly.
 

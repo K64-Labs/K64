@@ -23,6 +23,28 @@
 #define K64_SYSCALL_READKEY_NB 17ULL
 #define K64_SYSCALL_LISTDIR 18ULL
 #define K64_SYSCALL_MOVE 19ULL
+#define K64_SYSCALL_PROCINFO 20ULL
+#define K64_SYSCALL_WAITPID 21ULL
+
+#define K64_PROC_STATE_EMPTY 0ULL
+#define K64_PROC_STATE_RUNNING 1ULL
+#define K64_PROC_STATE_EXITED 2ULL
+#define K64_PROC_STATE_FAULTED 3ULL
+#define K64_PROC_PATH_MAX 96
+
+typedef struct {
+    uint64_t pid;
+    uint64_t parent_pid;
+    uint64_t task_id;
+    uint64_t state;
+    int64_t  exit_code;
+    uint64_t start_tick;
+    uint64_t end_tick;
+    uint64_t runtime_ticks;
+    uint64_t fault_vector;
+    uint64_t fault_rip;
+    char     path[K64_PROC_PATH_MAX];
+} k64_proc_info_t;
 
 void k64_usermode_init(void);
 int64_t k64_usermode_execute(const k64_vm_space_t* space, uint64_t entry, uint64_t user_stack_top);
@@ -30,6 +52,13 @@ int64_t k64_usermode_execute_named(const k64_vm_space_t* space,
                                    uint64_t entry,
                                    uint64_t user_stack_top,
                                    const char* path);
+int64_t k64_usermode_execute_named_ex(const k64_vm_space_t* space,
+                                      uint64_t entry,
+                                      uint64_t user_stack_top,
+                                      const char* path,
+                                      uint64_t parent_pid,
+                                      uint64_t pid);
+uint64_t k64_usermode_next_pid(void);
 bool k64_usermode_is_active(void);
 void k64_usermode_dump_processes(void);
 void k64_usermode_handle_fault(uint64_t vec,

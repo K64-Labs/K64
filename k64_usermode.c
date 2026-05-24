@@ -83,6 +83,8 @@ typedef struct {
 typedef struct {
     bool     used;
     uint64_t pid;
+    uint64_t parent_pid;
+    uint64_t task_id;
     k64_user_process_state_t state;
     int64_t  exit_code;
     uint64_t entry;
@@ -136,6 +138,8 @@ static uint64_t next_user_pid = 5000;
 
 typedef struct {
     bool used;
+    uint64_t pid;
+    uint64_t parent_pid;
     char path[256];
     char args[K64_USER_SPAWN_ARGS_MAX];
 } k64_user_spawn_ctx_t;
@@ -196,8 +200,17 @@ static void process_copy_path(char* dst, const char* src) {
     dst[i] = '\0';
 }
 
-static int process_alloc(const char* path, uint64_t entry, uint64_t cr3) {
+uint64_t k64_usermode_next_pid(void) {
+    return next_user_pid++;
+}
+
+static int process_alloc(const char* path,
+                         uint64_t entry,
+                         uint64_t cr3,
+                         uint64_t parent_pid,
+                         uint64_t pid) {
     int free_slot = -1;
+    k64_task_t* task = k64_sched_current_task();
 
     for (int i = 0; i < K64_USER_PROCESS_MAX; ++i) {
         if (!process_table[i].used) {
@@ -220,7 +233,12 @@ static int process_alloc(const char* path, uint64_t entry, uint64_t cr3) {
     }
 
     process_table[free_slot].used = true;
-    process_table[free_slot].pid = next_user_pid++;
+    process_table[free_slot].pid = pid ? pid : k64_usermode_next_pid();
+    if (process_table[free_slot].pid >= next_user_pid) {
+        next_user_pid = process_table[free_slot].pid + 1;
+    }
+    process_table[free_slot].parent_pid = parent_pid;
+    process_table[free_slot].task_id = task ? task->id : 0;
     process_table[free_slot].state = K64_USER_PROCESS_RUNNING;
     process_table[free_slot].exit_code = -1;
     process_table[free_slot].entry = entry;
@@ -253,6 +271,56 @@ static void process_finish(int index, k64_user_process_state_t state, int64_t ex
     process_table[index].state = state;
     process_table[index].exit_code = exit_code;
     process_table[index].end_tick = k64_pit_get_ticks();
+}
+
+static int process_find_pid(uint64_t pid) {
+    if (pid == 0 && active_ctx.process_index >= 0) {
+        return active_ctx.process_index;
+    }
+    for (int i = 0; i < K64_USER_PROCESS_MAX; ++i) {
+        if (process_table[i].used && process_table[i].pid == pid) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static uint64_t current_process_pid(void) {
+    if (active_ctx.process_index < 0 ||
+        active_ctx.process_index >= K64_USER_PROCESS_MAX ||
+        !process_table[active_ctx.process_index].used) {
+        return 0;
+    }
+    return process_table[active_ctx.process_index].pid;
+}
+
+static void process_fill_info(int index, k64_proc_info_t* out) {
+    const k64_user_process_t* proc;
+    uint64_t now;
+
+    if (!out) {
+        return;
+    }
+    for (size_t i = 0; i < sizeof(*out); ++i) {
+        ((uint8_t*)out)[i] = 0;
+    }
+    if (index < 0 || index >= K64_USER_PROCESS_MAX || !process_table[index].used) {
+        return;
+    }
+
+    proc = &process_table[index];
+    now = k64_pit_get_ticks();
+    out->pid = proc->pid;
+    out->parent_pid = proc->parent_pid;
+    out->task_id = proc->task_id;
+    out->state = (uint64_t)proc->state;
+    out->exit_code = proc->exit_code;
+    out->start_tick = proc->start_tick;
+    out->end_tick = proc->end_tick;
+    out->runtime_ticks = (proc->end_tick ? proc->end_tick : now) - proc->start_tick;
+    out->fault_vector = proc->fault_vector;
+    out->fault_rip = proc->fault_rip;
+    process_copy_path(out->path, proc->path);
 }
 
 static bool user_read(uint64_t user_ptr, void* out, size_t size) {
@@ -370,7 +438,7 @@ static void spawn_worker(void* arg) {
     if (!ctx || !ctx->used) {
         return;
     }
-    (void)k64_elf_spawn_user_path_args(ctx->path, ctx->args);
+    (void)k64_elf_spawn_user_path_args_ex(ctx->path, ctx->args, ctx->parent_pid, ctx->pid);
     ctx->used = false;
 }
 
@@ -378,13 +446,15 @@ static int64_t queue_spawn(const char* path, const char* args) {
     for (int i = 0; i < K64_USER_SPAWN_MAX; ++i) {
         if (!spawn_ctx[i].used) {
             spawn_ctx[i].used = true;
+            spawn_ctx[i].pid = k64_usermode_next_pid();
+            spawn_ctx[i].parent_pid = current_process_pid();
             copy_bounded(spawn_ctx[i].path, sizeof(spawn_ctx[i].path), path);
             copy_bounded(spawn_ctx[i].args, sizeof(spawn_ctx[i].args), args);
             if (!k64_task_create_arg(spawn_worker, &spawn_ctx[i], 2, 0)) {
                 spawn_ctx[i].used = false;
                 return -1;
             }
-            return (int64_t)(i + 1);
+            return (int64_t)spawn_ctx[i].pid;
         }
     }
     return -1;
@@ -706,6 +776,32 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             }
             return queue_spawn(path, args);
         }
+        case K64_SYSCALL_PROCINFO: {
+            k64_proc_info_t info;
+            int index = process_find_pid(frame->rdi);
+
+            if (index < 0 || !frame->rsi) {
+                return -1;
+            }
+            process_fill_info(index, &info);
+            return user_write(frame->rsi, &info, sizeof(info)) ? 0 : -1;
+        }
+        case K64_SYSCALL_WAITPID: {
+            int index = process_find_pid(frame->rdi);
+            int64_t exit_code;
+
+            if (index < 0) {
+                return -1;
+            }
+            if (process_table[index].state == K64_USER_PROCESS_RUNNING) {
+                return -2;
+            }
+            exit_code = process_table[index].exit_code;
+            if (frame->rsi && !user_write(frame->rsi, &exit_code, sizeof(exit_code))) {
+                return -1;
+            }
+            return 0;
+        }
         default:
             return -1;
     }
@@ -730,13 +826,22 @@ int64_t k64_usermode_execute_named(const k64_vm_space_t* space,
                                    uint64_t entry,
                                    uint64_t user_stack_top,
                                    const char* path) {
+    return k64_usermode_execute_named_ex(space, entry, user_stack_top, path, 0, 0);
+}
+
+int64_t k64_usermode_execute_named_ex(const k64_vm_space_t* space,
+                                      uint64_t entry,
+                                      uint64_t user_stack_top,
+                                      const char* path,
+                                      uint64_t parent_pid,
+                                      uint64_t pid) {
     int process_index;
 
     if (!space || !space->present || !entry || !user_stack_top) {
         return -1;
     }
 
-    process_index = process_alloc(path, entry, space->cr3);
+    process_index = process_alloc(path, entry, space->cr3, parent_pid, pid);
     if (process_index < 0) {
         k64_term_write("User process table is full\n");
         return -1;
@@ -764,7 +869,7 @@ bool k64_usermode_is_active(void) {
 }
 
 void k64_usermode_dump_processes(void) {
-    k64_term_write("PID   STATE    EXIT  TICKS  IMAGE\n");
+    k64_term_write("PID   STATE    PPID  TASK  EXIT  TICKS  IMAGE\n");
     for (int i = 0; i < K64_USER_PROCESS_MAX; ++i) {
         uint64_t ticks;
 
@@ -782,6 +887,10 @@ void k64_usermode_dump_processes(void) {
         } else {
             k64_term_write("  ");
         }
+        k64_term_write_dec(process_table[i].parent_pid);
+        k64_term_write("  ");
+        k64_term_write_dec(process_table[i].task_id);
+        k64_term_write("  ");
         k64_term_write_dec((uint64_t)(uint32_t)process_table[i].exit_code);
         k64_term_write("  ");
         k64_term_write_dec(ticks);

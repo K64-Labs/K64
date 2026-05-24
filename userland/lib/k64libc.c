@@ -20,6 +20,8 @@
 #define K64_SYSCALL_READKEY_NB 17ULL
 #define K64_SYSCALL_LISTDIR 18ULL
 #define K64_SYSCALL_MOVE 19ULL
+#define K64_SYSCALL_PROCINFO 20ULL
+#define K64_SYSCALL_WAITPID 21ULL
 
 int64_t k64_syscall3(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2) {
     int64_t ret;
@@ -133,6 +135,20 @@ int64_t k64_move(const char* src, const char* dst) {
 
 int64_t k64_getpid(void) {
     return k64_syscall3(K64_SYSCALL_GETPID, 0, 0, 0);
+}
+
+int64_t k64_proc_info(uint64_t pid, k64_proc_info_t* info) {
+    return k64_syscall3(K64_SYSCALL_PROCINFO,
+                        pid,
+                        (uint64_t)(uintptr_t)info,
+                        0);
+}
+
+int64_t k64_waitpid(uint64_t pid, int64_t* exit_code) {
+    return k64_syscall3(K64_SYSCALL_WAITPID,
+                        pid,
+                        (uint64_t)(uintptr_t)exit_code,
+                        0);
 }
 
 uint64_t k64_uptime_ticks(void) {
