@@ -54,7 +54,6 @@ void k64_kernel_main(void) {
         K64_LOG_ERROR("Invalid Multiboot magic.");
         k64_panic("Invalid Multiboot magic.");
     }
-
     K64_LOG_INFO("Initializing IDT...");
     k64_idt_init();
 

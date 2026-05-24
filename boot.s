@@ -8,7 +8,6 @@
     .long MULTIBOOT_MAGIC
     .long MULTIBOOT_FLAGS
     .long MULTIBOOT_CHECKSUM
-
 .section .bss
 .globl k64_mb_magic
 k64_mb_magic: .long 0
@@ -118,7 +117,7 @@ setup_paging:
     or  $0x003, %eax          /* P,RW */
     mov %eax, (%edi)
 
-    /* PDPT[0] = 1GiB page @0 */
+    /* Identity-map the first 1GiB. */
     mov $pdpt_table, %edi
     mov $0x00000000, %eax
     or  $0x083, %eax          /* P,RW,PS */

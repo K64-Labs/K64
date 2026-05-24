@@ -14,6 +14,7 @@ typedef enum {
     K64_KEY_UP,
     K64_KEY_DOWN,
     K64_KEY_TAB,
+    K64_KEY_ESCAPE,
 } k64_key_type_t;
 
 typedef struct {

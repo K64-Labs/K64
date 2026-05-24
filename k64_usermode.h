@@ -14,6 +14,15 @@
 #define K64_SYSCALL_UPTIME 8ULL
 #define K64_SYSCALL_WRITEFILE 9ULL
 #define K64_SYSCALL_CLEAR 10ULL
+#define K64_SYSCALL_READKEY 11ULL
+#define K64_SYSCALL_CURSOR 12ULL
+#define K64_SYSCALL_TERMSIZE 13ULL
+#define K64_SYSCALL_FBINFO 14ULL
+#define K64_SYSCALL_FBBLIT 15ULL
+#define K64_SYSCALL_SPAWN 16ULL
+#define K64_SYSCALL_READKEY_NB 17ULL
+#define K64_SYSCALL_LISTDIR 18ULL
+#define K64_SYSCALL_MOVE 19ULL
 
 void k64_usermode_init(void);
 int64_t k64_usermode_execute(const k64_vm_space_t* space, uint64_t entry, uint64_t user_stack_top);

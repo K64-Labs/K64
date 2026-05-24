@@ -193,6 +193,41 @@ int k64_term_rows(void) {
     return K64_ROWS;
 }
 
+uint8_t k64_term_color(void) {
+    return current_color;
+}
+
+void k64_term_write_cell(int x, int y, char ch, uint8_t color) {
+    if (!screen_enabled) {
+        return;
+    }
+    if (x < 0 || x >= K64_COLS || y < 0 || y >= K64_ROWS) {
+        return;
+    }
+    VGA[y * K64_COLS + x] = vga_entry(ch, color);
+}
+
+void k64_term_blit_cells(int x, int y, int w, int h, const uint16_t* cells, size_t count) {
+    size_t pos = 0;
+
+    if (!screen_enabled || !cells || w <= 0 || h <= 0) {
+        return;
+    }
+    for (int row = 0; row < h; ++row) {
+        int sy = y + row;
+        for (int col = 0; col < w; ++col) {
+            int sx = x + col;
+            if (pos >= count) {
+                return;
+            }
+            if (sx >= 0 && sx < K64_COLS && sy >= 0 && sy < K64_ROWS) {
+                VGA[sy * K64_COLS + sx] = cells[pos];
+            }
+            pos++;
+        }
+    }
+}
+
 bool k64_term_screen_start(void) {
     screen_enabled = true;
     k64_term_enable_cursor();

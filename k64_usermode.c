@@ -1,5 +1,6 @@
 #include "k64_usermode.h"
 #include "k64_fs.h"
+#include "k64_elf.h"
 #include "k64_idt.h"
 #include "k64_keyboard.h"
 #include "k64_log.h"
@@ -14,6 +15,26 @@
 #define K64_USER_CODE_SELECTOR 0x23
 #define K64_USER_PROCESS_MAX 32
 #define K64_USER_PROCESS_PATH_MAX 96
+#define K64_USER_SPAWN_MAX 8
+#define K64_USER_SPAWN_ARGS_MAX 256
+
+typedef struct {
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint32_t format;
+    uint32_t cell_size;
+    uint32_t flags;
+} k64_user_fb_info_t;
+
+typedef struct {
+    int32_t x;
+    int32_t y;
+    uint32_t width;
+    uint32_t height;
+    const uint16_t* cells;
+    uint64_t count;
+} k64_user_fb_blit_t;
 
 typedef enum {
     K64_USER_PROCESS_EMPTY = 0,
@@ -106,6 +127,14 @@ static uint8_t syscall_stack[16384] __attribute__((aligned(16)));
 static k64_user_exec_context_t active_ctx;
 static k64_user_process_t process_table[K64_USER_PROCESS_MAX];
 static uint64_t next_user_pid = 5000;
+
+typedef struct {
+    bool used;
+    char path[256];
+    char args[K64_USER_SPAWN_ARGS_MAX];
+} k64_user_spawn_ctx_t;
+
+static k64_user_spawn_ctx_t spawn_ctx[K64_USER_SPAWN_MAX];
 
 static void set_tss_descriptor(uint64_t base, uint32_t limit) {
     uint64_t low;
@@ -259,6 +288,48 @@ static int alloc_fd(const uint8_t* data, size_t size) {
     return -1;
 }
 
+static void copy_bounded(char* dst, size_t dst_size, const char* src) {
+    size_t i = 0;
+
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    if (!src) {
+        src = "";
+    }
+    while (src[i] && i + 1 < dst_size) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+static void spawn_worker(void* arg) {
+    k64_user_spawn_ctx_t* ctx = (k64_user_spawn_ctx_t*)arg;
+
+    if (!ctx || !ctx->used) {
+        return;
+    }
+    (void)k64_elf_spawn_user_path_args(ctx->path, ctx->args);
+    ctx->used = false;
+}
+
+static int64_t queue_spawn(const char* path, const char* args) {
+    for (int i = 0; i < K64_USER_SPAWN_MAX; ++i) {
+        if (!spawn_ctx[i].used) {
+            spawn_ctx[i].used = true;
+            copy_bounded(spawn_ctx[i].path, sizeof(spawn_ctx[i].path), path);
+            copy_bounded(spawn_ctx[i].args, sizeof(spawn_ctx[i].args), args);
+            if (!k64_task_create_arg(spawn_worker, &spawn_ctx[i], 2, 0)) {
+                spawn_ctx[i].used = false;
+                return -1;
+            }
+            return (int64_t)(i + 1);
+        }
+    }
+    return -1;
+}
+
 static char read_stdin_char_blocking(void) {
     char ch;
 
@@ -271,6 +342,89 @@ static char read_stdin_char_blocking(void) {
         }
         __asm__ volatile("pause");
     }
+}
+
+static bool serial_get_key_event(k64_key_event_t* event) {
+    static int esc_state = 0;
+    char c = 0;
+
+    if (!event || !k64_serial_get_char(&c)) {
+        return false;
+    }
+    event->type = K64_KEY_NONE;
+    event->ch = 0;
+    if (esc_state == 0) {
+        if (c == 27) {
+            esc_state = 1;
+            return false;
+        }
+        if (c == '\n' || c == '\r') {
+            event->type = K64_KEY_ENTER;
+            event->ch = '\n';
+            return true;
+        }
+        if (c == '\b' || c == 127) {
+            event->type = K64_KEY_BACKSPACE;
+            event->ch = '\b';
+            return true;
+        }
+        if (c == '\t') {
+            event->type = K64_KEY_TAB;
+            event->ch = '\t';
+            return true;
+        }
+        event->type = K64_KEY_CHAR;
+        event->ch = c;
+        return true;
+    }
+    if (esc_state == 1) {
+        if (c == '[') {
+            esc_state = 2;
+            return false;
+        }
+        esc_state = 0;
+        event->type = K64_KEY_CHAR;
+        event->ch = c;
+        return true;
+    }
+    esc_state = 0;
+    switch (c) {
+        case 'A': event->type = K64_KEY_UP; return true;
+        case 'B': event->type = K64_KEY_DOWN; return true;
+        case 'C': event->type = K64_KEY_RIGHT; return true;
+        case 'D': event->type = K64_KEY_LEFT; return true;
+        case '3': {
+            char tail = 0;
+            if (k64_serial_get_char(&tail) && tail == '~') {
+                event->type = K64_KEY_DELETE;
+                return true;
+            }
+            break;
+        }
+        default:
+            break;
+    }
+    return false;
+}
+
+static uint64_t read_key_event_blocking(void) {
+    k64_key_event_t event;
+
+    for (;;) {
+        if (serial_get_key_event(&event) || k64_keyboard_get_event(&event)) {
+            return ((uint64_t)(uint8_t)event.ch << 8) | ((uint64_t)event.type & 0xFFu);
+        }
+        __asm__ volatile("pause");
+    }
+}
+
+static int64_t read_key_event_nonblocking(void) {
+    k64_key_event_t event;
+
+    if (serial_get_key_event(&event) || k64_keyboard_get_event(&event)) {
+        return (int64_t)(((uint64_t)(uint8_t)event.ch << 8) | ((uint64_t)event.type & 0xFFu));
+    }
+    return 0;
 }
 
 int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
@@ -389,6 +543,82 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
         case K64_SYSCALL_CLEAR:
             k64_term_clear();
             return 0;
+        case K64_SYSCALL_READKEY:
+            return (int64_t)read_key_event_blocking();
+        case K64_SYSCALL_READKEY_NB:
+            return read_key_event_nonblocking();
+        case K64_SYSCALL_CURSOR:
+            k64_term_set_cursor((int)frame->rdi, (int)frame->rsi);
+            return 0;
+        case K64_SYSCALL_TERMSIZE:
+            return (int64_t)((uint64_t)(uint16_t)k64_term_cols() |
+                             ((uint64_t)(uint16_t)k64_term_rows() << 16));
+        case K64_SYSCALL_FBINFO: {
+            k64_user_fb_info_t* info = (k64_user_fb_info_t*)(uintptr_t)frame->rdi;
+            if (!info) {
+                return -1;
+            }
+            info->width = (uint32_t)k64_term_cols();
+            info->height = (uint32_t)k64_term_rows();
+            info->pitch = (uint32_t)k64_term_cols();
+            info->format = 1; /* VGA text cells: low byte char, high byte color. */
+            info->cell_size = sizeof(uint16_t);
+            info->flags = 1;
+            return 0;
+        }
+        case K64_SYSCALL_FBBLIT: {
+            k64_user_fb_blit_t* req = (k64_user_fb_blit_t*)(uintptr_t)frame->rdi;
+            uint64_t max_cells;
+            if (!req || !req->cells || req->width == 0 || req->height == 0) {
+                return -1;
+            }
+            max_cells = (uint64_t)req->width * (uint64_t)req->height;
+            if (req->count < max_cells) {
+                return -1;
+            }
+            k64_term_blit_cells(req->x,
+                                req->y,
+                                (int)req->width,
+                                (int)req->height,
+                                req->cells,
+                                (size_t)max_cells);
+            return (int64_t)max_cells;
+        }
+        case K64_SYSCALL_LISTDIR: {
+            char path[256];
+            char* out = (char*)(uintptr_t)frame->rsi;
+            int out_size = (int)frame->rdx;
+
+            if (!copy_user_string((const char*)(uintptr_t)frame->rdi, path, sizeof(path)) ||
+                !out || out_size <= 0) {
+                return -1;
+            }
+            return k64_fs_ls(path, out, out_size) ? 0 : -1;
+        }
+        case K64_SYSCALL_MOVE: {
+            char src[256];
+            char dst[256];
+
+            if (!copy_user_string((const char*)(uintptr_t)frame->rdi, src, sizeof(src)) ||
+                !copy_user_string((const char*)(uintptr_t)frame->rsi, dst, sizeof(dst))) {
+                return -1;
+            }
+            return k64_fs_move(src, dst) ? 0 : -1;
+        }
+        case K64_SYSCALL_SPAWN: {
+            char path[256];
+            char args[K64_USER_SPAWN_ARGS_MAX];
+
+            if (!copy_user_string((const char*)(uintptr_t)frame->rdi, path, sizeof(path))) {
+                return -1;
+            }
+            if (frame->rsi) {
+                (void)copy_user_string((const char*)(uintptr_t)frame->rsi, args, sizeof(args));
+            } else {
+                args[0] = '\0';
+            }
+            return queue_spawn(path, args);
+        }
         default:
             return -1;
     }

@@ -181,9 +181,9 @@ build/userland/%.o: userland/bin/%.c
 	mkdir -p build/userland
 	$(CC64) $(USER_CFLAGS) -c -o $@ $<
 
-$(EX_BUILD_DIR)/%.elf: build/userland/%.o $(USER_LIB_OBJS)
+$(EX_BUILD_DIR)/%.elf: build/userland/%.o $(USER_LIB_OBJS) Makefile
 	mkdir -p $(EX_BUILD_DIR)
-	$(LD) -nostdlib -static -e _start -Ttext 0x40100000 -o $@ build/userland/crt0.o $< build/userland/k64libc.o
+	$(LD) -nostdlib -static -e _start --image-base=0x40000000 -Ttext 0x40100000 -o $@ build/userland/crt0.o $< build/userland/k64libc.o
 
 $(K64_GRUB_K64FS_MOD): grub/k64fs.c tools/build_grub_k64fs.sh
 	mkdir -p build
@@ -257,7 +257,11 @@ $(K64FS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(USER_ELFS) $(K64_GRUB_ROOT_
 	mkdir -p $(K64FS_STAGE_ROOT)/k64s
 	mkdir -p $(K64FS_STAGE_ROOT)/k64m
 	mkdir -p $(K64FS_STAGE_ROOT)/ex
-	rsync -a $(K64FS_SRC_ROOT)/ $(K64FS_STAGE_ROOT)/
+	rsync -a \
+		--exclude '/ex/kdesk-*.elf' \
+		--exclude '/k64m/kdesk-*.k64m' \
+		--exclude '/k64s/kdesk.k64s' \
+		$(K64FS_SRC_ROOT)/ $(K64FS_STAGE_ROOT)/
 	cp $(K64_KERNEL_ELF) $(K64FS_STAGE_ROOT)/boot/$(K64_KERNEL_ELF)
 	cp $(K64_GRUB_ROOT_CFG) $(K64FS_STAGE_ROOT)/boot/grub/grub.cfg
 	cp $(K64_BOOT_AREA) $(K64FS_STAGE_ROOT)/boot/grub/k64-boot-area.bin

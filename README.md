@@ -292,8 +292,19 @@ Current syscall ABI:
 - `6`: `close(fd)`
 - `7`: `getpid()`
 - `8`: `uptime_ticks()`
+- `9`: `write_file(path, ptr, len)`
+- `10`: `clear_screen()`
+- `11`: `read_key()`
+- `12`: `set_cursor(x, y)`
+- `13`: `term_size()`
+- `14`: `fb_info(ptr)`
+- `15`: `fb_blit(ptr)`
+- `16`: `spawn(path, args)`
+- `17`: `read_key_nonblock()`
+- `18`: `list_dir(path, out, len)`
+- `19`: `move(src, dst)`
 
-This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64FS`, ask for their process id, and read the kernel tick counter. It is not yet a full userspace runtime with concurrent user processes, writable file descriptors, process spawning, or a POSIX-compatible libc. The current process table is accounting and lifecycle visibility for synchronous user ELF runs.
+This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64FS`, save complete files, use structured key input, move files, list directories, spawn another `/ex` program through the kernel worker queue, and draw text-mode cell regions. It is not a POSIX-compatible libc and there is no Unix process tree, dynamic linker, pipe model, or fork/exec ABI. The current process table is accounting and lifecycle visibility for K64-native ELF runs.
 
 ### Userland libc seed
 
@@ -309,11 +320,11 @@ K64 now has a small native userland build path for C programs. The build system 
 The current libc layer is intentionally tiny:
 
 - `_start` calls `main()` and exits through the kernel syscall ABI
-- syscall wrappers for write, open, read, close, getpid, and uptime
+- syscall wrappers for console output, file open/read/write-file, directory listing, file move, key events, cursor control, text cell blitting, process spawning, getpid, and uptime
 - minimal string, memory, decimal, and hexadecimal print helpers
 - a ring-3 `libctest.elf` smoke program that validates libc helpers and read-only file I/O
 
-This is not a full C library yet. It is the first stable ABI surface for growing a real userland without writing every program in assembly.
+This is not a full C library yet. It is the first stable nongraphical ABI surface for growing a real K64 userland without writing every program in assembly.
 
 ### Physical memory management
 
@@ -1203,7 +1214,7 @@ Keyboard layout switching supports:
 - `us`
 - `de`
 
-The active keyboard layout is loaded from `/etc/keyboard/layout.cfg` when the shell starts. Running `layout us` or `layout de` changes the live layout, writes the new value back to that config file, and syncs the mounted root filesystem when persistence is available.
+The active keyboard layout is loaded from `/etc/keyboard/layout.cfg` when the shell starts. Running `layout us` or `layout de` changes the live layout, writes the new value back to that config file, and syncs the mounted root filesystem when persistence is available. The PS/2 keyboard path tracks Shift, Ctrl, Esc, and AltGr/Right-Alt; the German layout includes AltGr combinations such as `AltGr+Q` for `@`, bracket/brace keys, backslash, pipe, and tilde.
 
 ### Built-in shell commands
 
@@ -1320,11 +1331,10 @@ Important limits:
 - no relocations beyond simple PT_LOAD copying
 - no dynamic linker
 - no symbol resolution
-- no argv/envp
 - only `/ex/*.elf` currently use the ring-3 path
 - ELF-backed services and drivers still execute on the kernel side
-- file access through the syscall layer is read-only today
-- user processes are recorded and inspectable, but still run synchronously
+- file writes are whole-file saves, not writable file descriptors
+- user processes are recorded and inspectable, and `spawn()` queues another `/ex` program, but K64 is not a Unix-style process tree
 
 So this is now a real split execution model: user applications in `/ex` can run in ring 3, but the overall ELF runtime is still far smaller than a complete Unix-style process environment.
 
@@ -1349,7 +1359,7 @@ hello
 
 `args.elf` demonstrates normal shell-style argument passing. For example, `args alpha beta` runs `/ex/args.elf` and receives `argc=3`.
 
-`edit.elf` is a small nano-like text editor for K64. Run it as `edit /tmp/note.txt`, type text, use `Esc+s` or `@s` to save, and `Esc+q` or `@q` to quit. The editor uses userland stdin and write-file syscalls, so it runs as a normal `/ex` program rather than a kernel built-in.
+`edit.elf` is a small nano-like text editor for K64. Run it as `edit /tmp/note.txt`, type text, use the arrow keys to move, `Enter` for new lines, `Backspace`/`Delete` for editing, `Ctrl-S` or `@s` to save, and `Ctrl-Q` or `@q` to quit. The editor uses userland key-event, cursor, stdin, and write-file syscalls, so it runs as a normal `/ex` program rather than a kernel built-in.
 
 `libctest.elf` is also built from C and exercises the userland libc shim in ring 3. It checks string helpers, memory helpers, file open/read/close, process IDs, and uptime output.
 

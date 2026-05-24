@@ -6,6 +6,24 @@
 #define K64_STDOUT 1
 #define K64_STDERR 2
 
+typedef struct {
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint32_t format;
+    uint32_t cell_size;
+    uint32_t flags;
+} k64_fb_info_t;
+
+typedef struct {
+    int32_t x;
+    int32_t y;
+    uint32_t width;
+    uint32_t height;
+    const uint16_t* cells;
+    uint64_t count;
+} k64_fb_blit_t;
+
 int      main(int argc, char** argv);
 void     k64_exit(int code) __attribute__((noreturn));
 int64_t  k64_syscall3(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2);
@@ -19,6 +37,16 @@ int64_t  k64_close(int fd);
 int64_t  k64_read_stdin(void* data, size_t len);
 int64_t  k64_write_file(const char* path, const void* data, size_t len);
 void     k64_clear_screen(void);
+int64_t  k64_read_key(void);
+int64_t  k64_read_key_nonblock(void);
+void     k64_set_cursor(int x, int y);
+int      k64_term_cols(void);
+int      k64_term_rows(void);
+int64_t  k64_fb_info(k64_fb_info_t* info);
+int64_t  k64_fb_blit(const k64_fb_blit_t* blit);
+int64_t  k64_spawn(const char* path, const char* args);
+int64_t  k64_list_dir(const char* path, char* out, size_t len);
+int64_t  k64_move(const char* src, const char* dst);
 int64_t  k64_getpid(void);
 uint64_t k64_uptime_ticks(void);
 size_t   k64_strlen(const char* text);

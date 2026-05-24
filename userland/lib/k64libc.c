@@ -11,6 +11,15 @@
 #define K64_SYSCALL_UPTIME 8ULL
 #define K64_SYSCALL_WRITEFILE 9ULL
 #define K64_SYSCALL_CLEAR 10ULL
+#define K64_SYSCALL_READKEY 11ULL
+#define K64_SYSCALL_CURSOR 12ULL
+#define K64_SYSCALL_TERMSIZE 13ULL
+#define K64_SYSCALL_FBINFO 14ULL
+#define K64_SYSCALL_FBBLIT 15ULL
+#define K64_SYSCALL_SPAWN 16ULL
+#define K64_SYSCALL_READKEY_NB 17ULL
+#define K64_SYSCALL_LISTDIR 18ULL
+#define K64_SYSCALL_MOVE 19ULL
 
 int64_t k64_syscall3(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2) {
     int64_t ret;
@@ -69,6 +78,57 @@ int64_t k64_write_file(const char* path, const void* data, size_t len) {
 
 void k64_clear_screen(void) {
     (void)k64_syscall3(K64_SYSCALL_CLEAR, 0, 0, 0);
+}
+
+int64_t k64_read_key(void) {
+    return k64_syscall3(K64_SYSCALL_READKEY, 0, 0, 0);
+}
+
+int64_t k64_read_key_nonblock(void) {
+    return k64_syscall3(K64_SYSCALL_READKEY_NB, 0, 0, 0);
+}
+
+void k64_set_cursor(int x, int y) {
+    (void)k64_syscall3(K64_SYSCALL_CURSOR, (uint64_t)(int64_t)x, (uint64_t)(int64_t)y, 0);
+}
+
+int k64_term_cols(void) {
+    int64_t packed = k64_syscall3(K64_SYSCALL_TERMSIZE, 0, 0, 0);
+    return packed < 0 ? 80 : (int)(packed & 0xFFFF);
+}
+
+int k64_term_rows(void) {
+    int64_t packed = k64_syscall3(K64_SYSCALL_TERMSIZE, 0, 0, 0);
+    return packed < 0 ? 25 : (int)((packed >> 16) & 0xFFFF);
+}
+
+int64_t k64_fb_info(k64_fb_info_t* info) {
+    return k64_syscall3(K64_SYSCALL_FBINFO, (uint64_t)(uintptr_t)info, 0, 0);
+}
+
+int64_t k64_fb_blit(const k64_fb_blit_t* blit) {
+    return k64_syscall3(K64_SYSCALL_FBBLIT, (uint64_t)(uintptr_t)blit, 0, 0);
+}
+
+int64_t k64_spawn(const char* path, const char* args) {
+    return k64_syscall3(K64_SYSCALL_SPAWN,
+                        (uint64_t)(uintptr_t)path,
+                        (uint64_t)(uintptr_t)args,
+                        0);
+}
+
+int64_t k64_list_dir(const char* path, char* out, size_t len) {
+    return k64_syscall3(K64_SYSCALL_LISTDIR,
+                        (uint64_t)(uintptr_t)path,
+                        (uint64_t)(uintptr_t)out,
+                        (uint64_t)len);
+}
+
+int64_t k64_move(const char* src, const char* dst) {
+    return k64_syscall3(K64_SYSCALL_MOVE,
+                        (uint64_t)(uintptr_t)src,
+                        (uint64_t)(uintptr_t)dst,
+                        0);
 }
 
 int64_t k64_getpid(void) {

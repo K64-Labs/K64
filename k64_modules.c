@@ -121,7 +121,7 @@ static bool rootfs_driver_start(k64_driver_t* driver) {
     if (!ctx || !ctx->entry_path[0]) {
         return false;
     }
-    return k64_elf_execute_path(ctx->entry_path);
+    return k64_elf_execute_user_path(ctx->entry_path);
 }
 
 static void build_rootfs_path(char* dst, size_t dst_size, const char* dir, const char* name) {

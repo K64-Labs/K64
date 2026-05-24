@@ -124,7 +124,10 @@ class Guest:
         self.sock = None
 
     def __enter__(self):
-        if os.name == "posix" and termios is not None:
+        serial_mode = os.environ.get("K64_SMOKE_SERIAL", "").lower()
+        if serial_mode == "tcp" or os.environ.get("WSL_DISTRO_NAME"):
+            self._start_tcp()
+        elif os.name == "posix" and termios is not None:
             self._start_pty()
         else:
             self._start_tcp()
@@ -208,19 +211,34 @@ class Guest:
 
     def send(self, text):
         data = text.encode("utf-8")
-        if self.serial_fd is not None:
-            os.write(self.serial_fd, data)
-        else:
-            self.sock.sendall(data)
+        for byte in data:
+            chunk = bytes([byte])
+            if self.serial_fd is not None:
+                os.write(self.serial_fd, chunk)
+            else:
+                self.sock.sendall(chunk)
+            time.sleep(0.002)
 
     def command(self, cmd, expected, timeout=15):
         captured = ""
         self.drain()
         self.send(cmd + "\n")
         captured += self.read_until(cmd, timeout)
-        if expected != PROMPT_NEEDLE:
-            captured += self.read_until(expected, timeout)
-        captured += self.read_until(PROMPT_NEEDLE, timeout)
+        command_pos = captured.find(cmd)
+        output_start = command_pos + len(cmd) if command_pos >= 0 else 0
+        expected_pos = captured.find(expected, output_start)
+        if expected != PROMPT_NEEDLE and expected_pos < 0:
+            try:
+                captured += self.read_until(expected, timeout)
+                expected_pos = captured.rfind(expected)
+            except RuntimeError as exc:
+                raise RuntimeError(f"{cmd!r} did not produce {expected!r}\nCaptured before timeout:\n{captured}") from exc
+        prompt_search_start = expected_pos + len(expected) if expected_pos >= 0 else output_start
+        if PROMPT_NEEDLE not in captured[prompt_search_start:]:
+            try:
+                captured += self.read_until(PROMPT_NEEDLE, timeout)
+            except RuntimeError as exc:
+                raise RuntimeError(f"{cmd!r} did not return to prompt\nCaptured before timeout:\n{captured}") from exc
         if expected not in captured:
             raise RuntimeError(f"{cmd!r} did not produce {expected!r}\nCaptured:\n{captured}")
         return captured
@@ -245,7 +263,7 @@ def main():
             net_device = os.environ.get("K64_SMOKE_NET_DEVICE", "rtl8139")
             net_driver = "e1000" if net_device.startswith("e1000") else "rtl8139"
             checks = [
-            ("help", "Commands:"),
+            ("help", "shutdown         - power down the machine"),
             ("echo shell-smoke-ok", "shell-smoke-ok"),
             ("sysfetch", "Kernel:"),
             ("uname", "K64"),
@@ -313,7 +331,7 @@ def main():
                 guest.command(cmd, expected)
 
             guest.send("edit /tmp/edit-smoke.txt\n")
-            guest.read_until("K64 edit - /tmp/edit-smoke.txt", 10)
+            guest.read_until("K64 edit", 10)
             guest.send("hello from edit\nsecond line")
             time.sleep(0.2)
             guest.send("@s")

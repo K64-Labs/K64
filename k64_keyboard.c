@@ -24,6 +24,7 @@ typedef struct {
     const char* name;
     char normal[128];
     char shifted[128];
+    char altgr[128];
 } k64_keyboard_map_t;
 
 static const k64_keyboard_map_t keyboard_maps[] = {
@@ -55,6 +56,7 @@ static const k64_keyboard_map_t keyboard_maps[] = {
             [50] = 'M', [51] = '<', [52] = '>', [53] = '?', [55] = '*',
             [57] = ' ',
         },
+        { 0 },
     },
     {
         "de",
@@ -84,10 +86,17 @@ static const k64_keyboard_map_t keyboard_maps[] = {
             [50] = 'M', [51] = ';', [52] = ':', [53] = '_', [55] = '*',
             [57] = ' ',
         },
+        {
+            [8] = '{', [9] = '[', [10] = ']', [11] = '}',
+            [12] = '\\', [16] = '@', [27] = '~', [43] = '\'',
+            [51] = '|',
+        },
     },
 };
 
 static bool shift_pressed = false;
+static bool ctrl_pressed = false;
+static bool altgr_pressed = false;
 static bool extended_scancode = false;
 static k64_keyboard_layout_t current_layout = K64_KEYBOARD_LAYOUT_US;
 static bool keyboard_enabled = false;
@@ -102,6 +111,7 @@ static void queue_event(k64_key_event_t event) {
 
 static k64_key_event_t translate_scancode(uint8_t sc) {
     k64_key_event_t event;
+    bool extended;
     event.type = K64_KEY_NONE;
     event.ch = 0;
 
@@ -110,14 +120,21 @@ static k64_key_event_t translate_scancode(uint8_t sc) {
         return event;
     }
 
+    extended = extended_scancode;
     if (sc & 0x80) {
         uint8_t make = sc & 0x7F;
         if (make == 42 || make == 54) {
             shift_pressed = false;
         }
-        if (extended_scancode) {
-            extended_scancode = false;
+        if (make == 29) {
+            ctrl_pressed = false;
         }
+        if (make == 56) {
+            if (extended) {
+                altgr_pressed = false;
+            }
+        }
+        extended_scancode = false;
         return event;
     }
 
@@ -125,8 +142,20 @@ static k64_key_event_t translate_scancode(uint8_t sc) {
         shift_pressed = true;
         return event;
     }
+    if (sc == 29) {
+        ctrl_pressed = true;
+        extended_scancode = false;
+        return event;
+    }
+    if (sc == 56) {
+        if (extended) {
+            altgr_pressed = true;
+        }
+        extended_scancode = false;
+        return event;
+    }
 
-    if (extended_scancode) {
+    if (extended) {
         extended_scancode = false;
         switch (sc) {
             case 0x48: event.type = K64_KEY_UP; return event;
@@ -138,8 +167,14 @@ static k64_key_event_t translate_scancode(uint8_t sc) {
         }
     }
 
+    if (sc == 1) {
+        event.type = K64_KEY_ESCAPE;
+        event.ch = 27;
+        return event;
+    }
     if (sc == 14) {
         event.type = K64_KEY_BACKSPACE;
+        event.ch = '\b';
         return event;
     }
     if (sc == 15) {
@@ -155,9 +190,22 @@ static k64_key_event_t translate_scancode(uint8_t sc) {
 
     if (sc < 128) {
         const k64_keyboard_map_t* map = &keyboard_maps[(int)current_layout];
-        char ch = shift_pressed ? map->shifted[sc] : map->normal[sc];
+        char ch = altgr_pressed && map->altgr[sc] ? map->altgr[sc] : (shift_pressed ? map->shifted[sc] : map->normal[sc]);
         if (ch) {
             event.type = K64_KEY_CHAR;
+            if (ctrl_pressed) {
+                if (ch >= 'a' && ch <= 'z') {
+                    ch = (char)(ch - 'a' + 1);
+                } else if (ch >= 'A' && ch <= 'Z') {
+                    ch = (char)(ch - 'A' + 1);
+                } else if (ch == '[') {
+                    ch = 27;
+                } else if (ch == '\\') {
+                    ch = 28;
+                } else if (ch == ']') {
+                    ch = 29;
+                }
+            }
             event.ch = ch;
         }
     }
@@ -184,7 +232,8 @@ bool k64_keyboard_get_char(char* out) {
         return false;
     }
     while (k64_keyboard_get_event(&event)) {
-        if (event.type == K64_KEY_CHAR || event.type == K64_KEY_ENTER || event.type == K64_KEY_BACKSPACE) {
+        if (event.type == K64_KEY_CHAR || event.type == K64_KEY_ENTER ||
+            event.type == K64_KEY_BACKSPACE || event.type == K64_KEY_ESCAPE) {
             *out = event.ch;
             return true;
         }
@@ -232,6 +281,8 @@ void k64_keyboard_driver_stop(void) {
     kbd_head = 0;
     kbd_tail = 0;
     shift_pressed = false;
+    ctrl_pressed = false;
+    altgr_pressed = false;
     extended_scancode = false;
     k64_pic_disable_irq(KBD_IRQ);
     K64_LOG_INFO("Keyboard driver stopped.");

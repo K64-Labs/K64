@@ -114,9 +114,13 @@ static bool rootfs_service_start(k64_service_t* service) {
     k64_rootfs_service_ctx_t* ctx = (k64_rootfs_service_ctx_t*)service->context;
 
     if (!ctx || !ctx->entry_path[0]) {
+        k64_term_write("[svc] rootfs service has no entry\n");
         return false;
     }
-    return k64_elf_execute_path(ctx->entry_path);
+    k64_term_write("[svc] exec ");
+    k64_term_write(ctx->entry_path);
+    k64_term_write("\n");
+    return k64_elf_execute_user_path(ctx->entry_path);
 }
 
 static bool rootfs_k64s_cb(const char* name, bool is_dir, void* ctx) {
@@ -161,7 +165,8 @@ static bool rootfs_k64s_cb(const char* name, bool is_dir, void* ctx) {
     if (k64_system_register_service(file->name,
                                     path,
                                     (k64_service_class_t)file->class_id,
-                                    file->flags,
+                                    (file->flags & K64_SYSTEM_FLAG_ASYNC ? K64_SERVICE_FLAG_ASYNC : 0) |
+                                    (file->flags & K64_SYSTEM_FLAG_AUTOSTART ? K64_SERVICE_FLAG_AUTOSTART : 0),
                                     file->priority,
                                     file->poll_interval_ticks,
                                     true,
@@ -239,7 +244,11 @@ static bool perform_start(k64_service_t* service) {
     if (!service->start) {
         return false;
     }
-    if (!service->vm_space.present && !k64_vmm_alloc_service_space(service->managed_pid, &service->vm_space)) {
+    if (!service->vm_space.present && service->start != rootfs_service_start &&
+        !k64_vmm_alloc_service_space(service->managed_pid, &service->vm_space)) {
+        k64_term_write("[svc] vm allocation failed ");
+        k64_term_write(service->name);
+        k64_term_write("\n");
         return false;
     }
     /*
@@ -467,7 +476,14 @@ void k64_system_bootstrap(void) {
         k64_service_t* service = &services[i];
         if ((service->flags & K64_SERVICE_FLAG_AUTOSTART) != 0 &&
             service->state == K64_SERVICE_STATE_STOPPED) {
-            (void)perform_start(service);
+            k64_term_write("[svc] autostart ");
+            k64_term_write(service->name);
+            k64_term_write("\n");
+            if (!perform_start(service)) {
+                k64_term_write("[svc] autostart failed ");
+                k64_term_write(service->name);
+                k64_term_write("\n");
+            }
         }
     }
 

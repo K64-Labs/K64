@@ -61,3 +61,5 @@ void k64_exception_handler(uint64_t vec,
 /* helpers */
 void k64_idt_set_gate_raw(int vec, void* isr, uint8_t type_attr);
 void k64_idt_set_irq_gate(int vec, void* isr);
+extern void k64_irq0_stub(void);
+extern void k64_irq1_stub(void);

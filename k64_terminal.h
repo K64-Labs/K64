@@ -1,6 +1,7 @@
 // k64_terminal.h
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 typedef enum {
@@ -36,6 +37,9 @@ int  k64_term_get_cursor_x(void);
 int  k64_term_get_cursor_y(void);
 int  k64_term_cols(void);
 int  k64_term_rows(void);
+uint8_t k64_term_color(void);
+void k64_term_write_cell(int x, int y, char ch, uint8_t color);
+void k64_term_blit_cells(int x, int y, int w, int h, const uint16_t* cells, size_t count);
 bool k64_term_screen_start(void);
 void k64_term_screen_stop(void);
 bool k64_term_screen_running(void);

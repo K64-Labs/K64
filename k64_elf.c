@@ -55,6 +55,9 @@ typedef struct {
     char* argv[K64_ELF_ARG_MAX];
 } k64_elf_args_t;
 
+static k64_vm_space_t elf_app_space;
+static k64_elf_args_t elf_args;
+
 static uint64_t elf_align_up(uint64_t value, uint64_t align) {
     return (value + align - 1ULL) & ~(align - 1ULL);
 }
@@ -172,10 +175,8 @@ static bool elf_execute_impl(const char* path, bool user_mode, const char* args_
     const k64_elf64_phdr_t* phdrs;
     uint64_t min_vaddr = UINT64_MAX;
     uint64_t max_vaddr = 0;
-    k64_vm_space_t app_space;
     static uint64_t next_ephemeral_pid = K64_ELF_PID_BASE;
     uint64_t app_pid;
-    k64_elf_args_t args;
     int rc;
 
     if (!path || !path[0]) {
@@ -230,8 +231,8 @@ static bool elf_execute_impl(const char* path, bool user_mode, const char* args_
     }
 
     app_pid = elf_pid_for_entry(next_ephemeral_pid++, ehdr->e_entry);
-    if ((user_mode ? !k64_vmm_alloc_user_space(app_pid, &app_space)
-                   : !k64_vmm_alloc_service_space(app_pid, &app_space))) {
+    if ((user_mode ? !k64_vmm_alloc_user_space(app_pid, &elf_app_space)
+                   : !k64_vmm_alloc_service_space(app_pid, &elf_app_space))) {
         K64_LOG_WARN("ELF: allocation failed.");
         return false;
     }
@@ -242,18 +243,18 @@ static bool elf_execute_impl(const char* path, bool user_mode, const char* args_
         if (ph->p_type != K64_PT_LOAD || ph->p_memsz == 0) {
             continue;
         }
-        if (!(user_mode ? k64_vmm_map_user_range(&app_space,
+        if (!(user_mode ? k64_vmm_map_user_range(&elf_app_space,
                                                  ph->p_vaddr,
                                                  file_data + ph->p_offset,
                                                  (size_t)ph->p_filesz,
                                                  (size_t)ph->p_memsz)
-                        : k64_vmm_map_private_range(&app_space,
+                        : k64_vmm_map_private_range(&elf_app_space,
                                                     ph->p_vaddr,
                                                     file_data + ph->p_offset,
                                                     (size_t)ph->p_filesz,
                                                     (size_t)ph->p_memsz))) {
             K64_LOG_WARN("ELF: segment mapping failed.");
-            k64_vmm_release_service_space(&app_space);
+            k64_vmm_release_service_space(&elf_app_space);
             return false;
         }
     }
@@ -261,27 +262,27 @@ static bool elf_execute_impl(const char* path, bool user_mode, const char* args_
     k64_term_write("ELF: executing ");
     k64_term_write(path);
     k64_term_putc('\n');
-    if (user_mode && !k64_vmm_is_mapped(&app_space, ehdr->e_entry, true)) {
+    if (user_mode && !k64_vmm_is_mapped(&elf_app_space, ehdr->e_entry, true)) {
         k64_term_write("ELF: entry page is not mapped\n");
-        k64_vmm_release_service_space(&app_space);
+        k64_vmm_release_service_space(&elf_app_space);
         return false;
     }
     if (user_mode) {
-        uint64_t user_stack_top = app_space.stack_base + app_space.stack_size - 16ULL;
-        elf_parse_args(&args, path, args_text);
-        if (!elf_write_initial_stack(&app_space, user_stack_top, &args, &user_stack_top)) {
+        uint64_t user_stack_top = elf_app_space.stack_base + elf_app_space.stack_size - 16ULL;
+        elf_parse_args(&elf_args, path, args_text);
+        if (!elf_write_initial_stack(&elf_app_space, user_stack_top, &elf_args, &user_stack_top)) {
             k64_term_write("ELF: failed to prepare process arguments\n");
-            k64_vmm_release_service_space(&app_space);
+            k64_vmm_release_service_space(&elf_app_space);
             return false;
         }
-        rc = (int)k64_usermode_execute_named(&app_space, ehdr->e_entry, user_stack_top, path);
+        rc = (int)k64_usermode_execute_named(&elf_app_space, ehdr->e_entry, user_stack_top, path);
     } else {
-        rc = (int)k64_vmm_call_isolated(&app_space, ehdr->e_entry, 0, 0, 0);
+        rc = (int)k64_vmm_call_isolated(&elf_app_space, ehdr->e_entry, 0, 0, 0);
     }
     k64_term_write("ELF: exit code ");
     k64_term_write_dec((uint64_t)(uint32_t)rc);
     k64_term_putc('\n');
-    k64_vmm_release_service_space(&app_space);
+    k64_vmm_release_service_space(&elf_app_space);
     return true;
 }
 
@@ -302,13 +303,7 @@ bool k64_elf_spawn_user_path(const char* path) {
 }
 
 bool k64_elf_spawn_user_path_args(const char* path, const char* args) {
-    k64_fs_stat_t st;
-
     if (!path || !path[0]) {
-        return false;
-    }
-    if (!k64_fs_stat(path, &st) || !st.exists || st.is_dir) {
-        K64_LOG_WARN("ELF: file unavailable.");
         return false;
     }
     return k64_elf_execute_user_path_args(path, args);

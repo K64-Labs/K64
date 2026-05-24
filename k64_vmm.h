@@ -17,9 +17,9 @@ typedef struct {
     uint64_t stack_size;
     uint64_t heap_base;
     uint64_t heap_size;
-    uint64_t page_table_frames[16];
+    uint64_t page_table_frames[64];
     size_t   page_table_frame_count;
-    uint64_t phys_frames[512];
+    uint64_t phys_frames[4096];
     size_t   phys_frame_count;
 } k64_vm_space_t;
 
