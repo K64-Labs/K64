@@ -5,7 +5,29 @@
 #define K64_STDIN  0
 #define K64_STDOUT 1
 #define K64_STDERR 2
+#define K64_OK              0
+#define K64_ERR_INVAL      -1
+#define K64_ERR_NOENT      -2
+#define K64_ERR_ACCESS     -3
+#define K64_ERR_NOMEM      -4
+#define K64_ERR_FAULT      -5
+#define K64_ERR_AGAIN      -6
+#define K64_ERR_NOTCHILD   -7
+#define K64_ERR_NOSYS      -8
+#define K64_ERR_OVERFLOW   -9
+#define K64_ERR_FULL       -10
+#define K64_ERR_BADFD      -11
+#define K64_ERR_PIPE       -12
+#define K64_ERR_BUSY       -13
 #define K64_PROC_PATH_MAX 96
+#define K64_PROC_STATE_EMPTY 0ULL
+#define K64_PROC_STATE_RUNNING 1ULL
+#define K64_PROC_STATE_EXITED 2ULL
+#define K64_PROC_STATE_FAULTED 3ULL
+#define K64_PROC_STATE_ZOMBIE 4ULL
+#define K64_PROC_STATE_REAPED 5ULL
+#define K64_WAIT_BLOCK 0ULL
+#define K64_WAIT_NOHANG 1ULL
 
 typedef struct {
     uint64_t pid;
@@ -20,6 +42,15 @@ typedef struct {
     uint64_t fault_rip;
     char     path[K64_PROC_PATH_MAX];
 } k64_proc_info_t;
+
+typedef struct {
+    uint64_t flags;
+    uint64_t stdin_fd;
+    uint64_t stdout_fd;
+    uint64_t stderr_fd;
+    uint64_t priority;
+    char working_dir[128];
+} k64_spawn_opts_t;
 
 typedef struct {
     uint32_t width;
@@ -65,6 +96,8 @@ int64_t  k64_move(const char* src, const char* dst);
 int64_t  k64_getpid(void);
 int64_t  k64_proc_info(uint64_t pid, k64_proc_info_t* info);
 int64_t  k64_waitpid(uint64_t pid, int64_t* exit_code);
+int64_t  k64_waitpid_flags(uint64_t pid, int64_t* exit_code, uint64_t flags);
+int64_t  k64_pipe(int fds[2]);
 uint64_t k64_uptime_ticks(void);
 size_t   k64_strlen(const char* text);
 int      k64_strcmp(const char* a, const char* b);

@@ -281,12 +281,12 @@ What was added:
 - an `iretq`-based ring transition into user mode
 - a return path back into the kernel on `exit` or on a user fault
 - a small kernel-side user process table for ELF runs
-- `ps` output for user ELF PID, state, exit code, runtime ticks, and image path
+- `ps` output for user ELF PID, parent PID, state, exit code, runtime ticks, fault metadata, and image path
 
-Current syscall ABI:
+Current syscall ABI is documented in `docs/abi/syscalls.md`. The active syscall set includes:
 
 - `0`: `exit(code)`
-- `1`: `write(ptr, len)`
+- `1`: legacy `write(ptr, len)` plus stdio `write(fd, ptr, len)` for fd `0..2`
 - `2`: `yield()`
 - `3`: `sleep(ticks)`
 - `4`: `open(path)`
@@ -306,19 +306,23 @@ Current syscall ABI:
 - `18`: `list_dir(path, out, len)`
 - `19`: `move(src, dst)`
 - `20`: `proc_info(pid, out)` where `pid = 0` means the current process
-- `21`: `waitpid(pid, out_exit_code)` returning `-2` while the process is still running
+- `21`: `waitpid(pid, out_exit_code, flags)`
+- `22`: `pipe(out_fds)`
+- `23`: `writefd(fd, ptr, len)` for fd-backed writes beyond stdio
 
-This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64FS`, save complete files, use structured key input, move files, list directories, spawn another `/ex` program through the kernel worker queue, query process metadata, wait for completed process records, and draw text-mode cell regions. It is not a POSIX-compatible libc and there is no Unix process tree, dynamic linker, pipe model, or fork/exec ABI.
+This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64FS`, save complete files, use structured key input, move files, list directories, reserve child process identities, query process metadata, use early wait flags, create anonymous pipes, and draw text-mode cell regions. It is not a POSIX-compatible libc and there is no fork/execve ABI, dynamic linker, shared-library loader, socket API, or mature VFS.
 
-The process model now records a stable PID, parent PID, scheduler task ID, state, exit code, start/end ticks, runtime ticks, fault vector, fault RIP, and image path for each K64-native ELF run. `spawn()` returns the child PID rather than an internal queue slot, so user programs can treat spawned work as a process identity even though execution is still backed by the current kernel worker queue.
+The process model now records a stable PID, parent PID, scheduler task ID, state, exit code, start/end ticks, runtime ticks, fault vector, fault RIP, and image path for each K64-native ELF run. Normal exits become `ZOMBIE` records and remain visible until a parent reaps them. `waitpid()` enforces direct parent-child ownership and supports `K64_WAIT_NOHANG`; `K64_WAIT_BLOCK` is accepted but currently returns `K64_ERR_AGAIN` for running children rather than burning CPU in a kernel loop. `spawn()` reserves a stable child PID and parent relationship, but spawned ring-3 child execution is not yet scheduled concurrently because K64 still has one active user context at a time.
+
+The file descriptor model is early but real. Each active user process has a small fd table; `0`, `1`, and `2` are stdin/stdout/stderr; `open()` returns fd values `>= 3`; read/close validate descriptors; stdout/stderr writes go through the fd path; and `pipe()` creates anonymous read/write endpoints backed by fixed kernel ring buffers. File writes are still primarily the whole-file `write_file()` helper.
 
 Security boundary:
 
 - syscall strings and byte buffers are copied through VMM-checked user-memory helpers instead of being dereferenced as kernel pointers
-- kernel-to-user outputs such as `read`, `fb_info`, and `list_dir` are written back only through checked user mappings
+- kernel-to-user outputs such as `read`, `pipe`, `fb_info`, `proc_info`, and `list_dir` are written back only through checked user mappings
 - large user writes are bounded before the filesystem sees them
 - text framebuffer blits are copied into a bounded kernel staging buffer before drawing
-- malformed user pointers return syscall errors instead of letting user programs read or write arbitrary kernel addresses
+- malformed user pointers return stable `K64_ERR_*` syscall errors instead of letting user programs read or write arbitrary kernel addresses
 
 ### Userland libc seed
 
@@ -334,10 +338,10 @@ K64 now has a small native userland build path for C programs. The build system 
 The current libc layer is intentionally tiny:
 
 - `_start` calls `main()` and exits through the kernel syscall ABI
-- syscall wrappers for console output, file open/read/write-file, directory listing, file move, key events, cursor control, text cell blitting, process spawning, getpid, and uptime
-- process wrappers for `proc_info()` and `waitpid()`
+- syscall wrappers for console output, file open/read/write-file, directory listing, file move, key events, cursor control, text cell blitting, process spawning, getpid, pipes, and uptime
+- process wrappers for `proc_info()`, `waitpid()`, and `waitpid_flags()`
 - minimal string, memory, decimal, and hexadecimal print helpers
-- ring-3 smoke programs that validate libc helpers, read-only file I/O, process metadata, wait semantics, and checked syscall memory failures
+- ring-3 smoke programs that validate libc helpers, read-only file I/O, process metadata, wait semantics, fd behavior, pipe behavior, and checked syscall memory failures
 
 This is not a full C library yet. It is the first stable nongraphical ABI surface for growing a real K64 userland without writing every program in assembly.
 

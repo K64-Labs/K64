@@ -22,6 +22,8 @@
 #define K64_SYSCALL_MOVE 19ULL
 #define K64_SYSCALL_PROCINFO 20ULL
 #define K64_SYSCALL_WAITPID 21ULL
+#define K64_SYSCALL_PIPE 22ULL
+#define K64_SYSCALL_WRITEFD 23ULL
 
 int64_t k64_syscall3(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2) {
     int64_t ret;
@@ -40,7 +42,8 @@ void k64_exit(int code) {
 }
 
 int64_t k64_write_fd(int fd, const void* data, size_t len) {
-    return k64_syscall3(K64_SYSCALL_WRITE, (uint64_t)(int64_t)fd, (uint64_t)(uintptr_t)data, (uint64_t)len);
+    uint64_t nr = fd <= K64_STDERR ? K64_SYSCALL_WRITE : K64_SYSCALL_WRITEFD;
+    return k64_syscall3(nr, (uint64_t)(int64_t)fd, (uint64_t)(uintptr_t)data, (uint64_t)len);
 }
 
 int64_t k64_write(const void* data, size_t len) {
@@ -145,9 +148,20 @@ int64_t k64_proc_info(uint64_t pid, k64_proc_info_t* info) {
 }
 
 int64_t k64_waitpid(uint64_t pid, int64_t* exit_code) {
+    return k64_waitpid_flags(pid, exit_code, K64_WAIT_BLOCK);
+}
+
+int64_t k64_waitpid_flags(uint64_t pid, int64_t* exit_code, uint64_t flags) {
     return k64_syscall3(K64_SYSCALL_WAITPID,
                         pid,
                         (uint64_t)(uintptr_t)exit_code,
+                        flags);
+}
+
+int64_t k64_pipe(int fds[2]) {
+    return k64_syscall3(K64_SYSCALL_PIPE,
+                        (uint64_t)(uintptr_t)fds,
+                        0,
                         0);
 }
 

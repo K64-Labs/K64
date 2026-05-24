@@ -18,15 +18,15 @@ int main(int argc, char** argv) {
         return fail("self-info");
     }
 
-    if (k64_waitpid(self.pid, &exit_code) != -2) {
-        return fail("self-wait-running");
+    if (k64_waitpid_flags(self.pid, &exit_code, K64_WAIT_NOHANG) != K64_ERR_NOTCHILD) {
+        return fail("self-wait-notchild");
     }
 
     k64_puts("procmodel: self pid=");
     k64_put_u64(self.pid);
     k64_puts(" task=");
     k64_put_u64(self.task_id);
-    k64_puts(" wait=running");
+    k64_puts(" wait=notchild");
     k64_puts("\n");
     return 0;
 }

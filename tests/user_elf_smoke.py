@@ -130,8 +130,8 @@ def run_smoke(read_until, send_line):
             "/ex/procinfo.elf" if "procinfo" in elfs else (
                 "/ex/hello.elf" if "hello" in elfs else "/ex/catmotd.elf")))
     combined += read_until(expected_proc, 10)
-    if "EXITED" not in combined:
-        raise RuntimeError(f"user process table missing exited process\nCaptured:\n{combined}")
+    if "ZOMBIE" not in combined:
+        raise RuntimeError(f"user process table missing zombie process\nCaptured:\n{combined}")
 
     print("user ELF smoke test passed")
 

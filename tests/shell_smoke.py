@@ -328,8 +328,14 @@ def main():
             ("elfrun /ex/procinfo.elf", "procinfo: pid="),
             ("elfrun /ex/args.elf one two", "argv[2]=two"),
             ("elfrun /ex/libctest.elf", "libctest: OK"),
-            ("elfrun /ex/procmodel.elf", "procmodel: self pid="),
             ("elfrun /ex/secprobe.elf", "security-probe: OK"),
+            ("elfrun /ex/procmodel.elf", "procmodel: self pid="),
+            ("elfrun /ex/spawnwait.elf", "spawnwait: OK"),
+            ("elfrun /ex/badwait.elf", "badwait: OK"),
+            ("elfrun /ex/proctree.elf", "proctree: OK"),
+            ("elfrun /ex/fdtest.elf", "fdtest: OK"),
+            ("elfrun /ex/pipetest.elf", "pipetest: OK"),
+            ("elfrun /ex/manyproc.elf", "manyproc: OK"),
             ("unknown-smoke-command", "Unknown command: unknown-smoke-command"),
             ]
             if net_driver == "rtl8139":

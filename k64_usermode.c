@@ -1,6 +1,5 @@
 #include "k64_usermode.h"
 #include "k64_fs.h"
-#include "k64_elf.h"
 #include "k64_idt.h"
 #include "k64_keyboard.h"
 #include "k64_log.h"
@@ -19,6 +18,9 @@
 #define K64_USER_SPAWN_ARGS_MAX 256
 #define K64_USER_SYSCALL_IO_MAX 65536
 #define K64_USER_FBBLIT_CELLS_MAX 4096
+#define K64_USER_FD_MAX 16
+#define K64_USER_PIPE_MAX 16
+#define K64_USER_PIPE_BUFFER_SIZE 4096
 
 typedef struct {
     uint32_t width;
@@ -43,7 +45,16 @@ typedef enum {
     K64_USER_PROCESS_RUNNING,
     K64_USER_PROCESS_EXITED,
     K64_USER_PROCESS_FAULTED,
+    K64_USER_PROCESS_ZOMBIE,
+    K64_USER_PROCESS_REAPED,
 } k64_user_process_state_t;
+
+typedef enum {
+    K64_USER_FD_EMPTY = 0,
+    K64_USER_FD_FILE,
+    K64_USER_FD_PIPE_READ,
+    K64_USER_FD_PIPE_WRITE,
+} k64_user_fd_kind_t;
 
 typedef struct {
     uint32_t reserved0;
@@ -65,9 +76,11 @@ typedef struct {
 
 typedef struct {
     bool     used;
+    k64_user_fd_kind_t kind;
     const uint8_t* data;
     size_t   size;
     size_t   offset;
+    int      pipe_index;
 } k64_user_fd_t;
 
 typedef struct {
@@ -77,7 +90,7 @@ typedef struct {
     uint64_t active;
     int      process_index;
     const k64_vm_space_t* space;
-    k64_user_fd_t fds[8];
+    k64_user_fd_t fallback_fds[K64_USER_FD_MAX];
 } k64_user_exec_context_t;
 
 typedef struct {
@@ -94,7 +107,18 @@ typedef struct {
     uint64_t fault_vector;
     uint64_t fault_rip;
     char     path[K64_USER_PROCESS_PATH_MAX];
+    k64_user_fd_t fds[K64_USER_FD_MAX];
 } k64_user_process_t;
+
+typedef struct {
+    bool used;
+    uint8_t data[K64_USER_PIPE_BUFFER_SIZE];
+    size_t read_pos;
+    size_t write_pos;
+    size_t size;
+    uint32_t read_refs;
+    uint32_t write_refs;
+} k64_user_pipe_t;
 
 typedef struct {
     uint64_t rax;
@@ -134,6 +158,7 @@ static char syscall_text_buffer[512];
 static uint16_t syscall_cell_buffer[K64_USER_FBBLIT_CELLS_MAX];
 static k64_user_exec_context_t active_ctx;
 static k64_user_process_t process_table[K64_USER_PROCESS_MAX];
+static k64_user_pipe_t pipe_table[K64_USER_PIPE_MAX];
 static uint64_t next_user_pid = 5000;
 
 typedef struct {
@@ -172,15 +197,17 @@ static void tss_clear(void) {
 static void ctx_clear(void) {
     active_ctx.kernel_rsp = 0;
     active_ctx.kernel_cr3 = 0;
-    active_ctx.result = -1;
+    active_ctx.result = K64_ERR_INVAL;
     active_ctx.active = 0;
     active_ctx.process_index = -1;
     active_ctx.space = NULL;
-    for (size_t i = 0; i < sizeof(active_ctx.fds) / sizeof(active_ctx.fds[0]); ++i) {
-        active_ctx.fds[i].used = false;
-        active_ctx.fds[i].data = NULL;
-        active_ctx.fds[i].size = 0;
-        active_ctx.fds[i].offset = 0;
+    for (size_t i = 0; i < K64_USER_FD_MAX; ++i) {
+        active_ctx.fallback_fds[i].used = false;
+        active_ctx.fallback_fds[i].kind = K64_USER_FD_EMPTY;
+        active_ctx.fallback_fds[i].data = NULL;
+        active_ctx.fallback_fds[i].size = 0;
+        active_ctx.fallback_fds[i].offset = 0;
+        active_ctx.fallback_fds[i].pipe_index = -1;
     }
 }
 
@@ -212,20 +239,21 @@ static int process_alloc(const char* path,
     int free_slot = -1;
     k64_task_t* task = k64_sched_current_task();
 
+    if (pid != 0) {
+        for (int i = 0; i < K64_USER_PROCESS_MAX; ++i) {
+            if (process_table[i].used && process_table[i].pid == pid) {
+                free_slot = i;
+                break;
+            }
+        }
+    }
     for (int i = 0; i < K64_USER_PROCESS_MAX; ++i) {
+        if (free_slot >= 0) {
+            break;
+        }
         if (!process_table[i].used) {
             free_slot = i;
             break;
-        }
-    }
-    if (free_slot < 0) {
-        uint64_t oldest_pid = UINT64_MAX;
-        for (int i = 0; i < K64_USER_PROCESS_MAX; ++i) {
-            if (process_table[i].state != K64_USER_PROCESS_RUNNING &&
-                process_table[i].pid < oldest_pid) {
-                oldest_pid = process_table[i].pid;
-                free_slot = i;
-            }
         }
     }
     if (free_slot < 0) {
@@ -238,9 +266,11 @@ static int process_alloc(const char* path,
         next_user_pid = process_table[free_slot].pid + 1;
     }
     process_table[free_slot].parent_pid = parent_pid;
-    process_table[free_slot].task_id = task ? task->id : 0;
+    if (task && process_table[free_slot].task_id == 0) {
+        process_table[free_slot].task_id = task->id;
+    }
     process_table[free_slot].state = K64_USER_PROCESS_RUNNING;
-    process_table[free_slot].exit_code = -1;
+    process_table[free_slot].exit_code = K64_ERR_INVAL;
     process_table[free_slot].entry = entry;
     process_table[free_slot].cr3 = cr3;
     process_table[free_slot].start_tick = k64_pit_get_ticks();
@@ -248,7 +278,25 @@ static int process_alloc(const char* path,
     process_table[free_slot].fault_vector = 0;
     process_table[free_slot].fault_rip = 0;
     process_copy_path(process_table[free_slot].path, path);
+    for (size_t i = 0; i < K64_USER_FD_MAX; ++i) {
+        process_table[free_slot].fds[i].used = false;
+        process_table[free_slot].fds[i].kind = K64_USER_FD_EMPTY;
+        process_table[free_slot].fds[i].data = NULL;
+        process_table[free_slot].fds[i].size = 0;
+        process_table[free_slot].fds[i].offset = 0;
+        process_table[free_slot].fds[i].pipe_index = -1;
+    }
     return free_slot;
+}
+
+static int process_reserve(const char* path, uint64_t parent_pid, uint64_t pid, uint64_t task_id) {
+    int index = process_alloc(path, 0, 0, parent_pid, pid);
+
+    if (index < 0) {
+        return index;
+    }
+    process_table[index].task_id = task_id;
+    return index;
 }
 
 static const char* process_state_name(k64_user_process_state_t state) {
@@ -259,6 +307,10 @@ static const char* process_state_name(k64_user_process_state_t state) {
             return "EXITED";
         case K64_USER_PROCESS_FAULTED:
             return "FAULTED";
+        case K64_USER_PROCESS_ZOMBIE:
+            return "ZOMBIE";
+        case K64_USER_PROCESS_REAPED:
+            return "REAPED";
         default:
             return "EMPTY";
     }
@@ -271,6 +323,19 @@ static void process_finish(int index, k64_user_process_state_t state, int64_t ex
     process_table[index].state = state;
     process_table[index].exit_code = exit_code;
     process_table[index].end_tick = k64_pit_get_ticks();
+}
+
+static void process_reap(int index) {
+    if (index < 0 || index >= K64_USER_PROCESS_MAX || !process_table[index].used) {
+        return;
+    }
+    for (size_t i = 0; i < K64_USER_FD_MAX; ++i) {
+        process_table[index].fds[i].used = false;
+        process_table[index].fds[i].kind = K64_USER_FD_EMPTY;
+    }
+    process_table[index].state = K64_USER_PROCESS_REAPED;
+    process_table[index].task_id = 0;
+    process_table[index].used = false;
 }
 
 static int process_find_pid(uint64_t pid) {
@@ -403,17 +468,163 @@ static bool copy_user_string(const char* user_ptr, char* out, size_t out_size) {
     return false;
 }
 
-static int alloc_fd(const uint8_t* data, size_t size) {
-    for (size_t i = 0; i < sizeof(active_ctx.fds) / sizeof(active_ctx.fds[0]); ++i) {
-        if (!active_ctx.fds[i].used) {
-            active_ctx.fds[i].used = true;
-            active_ctx.fds[i].data = data;
-            active_ctx.fds[i].size = size;
-            active_ctx.fds[i].offset = 0;
+static k64_user_fd_t* current_fds(void) {
+    if (active_ctx.process_index >= 0 &&
+        active_ctx.process_index < K64_USER_PROCESS_MAX &&
+        process_table[active_ctx.process_index].used) {
+        return process_table[active_ctx.process_index].fds;
+    }
+    return active_ctx.fallback_fds;
+}
+
+static void fd_clear(k64_user_fd_t* fd) {
+    if (!fd) {
+        return;
+    }
+    fd->used = false;
+    fd->kind = K64_USER_FD_EMPTY;
+    fd->data = NULL;
+    fd->size = 0;
+    fd->offset = 0;
+    fd->pipe_index = -1;
+}
+
+static int alloc_fd_file(const uint8_t* data, size_t size) {
+    k64_user_fd_t* fds = current_fds();
+
+    for (size_t i = 0; i < K64_USER_FD_MAX; ++i) {
+        if (!fds[i].used) {
+            fds[i].used = true;
+            fds[i].kind = K64_USER_FD_FILE;
+            fds[i].data = data;
+            fds[i].size = size;
+            fds[i].offset = 0;
+            fds[i].pipe_index = -1;
             return (int)i + 3;
         }
     }
     return -1;
+}
+
+static int alloc_fd_pipe(int pipe_index, k64_user_fd_kind_t kind) {
+    k64_user_fd_t* fds = current_fds();
+
+    for (size_t i = 0; i < K64_USER_FD_MAX; ++i) {
+        if (!fds[i].used) {
+            fds[i].used = true;
+            fds[i].kind = kind;
+            fds[i].data = NULL;
+            fds[i].size = 0;
+            fds[i].offset = 0;
+            fds[i].pipe_index = pipe_index;
+            return (int)i + 3;
+        }
+    }
+    return -1;
+}
+
+static k64_user_fd_t* get_fd(uint64_t fd) {
+    k64_user_fd_t* fds;
+    size_t fd_index;
+
+    if (fd < 3) {
+        return NULL;
+    }
+    fd_index = (size_t)(fd - 3);
+    if (fd_index >= K64_USER_FD_MAX) {
+        return NULL;
+    }
+    fds = current_fds();
+    return fds[fd_index].used ? &fds[fd_index] : NULL;
+}
+
+static int pipe_alloc(void) {
+    for (int i = 0; i < K64_USER_PIPE_MAX; ++i) {
+        if (!pipe_table[i].used) {
+            pipe_table[i].used = true;
+            pipe_table[i].read_pos = 0;
+            pipe_table[i].write_pos = 0;
+            pipe_table[i].size = 0;
+            pipe_table[i].read_refs = 1;
+            pipe_table[i].write_refs = 1;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void pipe_drop_ref(int pipe_index, k64_user_fd_kind_t kind) {
+    k64_user_pipe_t* pipe;
+
+    if (pipe_index < 0 || pipe_index >= K64_USER_PIPE_MAX || !pipe_table[pipe_index].used) {
+        return;
+    }
+    pipe = &pipe_table[pipe_index];
+    if (kind == K64_USER_FD_PIPE_READ && pipe->read_refs > 0) {
+        pipe->read_refs--;
+    } else if (kind == K64_USER_FD_PIPE_WRITE && pipe->write_refs > 0) {
+        pipe->write_refs--;
+    }
+    if (pipe->read_refs == 0 && pipe->write_refs == 0) {
+        pipe->used = false;
+        pipe->read_pos = 0;
+        pipe->write_pos = 0;
+        pipe->size = 0;
+    }
+}
+
+static int64_t pipe_read_fd(k64_user_fd_t* fd, uint64_t user_ptr, size_t want) {
+    k64_user_pipe_t* pipe;
+    size_t count;
+
+    if (!fd || fd->pipe_index < 0 || fd->pipe_index >= K64_USER_PIPE_MAX ||
+        !pipe_table[fd->pipe_index].used) {
+        return K64_ERR_PIPE;
+    }
+    pipe = &pipe_table[fd->pipe_index];
+    if (pipe->size == 0) {
+        return pipe->write_refs == 0 ? 0 : K64_ERR_AGAIN;
+    }
+    count = want < pipe->size ? want : pipe->size;
+    for (size_t i = 0; i < count; ++i) {
+        uint8_t byte = pipe->data[pipe->read_pos];
+        if (!user_write(user_ptr + i, &byte, sizeof(byte))) {
+            return K64_ERR_FAULT;
+        }
+        pipe->read_pos = (pipe->read_pos + 1) % K64_USER_PIPE_BUFFER_SIZE;
+    }
+    pipe->size -= count;
+    return (int64_t)count;
+}
+
+static int64_t pipe_write_fd(k64_user_fd_t* fd, uint64_t user_ptr, size_t len) {
+    k64_user_pipe_t* pipe;
+    size_t space;
+    size_t count;
+
+    if (!fd || fd->pipe_index < 0 || fd->pipe_index >= K64_USER_PIPE_MAX ||
+        !pipe_table[fd->pipe_index].used) {
+        return K64_ERR_PIPE;
+    }
+    pipe = &pipe_table[fd->pipe_index];
+    if (pipe->read_refs == 0) {
+        return K64_ERR_PIPE;
+    }
+    space = K64_USER_PIPE_BUFFER_SIZE - pipe->size;
+    if (space == 0) {
+        return K64_ERR_AGAIN;
+    }
+    count = len < space ? len : space;
+    for (size_t i = 0; i < count; ++i) {
+        uint8_t byte;
+        if (!user_read(user_ptr + i, &byte, sizeof(byte))) {
+            return K64_ERR_FAULT;
+        }
+        pipe->data[pipe->write_pos] = byte;
+        pipe->write_pos = (pipe->write_pos + 1) % K64_USER_PIPE_BUFFER_SIZE;
+    }
+    pipe->size += count;
+    return (int64_t)count;
 }
 
 static void copy_bounded(char* dst, size_t dst_size, const char* src) {
@@ -432,16 +643,6 @@ static void copy_bounded(char* dst, size_t dst_size, const char* src) {
     dst[i] = '\0';
 }
 
-static void spawn_worker(void* arg) {
-    k64_user_spawn_ctx_t* ctx = (k64_user_spawn_ctx_t*)arg;
-
-    if (!ctx || !ctx->used) {
-        return;
-    }
-    (void)k64_elf_spawn_user_path_args_ex(ctx->path, ctx->args, ctx->parent_pid, ctx->pid);
-    ctx->used = false;
-}
-
 static int64_t queue_spawn(const char* path, const char* args) {
     for (int i = 0; i < K64_USER_SPAWN_MAX; ++i) {
         if (!spawn_ctx[i].used) {
@@ -450,14 +651,14 @@ static int64_t queue_spawn(const char* path, const char* args) {
             spawn_ctx[i].parent_pid = current_process_pid();
             copy_bounded(spawn_ctx[i].path, sizeof(spawn_ctx[i].path), path);
             copy_bounded(spawn_ctx[i].args, sizeof(spawn_ctx[i].args), args);
-            if (!k64_task_create_arg(spawn_worker, &spawn_ctx[i], 2, 0)) {
+            if (process_reserve(path, spawn_ctx[i].parent_pid, spawn_ctx[i].pid, 0) < 0) {
                 spawn_ctx[i].used = false;
-                return -1;
+                return K64_ERR_FULL;
             }
             return (int64_t)spawn_ctx[i].pid;
         }
     }
-    return -1;
+    return K64_ERR_FULL;
 }
 
 static char read_stdin_char_blocking(void) {
@@ -559,14 +760,14 @@ static int64_t read_key_event_nonblocking(void) {
 
 int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
     if (!frame || !active_ctx.active) {
-        return -1;
+        return K64_ERR_INVAL;
     }
 
     switch (frame->rax) {
         case K64_SYSCALL_EXIT:
             active_ctx.result = (int64_t)frame->rdi;
             active_ctx.active = 0;
-            process_finish(active_ctx.process_index, K64_USER_PROCESS_EXITED, active_ctx.result);
+            process_finish(active_ctx.process_index, K64_USER_PROCESS_ZOMBIE, active_ctx.result);
             k64_user_return_asm(&active_ctx, active_ctx.result);
             break;
         case K64_SYSCALL_WRITE:
@@ -576,10 +777,10 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             return write_user_text(frame->rdi, (size_t)frame->rsi);
         case K64_SYSCALL_YIELD:
             k64_sched_yield();
-            return 0;
+            return K64_OK;
         case K64_SYSCALL_SLEEP:
             k64_sched_sleep(frame->rdi);
-            return 0;
+            return K64_OK;
         case K64_SYSCALL_OPEN: {
             char path[256];
             const uint8_t* data = NULL;
@@ -587,32 +788,32 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             int fd;
 
             if (!copy_user_string((const char*)(uintptr_t)frame->rdi, path, sizeof(path))) {
-                return -1;
+                return K64_ERR_FAULT;
             }
             if (!k64_fs_read_file_raw(path, &data, &size)) {
-                return -1;
+                return K64_ERR_NOENT;
             }
-            fd = alloc_fd(data, size);
-            return fd >= 0 ? fd : -1;
+            fd = alloc_fd_file(data, size);
+            return fd >= 0 ? fd : K64_ERR_FULL;
         }
         case K64_SYSCALL_READ: {
             uint64_t fd = frame->rdi;
             uint8_t* buf = (uint8_t*)(uintptr_t)frame->rsi;
             size_t want = (size_t)frame->rdx;
-            size_t fd_index;
             size_t remaining;
             size_t count;
+            k64_user_fd_t* desc;
 
             if (!buf || want == 0) {
                 return 0;
             }
             if (!user_buffer_range_ok((uint64_t)(uintptr_t)buf, want)) {
-                return -1;
+                return K64_ERR_FAULT;
             }
             if (fd == 0) {
                 uint8_t ch = (uint8_t)read_stdin_char_blocking();
                 if (!user_write((uint64_t)(uintptr_t)buf, &ch, sizeof(ch))) {
-                    return -1;
+                    return K64_ERR_FAULT;
                 }
                 count = 1;
                 while (count < want) {
@@ -620,7 +821,7 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
                     if (k64_serial_get_char(&ch) || k64_keyboard_get_char(&ch)) {
                         uint8_t byte = (uint8_t)ch;
                         if (!user_write((uint64_t)(uintptr_t)buf + count, &byte, sizeof(byte))) {
-                            return -1;
+                            return K64_ERR_FAULT;
                         }
                         count++;
                     } else {
@@ -630,43 +831,49 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
                 return (int64_t)count;
             }
             if (fd < 3) {
-                return -1;
+                return K64_ERR_BADFD;
             }
-            fd_index = (size_t)(fd - 3);
-            if (fd_index >= (sizeof(active_ctx.fds) / sizeof(active_ctx.fds[0])) || !active_ctx.fds[fd_index].used) {
-                return -1;
+            desc = get_fd(fd);
+            if (!desc) {
+                return K64_ERR_BADFD;
             }
-            remaining = active_ctx.fds[fd_index].size - active_ctx.fds[fd_index].offset;
+            if (desc->kind == K64_USER_FD_PIPE_READ) {
+                return pipe_read_fd(desc, (uint64_t)(uintptr_t)buf, want);
+            }
+            if (desc->kind != K64_USER_FD_FILE) {
+                return K64_ERR_BADFD;
+            }
+            remaining = desc->size - desc->offset;
             count = want < remaining ? want : remaining;
             if (!user_write((uint64_t)(uintptr_t)buf,
-                            active_ctx.fds[fd_index].data + active_ctx.fds[fd_index].offset,
+                            desc->data + desc->offset,
                             count)) {
-                return -1;
+                return K64_ERR_FAULT;
             }
-            active_ctx.fds[fd_index].offset += count;
+            desc->offset += count;
             return (int64_t)count;
         }
         case K64_SYSCALL_CLOSE: {
             uint64_t fd = frame->rdi;
-            size_t fd_index;
+            k64_user_fd_t* desc;
             if (fd < 3) {
-                return -1;
+                return K64_ERR_BADFD;
             }
-            fd_index = (size_t)(fd - 3);
-            if (fd_index >= (sizeof(active_ctx.fds) / sizeof(active_ctx.fds[0])) || !active_ctx.fds[fd_index].used) {
-                return -1;
+            desc = get_fd(fd);
+            if (!desc) {
+                return K64_ERR_BADFD;
             }
-            active_ctx.fds[fd_index].used = false;
-            active_ctx.fds[fd_index].data = NULL;
-            active_ctx.fds[fd_index].size = 0;
-            active_ctx.fds[fd_index].offset = 0;
-            return 0;
+            if (desc->kind == K64_USER_FD_PIPE_READ || desc->kind == K64_USER_FD_PIPE_WRITE) {
+                pipe_drop_ref(desc->pipe_index, desc->kind);
+            }
+            fd_clear(desc);
+            return K64_OK;
         }
         case K64_SYSCALL_GETPID:
             if (active_ctx.process_index < 0 ||
                 active_ctx.process_index >= K64_USER_PROCESS_MAX ||
                 !process_table[active_ctx.process_index].used) {
-                return -1;
+                return K64_ERR_NOENT;
             }
             return (int64_t)process_table[active_ctx.process_index].pid;
         case K64_SYSCALL_UPTIME:
@@ -674,13 +881,13 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
         case K64_SYSCALL_WRITEFILE: {
             char path[256];
             if (!copy_user_string((const char*)(uintptr_t)frame->rdi, path, sizeof(path))) {
-                return -1;
+                return K64_ERR_FAULT;
             }
             if (frame->rdx > K64_USER_SYSCALL_IO_MAX ||
                 !user_read(frame->rsi, syscall_io_buffer, (size_t)frame->rdx)) {
-                return -1;
+                return K64_ERR_FAULT;
             }
-            return k64_fs_write_file_raw(path, syscall_io_buffer, (size_t)frame->rdx) ? 0 : -1;
+            return k64_fs_write_file_raw(path, syscall_io_buffer, (size_t)frame->rdx) ? K64_OK : K64_ERR_ACCESS;
         }
         case K64_SYSCALL_CLEAR:
             k64_term_clear();
@@ -697,8 +904,8 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
                              ((uint64_t)(uint16_t)k64_term_rows() << 16));
         case K64_SYSCALL_FBINFO: {
             k64_user_fb_info_t info;
-            if (!frame->rdi) {
-                return -1;
+            if (!frame->rdi || !user_buffer_range_ok(frame->rdi, sizeof(info))) {
+                return K64_ERR_FAULT;
             }
             info.width = (uint32_t)k64_term_cols();
             info.height = (uint32_t)k64_term_rows();
@@ -706,21 +913,21 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             info.format = 1; /* VGA text cells: low byte char, high byte color. */
             info.cell_size = sizeof(uint16_t);
             info.flags = 1;
-            return user_write(frame->rdi, &info, sizeof(info)) ? 0 : -1;
+            return user_write(frame->rdi, &info, sizeof(info)) ? K64_OK : K64_ERR_FAULT;
         }
         case K64_SYSCALL_FBBLIT: {
             k64_user_fb_blit_t req;
             uint64_t max_cells;
             if (!frame->rdi || !user_read(frame->rdi, &req, sizeof(req)) ||
                 !req.cells || req.width == 0 || req.height == 0) {
-                return -1;
+                return K64_ERR_FAULT;
             }
             max_cells = (uint64_t)req.width * (uint64_t)req.height;
             if (req.width > 512 || req.height > 512 ||
                 max_cells == 0 || max_cells > K64_USER_FBBLIT_CELLS_MAX ||
                 req.count < max_cells ||
                 !user_read((uint64_t)(uintptr_t)req.cells, syscall_cell_buffer, (size_t)max_cells * sizeof(uint16_t))) {
-                return -1;
+                return K64_ERR_FAULT;
             }
             k64_term_blit_cells(req.x,
                                 req.y,
@@ -737,7 +944,7 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
 
             if (!copy_user_string((const char*)(uintptr_t)frame->rdi, path, sizeof(path)) ||
                 !out || out_size <= 0) {
-                return -1;
+                return K64_ERR_FAULT;
             }
             if (out_size > (int)sizeof(syscall_io_buffer)) {
                 out_size = (int)sizeof(syscall_io_buffer);
@@ -746,11 +953,11 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
                 syscall_io_buffer[i] = 0;
             }
             if (!k64_fs_ls(path, (char*)syscall_io_buffer, out_size)) {
-                return -1;
+                return K64_ERR_NOENT;
             }
             return user_write((uint64_t)(uintptr_t)out,
                               syscall_io_buffer,
-                              k64_strlen((const char*)syscall_io_buffer) + 1) ? 0 : -1;
+                              k64_strlen((const char*)syscall_io_buffer) + 1) ? K64_OK : K64_ERR_FAULT;
         }
         case K64_SYSCALL_MOVE: {
             char src[256];
@@ -758,16 +965,16 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
 
             if (!copy_user_string((const char*)(uintptr_t)frame->rdi, src, sizeof(src)) ||
                 !copy_user_string((const char*)(uintptr_t)frame->rsi, dst, sizeof(dst))) {
-                return -1;
+                return K64_ERR_FAULT;
             }
-            return k64_fs_move(src, dst) ? 0 : -1;
+            return k64_fs_move(src, dst) ? K64_OK : K64_ERR_NOENT;
         }
         case K64_SYSCALL_SPAWN: {
             char path[256];
             char args[K64_USER_SPAWN_ARGS_MAX];
 
             if (!copy_user_string((const char*)(uintptr_t)frame->rdi, path, sizeof(path))) {
-                return -1;
+                return K64_ERR_FAULT;
             }
             if (frame->rsi) {
                 (void)copy_user_string((const char*)(uintptr_t)frame->rsi, args, sizeof(args));
@@ -779,33 +986,101 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
         case K64_SYSCALL_PROCINFO: {
             k64_proc_info_t info;
             int index = process_find_pid(frame->rdi);
+            uint64_t caller_pid = current_process_pid();
 
             if (index < 0 || !frame->rsi) {
-                return -1;
+                return index < 0 ? K64_ERR_NOENT : K64_ERR_FAULT;
+            }
+            if (caller_pid != 0 &&
+                process_table[index].pid != caller_pid &&
+                process_table[index].parent_pid != caller_pid) {
+                return K64_ERR_ACCESS;
             }
             process_fill_info(index, &info);
-            return user_write(frame->rsi, &info, sizeof(info)) ? 0 : -1;
+            return user_write(frame->rsi, &info, sizeof(info)) ? K64_OK : K64_ERR_FAULT;
         }
         case K64_SYSCALL_WAITPID: {
             int index = process_find_pid(frame->rdi);
             int64_t exit_code;
+            uint64_t caller_pid = current_process_pid();
+            uint64_t flags = frame->rdx;
 
             if (index < 0) {
-                return -1;
+                return K64_ERR_NOENT;
+            }
+            if (flags != K64_WAIT_BLOCK && flags != K64_WAIT_NOHANG) {
+                return K64_ERR_INVAL;
+            }
+            if (process_table[index].parent_pid != caller_pid) {
+                return K64_ERR_NOTCHILD;
             }
             if (process_table[index].state == K64_USER_PROCESS_RUNNING) {
-                return -2;
+                return K64_ERR_AGAIN;
             }
             exit_code = process_table[index].exit_code;
             if (frame->rsi && !user_write(frame->rsi, &exit_code, sizeof(exit_code))) {
-                return -1;
+                return K64_ERR_FAULT;
             }
-            return 0;
+            process_reap(index);
+            return K64_OK;
+        }
+        case K64_SYSCALL_PIPE: {
+            int pipe_index;
+            int read_fd;
+            int write_fd;
+            int32_t fds[2];
+
+            if (!frame->rdi || !user_buffer_range_ok(frame->rdi, sizeof(fds))) {
+                return K64_ERR_FAULT;
+            }
+            pipe_index = pipe_alloc();
+            if (pipe_index < 0) {
+                return K64_ERR_FULL;
+            }
+            read_fd = alloc_fd_pipe(pipe_index, K64_USER_FD_PIPE_READ);
+            write_fd = alloc_fd_pipe(pipe_index, K64_USER_FD_PIPE_WRITE);
+            if (read_fd < 0 || write_fd < 0) {
+                if (read_fd >= 0) {
+                    k64_user_fd_t* fd = get_fd((uint64_t)read_fd);
+                    if (fd) {
+                        fd_clear(fd);
+                    }
+                }
+                if (write_fd >= 0) {
+                    k64_user_fd_t* fd = get_fd((uint64_t)write_fd);
+                    if (fd) {
+                        fd_clear(fd);
+                    }
+                }
+                pipe_table[pipe_index].used = false;
+                return K64_ERR_FULL;
+            }
+            fds[0] = read_fd;
+            fds[1] = write_fd;
+            return user_write(frame->rdi, fds, sizeof(fds)) ? K64_OK : K64_ERR_FAULT;
+        }
+        case K64_SYSCALL_WRITEFD: {
+            k64_user_fd_t* fd;
+
+            if (frame->rdi <= 2) {
+                return write_user_text(frame->rsi, (size_t)frame->rdx);
+            }
+            fd = get_fd(frame->rdi);
+            if (!fd) {
+                return K64_ERR_BADFD;
+            }
+            if (!user_buffer_range_ok(frame->rsi, (size_t)frame->rdx)) {
+                return K64_ERR_FAULT;
+            }
+            if (fd->kind == K64_USER_FD_PIPE_WRITE) {
+                return pipe_write_fd(fd, frame->rsi, (size_t)frame->rdx);
+            }
+            return K64_ERR_BADFD;
         }
         default:
-            return -1;
+            return K64_ERR_NOSYS;
     }
-    return -1;
+    return K64_ERR_INVAL;
 }
 
 void k64_usermode_init(void) {
@@ -838,23 +1113,23 @@ int64_t k64_usermode_execute_named_ex(const k64_vm_space_t* space,
     int process_index;
 
     if (!space || !space->present || !entry || !user_stack_top) {
-        return -1;
+        return K64_ERR_INVAL;
     }
 
     process_index = process_alloc(path, entry, space->cr3, parent_pid, pid);
     if (process_index < 0) {
         k64_term_write("User process table is full\n");
-        return -1;
+        return K64_ERR_FULL;
     }
 
     ctx_clear();
     active_ctx.active = 1;
-    active_ctx.result = -1;
+    active_ctx.result = K64_ERR_INVAL;
     active_ctx.process_index = process_index;
     active_ctx.space = space;
     active_ctx.result = k64_user_enter_asm(space->cr3, user_stack_top, entry, &active_ctx);
     if (process_table[process_index].state == K64_USER_PROCESS_RUNNING) {
-        process_finish(process_index, K64_USER_PROCESS_EXITED, active_ctx.result);
+        process_finish(process_index, K64_USER_PROCESS_ZOMBIE, active_ctx.result);
     }
 
     return active_ctx.result;
@@ -930,15 +1205,15 @@ void k64_usermode_handle_fault(uint64_t vec,
     k64_term_write_hex(cr3);
     k64_term_putc('\n');
 
-    active_ctx.result = -1;
+    active_ctx.result = K64_ERR_FAULT;
     active_ctx.active = 0;
     if (active_ctx.process_index >= 0 && active_ctx.process_index < K64_USER_PROCESS_MAX &&
         process_table[active_ctx.process_index].used) {
         process_table[active_ctx.process_index].fault_vector = vec;
         process_table[active_ctx.process_index].fault_rip = rip;
     }
-    process_finish(active_ctx.process_index, K64_USER_PROCESS_FAULTED, -1);
-    k64_user_return_asm(&active_ctx, -1);
+    process_finish(active_ctx.process_index, K64_USER_PROCESS_FAULTED, K64_ERR_FAULT);
+    k64_user_return_asm(&active_ctx, K64_ERR_FAULT);
     for (;;) {
     }
 }

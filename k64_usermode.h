@@ -2,6 +2,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "k64_vmm.h"
+#include "k64_errno.h"
 
 #define K64_SYSCALL_EXIT  0ULL
 #define K64_SYSCALL_WRITE 1ULL
@@ -25,12 +26,18 @@
 #define K64_SYSCALL_MOVE 19ULL
 #define K64_SYSCALL_PROCINFO 20ULL
 #define K64_SYSCALL_WAITPID 21ULL
+#define K64_SYSCALL_PIPE 22ULL
+#define K64_SYSCALL_WRITEFD 23ULL
 
 #define K64_PROC_STATE_EMPTY 0ULL
 #define K64_PROC_STATE_RUNNING 1ULL
 #define K64_PROC_STATE_EXITED 2ULL
 #define K64_PROC_STATE_FAULTED 3ULL
+#define K64_PROC_STATE_ZOMBIE 4ULL
+#define K64_PROC_STATE_REAPED 5ULL
 #define K64_PROC_PATH_MAX 96
+#define K64_WAIT_BLOCK 0ULL
+#define K64_WAIT_NOHANG 1ULL
 
 typedef struct {
     uint64_t pid;
