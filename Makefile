@@ -53,6 +53,11 @@ CFLAGS32 = $(TARGET32) -I. -Ibuild -m32 -ffreestanding -O2 -Wall -Wextra -fno-st
 CFLAGS64 = $(TARGET64) -I. -Ibuild -m64 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-builtin -fno-pic -fno-pie -mno-red-zone -mcmodel=kernel -mgeneral-regs-only -mno-mmx -mno-sse -mno-sse2
 USER_CFLAGS = $(TARGET64) -Iuserland/include -m64 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-builtin -fno-pic -fno-pie -mno-red-zone -mno-mmx -mno-sse -mno-sse2
 LDFLAGS  = -T linker.ld -nostdlib
+ifneq ($(findstring lld,$(notdir $(LD))),)
+USER_IMAGE_BASE_FLAG := --image-base=0x40000000
+else
+USER_IMAGE_BASE_FLAG := -Ttext-segment=0x40000000
+endif
 
 K64S_SRCS = $(wildcard k64s/*.c)
 K64S_DEF_SRCS = $(wildcard k64s_def/*.svc)
@@ -183,7 +188,7 @@ build/userland/%.o: userland/bin/%.c
 
 $(EX_BUILD_DIR)/%.elf: build/userland/%.o $(USER_LIB_OBJS) Makefile
 	mkdir -p $(EX_BUILD_DIR)
-	$(LD) -nostdlib -static -e _start --image-base=0x40000000 -Ttext 0x40100000 -o $@ build/userland/crt0.o $< build/userland/k64libc.o
+	$(LD) -nostdlib -static -e _start $(USER_IMAGE_BASE_FLAG) -Ttext 0x40100000 -o $@ build/userland/crt0.o $< build/userland/k64libc.o
 
 $(K64_GRUB_K64FS_MOD): grub/k64fs.c tools/build_grub_k64fs.sh
 	mkdir -p build
