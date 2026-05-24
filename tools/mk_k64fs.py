@@ -8,6 +8,8 @@ MAGIC1 = 0x00010053
 VERSION = 1
 TYPE_DIR = 1
 TYPE_FILE = 2
+MODE_DIR = 0o40755
+MODE_FILE = 0o100644
 HEADER_STRUCT = struct.Struct("<IIHHIIIII")
 ENTRY_STRUCT = struct.Struct("<IHHIIII")
 
@@ -65,12 +67,13 @@ def build_image(entries):
         data_offset = len(data)
         if entry["type"] == TYPE_FILE:
             data.extend(entry["data"])
-        packed_entries.append((entry["parent"], entry["type"], name_offset, data_offset, len(entry["data"])))
+        mode = MODE_DIR if entry["type"] == TYPE_DIR else MODE_FILE
+        packed_entries.append((entry["parent"], entry["type"], mode, name_offset, data_offset, len(entry["data"])))
 
     entries_blob = bytearray()
-    for parent, entry_type, name_offset, data_offset, data_size in packed_entries:
+    for parent, entry_type, mode, name_offset, data_offset, data_size in packed_entries:
         entries_blob.extend(
-            ENTRY_STRUCT.pack(parent, entry_type, 0, name_offset, data_offset, data_size, 0)
+            ENTRY_STRUCT.pack(parent, entry_type, mode & 0xFFFF, name_offset, data_offset, data_size, 0)
         )
 
     entries_offset = HEADER_STRUCT.size

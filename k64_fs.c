@@ -15,6 +15,8 @@
 #define K64FS_MAGIC_1      0x00010053u
 #define K64FS_TYPE_DIR     1u
 #define K64FS_TYPE_FILE    2u
+#define K64FS_MODE_DIR     0040755u
+#define K64FS_MODE_FILE    0100644u
 
 typedef struct {
     uint32_t magic0;
@@ -47,6 +49,10 @@ typedef struct {
     int data_offset;
     int data_size;
     int dirty_offset;
+    uint32_t mode;
+    uint64_t created_tick;
+    uint64_t modified_tick;
+    uint64_t generation;
 } k64_fs_node_t;
 
 static k64_fs_node_t nodes[K64_FS_MAX_NODES];
@@ -67,9 +73,19 @@ static k64_block_device_t* fs_block_device = NULL;
 static uint64_t fs_block_lba = 0;
 static char fs_mount_name[32];
 static int cwd_index = 0;
+static uint64_t fs_clock = 1;
+static uint64_t fs_generation = 1;
 
 static bool fs_writeback_image(void);
 static bool fs_flush_block_device(void);
+
+static uint64_t fs_next_clock(void) {
+    return fs_clock++;
+}
+
+static uint64_t fs_next_generation(void) {
+    return fs_generation++;
+}
 
 static void fs_copy(char* dst, int dst_size, const char* src) {
     int i = 0;
@@ -117,6 +133,10 @@ static void fs_reset(void) {
         nodes[i].data_offset = 0;
         nodes[i].data_size = 0;
         nodes[i].dirty_offset = -1;
+        nodes[i].mode = 0;
+        nodes[i].created_tick = 0;
+        nodes[i].modified_tick = 0;
+        nodes[i].generation = 0;
     }
 
     nodes[0].used = true;
@@ -127,6 +147,10 @@ static void fs_reset(void) {
     nodes[0].data_offset = 0;
     nodes[0].data_size = 0;
     nodes[0].dirty_offset = -1;
+    nodes[0].mode = K64FS_MODE_DIR;
+    nodes[0].created_tick = fs_next_clock();
+    nodes[0].modified_tick = nodes[0].created_tick;
+    nodes[0].generation = fs_next_generation();
     cwd_index = 0;
     fs_image_size = 0;
     fs_volume_capacity = K64_FS_IMAGE_MAX;
@@ -149,10 +173,54 @@ static int fs_alloc_node(void) {
             nodes[i].data_offset = 0;
             nodes[i].data_size = 0;
             nodes[i].dirty_offset = -1;
+            nodes[i].mode = 0;
+            nodes[i].created_tick = 0;
+            nodes[i].modified_tick = 0;
+            nodes[i].generation = 0;
             return i;
         }
     }
     return -1;
+}
+
+static void fs_init_node_metadata(k64_fs_node_t* node, bool is_dir) {
+    uint64_t now;
+
+    if (!node) {
+        return;
+    }
+    now = fs_next_clock();
+    node->mode = is_dir ? K64FS_MODE_DIR : K64FS_MODE_FILE;
+    node->created_tick = now;
+    node->modified_tick = now;
+    node->generation = fs_next_generation();
+}
+
+static void fs_mark_node_modified(k64_fs_node_t* node) {
+    if (!node) {
+        return;
+    }
+    node->modified_tick = fs_next_clock();
+    node->generation = fs_next_generation();
+}
+
+static bool fs_valid_leaf_name(const char* name) {
+    int len = 0;
+
+    if (!name || !name[0] || k64_streq(name, ".") || k64_streq(name, "..")) {
+        return false;
+    }
+    while (name[len]) {
+        char ch = name[len];
+        if (ch == '/' || ch == '\\' || (unsigned char)ch < 32 || ch == 127) {
+            return false;
+        }
+        len++;
+        if (len >= K64_FS_NAME_MAX) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static int fs_find_child(int parent, const char* name) {
@@ -283,6 +351,10 @@ static bool fs_compact_nodes(void) {
         compacted[i].data_offset = 0;
         compacted[i].data_size = 0;
         compacted[i].dirty_offset = -1;
+        compacted[i].mode = 0;
+        compacted[i].created_tick = 0;
+        compacted[i].modified_tick = 0;
+        compacted[i].generation = 0;
     }
 
     remap[0] = 0;
@@ -360,7 +432,8 @@ static bool fs_parse_loaded_image(size_t size) {
         const char* name;
         k64_fs_node_t* node;
 
-        if (entry->name_offset >= hdr->data_offset - hdr->strings_offset) {
+        if (hdr->data_offset < hdr->strings_offset ||
+            entry->name_offset >= hdr->data_offset - hdr->strings_offset) {
             K64_LOG_WARN("K64FS: bad name offset.");
             return false;
         }
@@ -376,6 +449,10 @@ static bool fs_parse_loaded_image(size_t size) {
             K64_LOG_WARN("K64FS: entry parent ordering is invalid.");
             return false;
         }
+        if (i == 0 && entry->type != K64FS_TYPE_DIR) {
+            K64_LOG_WARN("K64FS: root is not a directory.");
+            return false;
+        }
 
         node = &nodes[i];
         node->used = true;
@@ -384,7 +461,35 @@ static bool fs_parse_loaded_image(size_t size) {
         node->dirty = false;
         node->dirty_offset = -1;
         name = (const char*)fs_image + hdr->strings_offset + entry->name_offset;
+        {
+            size_t max_name = hdr->data_offset - hdr->strings_offset - entry->name_offset;
+            bool terminated = false;
+            for (size_t j = 0; j < max_name; ++j) {
+                if (name[j] == '\0') {
+                    terminated = true;
+                    break;
+                }
+            }
+            if (!terminated || (i != 0 && !fs_valid_leaf_name(name))) {
+                K64_LOG_WARN("K64FS: invalid entry name.");
+                return false;
+            }
+        }
         fs_copy(node->name, K64_FS_NAME_MAX, i == 0 ? "" : name);
+        if (i != 0) {
+            for (uint32_t j = 1; j < i; ++j) {
+                if (nodes[j].used &&
+                    nodes[j].parent == (int)entry->parent_index &&
+                    k64_streq(nodes[j].name, node->name)) {
+                    K64_LOG_WARN("K64FS: duplicate sibling name.");
+                    return false;
+                }
+            }
+        }
+        node->mode = entry->reserved0 ? entry->reserved0 : (node->is_dir ? K64FS_MODE_DIR : K64FS_MODE_FILE);
+        node->created_tick = fs_next_clock();
+        node->modified_tick = entry->reserved1 ? entry->reserved1 : node->created_tick;
+        node->generation = fs_next_generation();
 
         if (node->is_dir) {
             node->data_offset = 0;
@@ -594,9 +699,10 @@ static int fs_resolve(const char* path, bool want_parent, char* leaf_out) {
             p++;
             continue;
         }
-        if (token_len + 1 < K64_FS_NAME_MAX) {
-            token[token_len++] = *p;
+        if (token_len + 1 >= K64_FS_NAME_MAX) {
+            return -1;
         }
+        token[token_len++] = *p;
         p++;
     }
 }
@@ -707,9 +813,9 @@ static bool fs_writeback_image(void) {
 
         entries[i].parent_index = (uint32_t)node->parent;
         entries[i].type = node->is_dir ? K64FS_TYPE_DIR : K64FS_TYPE_FILE;
-        entries[i].reserved0 = 0;
+        entries[i].reserved0 = (uint16_t)(node->mode & 0xFFFFu);
         entries[i].name_offset = (uint32_t)string_cursor;
-        entries[i].reserved1 = 0;
+        entries[i].reserved1 = (uint32_t)(node->modified_tick & 0xFFFFFFFFu);
 
         for (size_t j = 0; j < name_len; ++j) {
             fs_image_scratch[strings_offset + string_cursor + j] = (uint8_t)node->name[j];
@@ -839,7 +945,7 @@ bool k64_fs_mkdir(const char* path) {
     int parent = fs_resolve(path, true, leaf);
     int idx;
 
-    if (parent < 0 || !leaf[0] || fs_find_child(parent, leaf) >= 0) {
+    if (parent < 0 || !fs_valid_leaf_name(leaf) || fs_find_child(parent, leaf) >= 0) {
         return false;
     }
     idx = fs_alloc_node();
@@ -849,7 +955,64 @@ bool k64_fs_mkdir(const char* path) {
     nodes[idx].is_dir = true;
     nodes[idx].parent = parent;
     fs_copy(nodes[idx].name, K64_FS_NAME_MAX, leaf);
+    fs_init_node_metadata(&nodes[idx], true);
+    fs_mark_node_modified(&nodes[parent]);
     return fs_writeback_image();
+}
+
+bool k64_fs_mkdir_p(const char* path) {
+    char token[K64_FS_NAME_MAX];
+    int token_len = 0;
+    int current = (path && path[0] == '/') ? 0 : cwd_index;
+    const char* p = path;
+
+    if (!fs_running || !path || !*path) {
+        return false;
+    }
+    if (*p == '/') {
+        p++;
+    }
+    while (1) {
+        if (*p == '/' || *p == '\0') {
+            token[token_len] = '\0';
+            if (token_len > 0) {
+                int child;
+                if (k64_streq(token, ".")) {
+                } else if (k64_streq(token, "..")) {
+                    current = nodes[current].parent;
+                } else {
+                    if (!fs_valid_leaf_name(token)) {
+                        return false;
+                    }
+                    child = fs_find_child(current, token);
+                    if (child < 0) {
+                        child = fs_alloc_node();
+                        if (child < 0) {
+                            return false;
+                        }
+                        nodes[child].is_dir = true;
+                        nodes[child].parent = current;
+                        fs_copy(nodes[child].name, K64_FS_NAME_MAX, token);
+                        fs_init_node_metadata(&nodes[child], true);
+                        fs_mark_node_modified(&nodes[current]);
+                    } else if (!nodes[child].is_dir) {
+                        return false;
+                    }
+                    current = child;
+                }
+                token_len = 0;
+            }
+            if (*p == '\0') {
+                return fs_writeback_image();
+            }
+            p++;
+            continue;
+        }
+        if (token_len + 1 >= K64_FS_NAME_MAX) {
+            return false;
+        }
+        token[token_len++] = *p++;
+    }
 }
 
 bool k64_fs_touch(const char* path) {
@@ -857,12 +1020,16 @@ bool k64_fs_touch(const char* path) {
     int parent = fs_resolve(path, true, leaf);
     int idx;
 
-    if (parent < 0 || !leaf[0]) {
+    if (parent < 0 || !fs_valid_leaf_name(leaf)) {
         return false;
     }
     idx = fs_find_child(parent, leaf);
     if (idx >= 0) {
-        return !nodes[idx].is_dir;
+        if (nodes[idx].is_dir) {
+            return false;
+        }
+        fs_mark_node_modified(&nodes[idx]);
+        return fs_writeback_image();
     }
     idx = fs_alloc_node();
     if (idx < 0) {
@@ -872,6 +1039,8 @@ bool k64_fs_touch(const char* path) {
     nodes[idx].parent = parent;
     nodes[idx].data_size = 0;
     fs_copy(nodes[idx].name, K64_FS_NAME_MAX, leaf);
+    fs_init_node_metadata(&nodes[idx], false);
+    fs_mark_node_modified(&nodes[parent]);
     return fs_writeback_image();
 }
 
@@ -881,7 +1050,7 @@ bool k64_fs_write_file(const char* path, const char* text) {
     int idx;
     int size = fs_len(text ? text : "");
 
-    if (parent < 0 || !leaf[0]) {
+    if (parent < 0 || !fs_valid_leaf_name(leaf)) {
         return false;
     }
     idx = fs_find_child(parent, leaf);
@@ -897,6 +1066,7 @@ bool k64_fs_write_file(const char* path, const char* text) {
     if (!fs_store_mutable(&nodes[idx], (const uint8_t*)(text ? text : ""), size)) {
         return false;
     }
+    fs_mark_node_modified(&nodes[idx]);
     return fs_writeback_image();
 }
 
@@ -905,7 +1075,7 @@ bool k64_fs_write_file_raw(const char* path, const uint8_t* data, size_t size) {
     int parent = fs_resolve(path, true, leaf);
     int idx;
 
-    if (parent < 0 || !leaf[0] || size > 0x7FFFFFFF) {
+    if (parent < 0 || !fs_valid_leaf_name(leaf) || size > 0x7FFFFFFF) {
         return false;
     }
     idx = fs_find_child(parent, leaf);
@@ -921,6 +1091,47 @@ bool k64_fs_write_file_raw(const char* path, const uint8_t* data, size_t size) {
     if (!fs_store_mutable(&nodes[idx], data, (int)size)) {
         return false;
     }
+    fs_mark_node_modified(&nodes[idx]);
+    return fs_writeback_image();
+}
+
+bool k64_fs_write_file_range(const char* path, size_t offset, const uint8_t* data, size_t size) {
+    int idx = fs_resolve(path, false, NULL);
+    const uint8_t* current;
+    size_t new_size;
+    size_t old_size;
+
+    if (idx < 0 && offset == 0) {
+        return k64_fs_write_file_raw(path, data, size);
+    }
+    if (idx < 0 || nodes[idx].is_dir || (size > 0 && !data)) {
+        return false;
+    }
+    if (offset > (size_t)0x7FFFFFFF || size > (size_t)0x7FFFFFFF || offset + size < offset) {
+        return false;
+    }
+    old_size = (size_t)nodes[idx].data_size;
+    new_size = old_size > offset + size ? old_size : offset + size;
+    if (new_size > K64_FS_MUTABLE_MAX || new_size > (size_t)0x7FFFFFFF) {
+        return false;
+    }
+    current = fs_node_bytes(&nodes[idx]);
+    for (size_t i = 0; i < new_size; ++i) {
+        fs_append_buffer[i] = 0;
+    }
+    if (current) {
+        size_t copy = old_size < new_size ? old_size : new_size;
+        for (size_t i = 0; i < copy; ++i) {
+            fs_append_buffer[i] = current[i];
+        }
+    }
+    for (size_t i = 0; i < size; ++i) {
+        fs_append_buffer[offset + i] = data[i];
+    }
+    if (!fs_store_mutable(&nodes[idx], fs_append_buffer, (int)new_size)) {
+        return false;
+    }
+    fs_mark_node_modified(&nodes[idx]);
     return fs_writeback_image();
 }
 
@@ -956,6 +1167,27 @@ bool k64_fs_append_file(const char* path, const char* text) {
     if (!fs_store_mutable(&nodes[idx], fs_append_buffer, current_size + extra_size)) {
         return false;
     }
+    fs_mark_node_modified(&nodes[idx]);
+    return fs_writeback_image();
+}
+
+bool k64_fs_truncate(const char* path, size_t size) {
+    int idx = fs_resolve(path, false, NULL);
+    const uint8_t* current;
+    size_t old_size;
+
+    if (idx < 0 || nodes[idx].is_dir || size > K64_FS_MUTABLE_MAX || size > (size_t)0x7FFFFFFF) {
+        return false;
+    }
+    current = fs_node_bytes(&nodes[idx]);
+    old_size = (size_t)nodes[idx].data_size;
+    for (size_t i = 0; i < size; ++i) {
+        fs_append_buffer[i] = (current && i < old_size) ? current[i] : 0;
+    }
+    if (!fs_store_mutable(&nodes[idx], fs_append_buffer, (int)size)) {
+        return false;
+    }
+    fs_mark_node_modified(&nodes[idx]);
     return fs_writeback_image();
 }
 
@@ -965,6 +1197,7 @@ bool k64_fs_remove(const char* path) {
     if (idx <= 0 || nodes[idx].is_dir) {
         return false;
     }
+    fs_mark_node_modified(&nodes[nodes[idx].parent]);
     fs_remove_node(idx);
     return fs_writeback_image();
 }
@@ -978,6 +1211,7 @@ bool k64_fs_rmdir(const char* path) {
     if (cwd_index == idx) {
         cwd_index = nodes[idx].parent;
     }
+    fs_mark_node_modified(&nodes[nodes[idx].parent]);
     fs_remove_node(idx);
     return fs_writeback_image();
 }
@@ -992,7 +1226,7 @@ bool k64_fs_move(const char* src_path, const char* dst_path) {
         return false;
     }
     dst_parent = fs_resolve(dst_path, true, leaf);
-    if (dst_parent < 0 || !leaf[0]) {
+    if (dst_parent < 0 || !fs_valid_leaf_name(leaf)) {
         return false;
     }
     if (nodes[src_idx].is_dir && (dst_parent == src_idx || fs_is_descendant(src_idx, dst_parent))) {
@@ -1002,8 +1236,11 @@ bool k64_fs_move(const char* src_path, const char* dst_path) {
     if (existing >= 0 && existing != src_idx) {
         return false;
     }
+    fs_mark_node_modified(&nodes[nodes[src_idx].parent]);
     nodes[src_idx].parent = dst_parent;
     fs_copy(nodes[src_idx].name, K64_FS_NAME_MAX, leaf);
+    fs_mark_node_modified(&nodes[src_idx]);
+    fs_mark_node_modified(&nodes[dst_parent]);
     return fs_writeback_image();
 }
 
@@ -1018,7 +1255,7 @@ bool k64_fs_copy(const char* src_path, const char* dst_path) {
         return false;
     }
     dst_parent = fs_resolve(dst_path, true, leaf);
-    if (dst_parent < 0 || !leaf[0]) {
+    if (dst_parent < 0 || !fs_valid_leaf_name(leaf)) {
         return false;
     }
     dst_idx = fs_find_child(dst_parent, leaf);
@@ -1074,6 +1311,39 @@ bool k64_fs_read_file_raw(const char* path, const uint8_t** data, size_t* size) 
     return true;
 }
 
+bool k64_fs_read_file_range(const char* path, size_t offset, uint8_t* out, size_t size, size_t* read_out) {
+    int idx = fs_resolve(path, false, NULL);
+    const uint8_t* bytes;
+    size_t available;
+    size_t count;
+
+    if (read_out) {
+        *read_out = 0;
+    }
+    if (!out && size != 0) {
+        return false;
+    }
+    if (idx < 0 || nodes[idx].is_dir) {
+        return false;
+    }
+    bytes = fs_node_bytes(&nodes[idx]);
+    if (!bytes && nodes[idx].data_size != 0) {
+        return false;
+    }
+    available = (size_t)nodes[idx].data_size;
+    if (offset >= available) {
+        return true;
+    }
+    count = size < available - offset ? size : available - offset;
+    for (size_t i = 0; i < count; ++i) {
+        out[i] = bytes[offset + i];
+    }
+    if (read_out) {
+        *read_out = count;
+    }
+    return true;
+}
+
 bool k64_fs_stat(const char* path, k64_fs_stat_t* out) {
     int idx;
 
@@ -1083,6 +1353,10 @@ bool k64_fs_stat(const char* path, k64_fs_stat_t* out) {
     out->exists = false;
     out->is_dir = false;
     out->size = 0;
+    out->mode = 0;
+    out->created_tick = 0;
+    out->modified_tick = 0;
+    out->generation = 0;
     out->path[0] = '\0';
 
     idx = fs_resolve(path && path[0] ? path : ".", false, NULL);
@@ -1093,6 +1367,10 @@ bool k64_fs_stat(const char* path, k64_fs_stat_t* out) {
     out->exists = true;
     out->is_dir = nodes[idx].is_dir;
     out->size = nodes[idx].is_dir ? 0u : (size_t)nodes[idx].data_size;
+    out->mode = nodes[idx].mode;
+    out->created_tick = nodes[idx].created_tick;
+    out->modified_tick = nodes[idx].modified_tick;
+    out->generation = nodes[idx].generation;
     (void)fs_build_path(idx, out->path, (int)sizeof(out->path));
     return true;
 }

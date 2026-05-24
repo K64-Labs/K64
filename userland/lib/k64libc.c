@@ -24,6 +24,7 @@
 #define K64_SYSCALL_WAITPID 21ULL
 #define K64_SYSCALL_PIPE 22ULL
 #define K64_SYSCALL_WRITEFD 23ULL
+#define K64_SYSCALL_STAT 24ULL
 
 int64_t k64_syscall3(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2) {
     int64_t ret;
@@ -162,6 +163,13 @@ int64_t k64_pipe(int fds[2]) {
     return k64_syscall3(K64_SYSCALL_PIPE,
                         (uint64_t)(uintptr_t)fds,
                         0,
+                        0);
+}
+
+int64_t k64_stat(const char* path, k64_stat_t* out) {
+    return k64_syscall3(K64_SYSCALL_STAT,
+                        (uint64_t)(uintptr_t)path,
+                        (uint64_t)(uintptr_t)out,
                         0);
 }
 

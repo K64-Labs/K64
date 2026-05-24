@@ -1077,6 +1077,29 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             }
             return K64_ERR_BADFD;
         }
+        case K64_SYSCALL_STAT: {
+            char path[256];
+            k64_fs_stat_t fs_stat;
+            k64_stat_t out;
+
+            if (!frame->rdi || !frame->rsi) {
+                return K64_ERR_FAULT;
+            }
+            if (!copy_user_string((const char*)(uintptr_t)frame->rdi, path, sizeof(path))) {
+                return K64_ERR_FAULT;
+            }
+            if (!k64_fs_stat(path, &fs_stat)) {
+                return K64_ERR_NOENT;
+            }
+            out.type = fs_stat.is_dir ? 1u : 2u;
+            out.size = fs_stat.size;
+            out.flags = 0;
+            out.mode = fs_stat.mode;
+            out.created_tick = fs_stat.created_tick;
+            out.modified_tick = fs_stat.modified_tick;
+            out.generation = fs_stat.generation;
+            return user_write(frame->rsi, &out, sizeof(out)) ? K64_OK : K64_ERR_FAULT;
+        }
         default:
             return K64_ERR_NOSYS;
     }

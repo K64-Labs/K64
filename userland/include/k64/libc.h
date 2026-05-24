@@ -53,6 +53,16 @@ typedef struct {
 } k64_spawn_opts_t;
 
 typedef struct {
+    uint64_t type;
+    uint64_t size;
+    uint64_t flags;
+    uint64_t mode;
+    uint64_t created_tick;
+    uint64_t modified_tick;
+    uint64_t generation;
+} k64_stat_t;
+
+typedef struct {
     uint32_t width;
     uint32_t height;
     uint32_t pitch;
@@ -98,6 +108,7 @@ int64_t  k64_proc_info(uint64_t pid, k64_proc_info_t* info);
 int64_t  k64_waitpid(uint64_t pid, int64_t* exit_code);
 int64_t  k64_waitpid_flags(uint64_t pid, int64_t* exit_code, uint64_t flags);
 int64_t  k64_pipe(int fds[2]);
+int64_t  k64_stat(const char* path, k64_stat_t* out);
 uint64_t k64_uptime_ticks(void);
 size_t   k64_strlen(const char* text);
 int      k64_strcmp(const char* a, const char* b);

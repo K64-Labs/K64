@@ -56,16 +56,24 @@ int main(void) {
     expect_true("append note", k64_fs_append_file("/tmp/work/note.txt", " world"));
     expect_true("cat note", k64_fs_cat("/tmp/work/note.txt", buf, sizeof(buf)));
     expect_string("cat note value", buf, "hello world");
+    expect_true("range write", k64_fs_write_file_range("/tmp/work/note.txt", 6, (const uint8_t*)"K64", 3));
+    expect_true("cat range write", k64_fs_cat("/tmp/work/note.txt", buf, sizeof(buf)));
+    expect_string("cat range value", buf, "hello K64ld");
+    expect_true("truncate note", k64_fs_truncate("/tmp/work/note.txt", 9));
+    expect_true("cat truncated", k64_fs_cat("/tmp/work/note.txt", buf, sizeof(buf)));
+    expect_string("cat truncated value", buf, "hello K64");
 
     expect_true("copy note", k64_fs_copy("/tmp/work/note.txt", "/tmp/work/copy.txt"));
     expect_true("cat copy", k64_fs_cat("/tmp/work/copy.txt", buf, sizeof(buf)));
-    expect_string("cat copy value", buf, "hello world");
+    expect_string("cat copy value", buf, "hello K64");
 
     expect_true("move copy", k64_fs_move("/tmp/work/copy.txt", "/tmp/work/moved.txt"));
     expect_true("stat moved", k64_fs_stat("/tmp/work/moved.txt", &st));
     expect_true("stat moved exists", st.exists);
     expect_true("stat moved file", !st.is_dir);
-    expect_true("stat moved size", st.size == 11);
+    expect_true("stat moved size", st.size == 9);
+    expect_true("stat moved mode", st.mode != 0);
+    expect_true("stat moved generation", st.generation != 0);
     expect_string("stat moved path", st.path, "/tmp/work/moved.txt");
 
     expect_true("ls /tmp/work", k64_fs_ls("/tmp/work", buf, sizeof(buf)));
@@ -77,6 +85,10 @@ int main(void) {
     expect_true("rmdir work", k64_fs_rmdir("/tmp/work"));
     expect_true("ls /tmp", k64_fs_ls("/tmp", buf, sizeof(buf)));
     expect_true("work removed", strstr(buf, "work/") == NULL);
+    expect_true("mkdir -p nested", k64_fs_mkdir_p("/tmp/a/b/c"));
+    expect_true("stat mkdir-p", k64_fs_stat("/tmp/a/b/c", &st));
+    expect_true("stat mkdir-p dir", st.exists && st.is_dir);
+    expect_true("reject long name", !k64_fs_touch("/tmp/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"));
 
     expect_true("mkdir boot", k64_fs_mkdir("/boot"));
     expect_true("touch kernel elf", k64_fs_touch("/boot/k64-kernel-v9.9.9.elf"));

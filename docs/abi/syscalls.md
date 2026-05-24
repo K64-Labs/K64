@@ -64,6 +64,7 @@ Normal exits currently transition to `ZOMBIE`; faulted user programs transition 
 | `21` | `waitpid` | `pid, out_exit_code, flags` | `0` or error |
 | `22` | `pipe` | `out_fds` | `0` or error |
 | `23` | `writefd` | `fd, ptr, len` | bytes written or error |
+| `24` | `stat` | `path, out` | `0` or error |
 
 ## Notes
 
@@ -76,3 +77,4 @@ Normal exits currently transition to `ZOMBIE`; faulted user programs transition 
 - File descriptors are per active user process. `0`, `1`, and `2` are stdin, stdout, and stderr; `open()` returns `>= 3`.
 - Anonymous pipes use fixed kernel buffers. Empty pipes with an open write end return `K64_ERR_AGAIN`; empty pipes with no write end return `0`.
 - `write_file` is still a whole-file helper and is not the same as POSIX `write`.
+- `stat(path, out)` returns type, size, flags, mode, created tick, modified tick, and generation fields through the userland `k64_stat_t` structure.

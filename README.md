@@ -309,12 +309,13 @@ Current syscall ABI is documented in `docs/abi/syscalls.md`. The active syscall 
 - `21`: `waitpid(pid, out_exit_code, flags)`
 - `22`: `pipe(out_fds)`
 - `23`: `writefd(fd, ptr, len)` for fd-backed writes beyond stdio
+- `24`: `stat(path, out)`
 
 This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64FS`, save complete files, use structured key input, move files, list directories, reserve child process identities, query process metadata, use early wait flags, create anonymous pipes, and draw text-mode cell regions. It is not a POSIX-compatible libc and there is no fork/execve ABI, dynamic linker, shared-library loader, socket API, or mature VFS.
 
 The process model now records a stable PID, parent PID, scheduler task ID, state, exit code, start/end ticks, runtime ticks, fault vector, fault RIP, and image path for each K64-native ELF run. Normal exits become `ZOMBIE` records and remain visible until a parent reaps them. `waitpid()` enforces direct parent-child ownership and supports `K64_WAIT_NOHANG`; `K64_WAIT_BLOCK` is accepted but currently returns `K64_ERR_AGAIN` for running children rather than burning CPU in a kernel loop. `spawn()` reserves a stable child PID and parent relationship, but spawned ring-3 child execution is not yet scheduled concurrently because K64 still has one active user context at a time.
 
-The file descriptor model is early but real. Each active user process has a small fd table; `0`, `1`, and `2` are stdin/stdout/stderr; `open()` returns fd values `>= 3`; read/close validate descriptors; stdout/stderr writes go through the fd path; and `pipe()` creates anonymous read/write endpoints backed by fixed kernel ring buffers. File writes are still primarily the whole-file `write_file()` helper.
+The file descriptor model is early but real. Each active user process has a small fd table; `0`, `1`, and `2` are stdin/stdout/stderr; `open()` returns fd values `>= 3`; read/close validate descriptors; stdout/stderr writes go through the fd path; `stat()` exposes filesystem metadata to userland; and `pipe()` creates anonymous read/write endpoints backed by fixed kernel ring buffers. File writes are still primarily the whole-file `write_file()` helper.
 
 Security boundary:
 
@@ -862,8 +863,10 @@ The format is optimized for:
 - repeated reads
 - simple structure
 - easy host-side image generation
+- deterministic validation during kernel mount
+- compatibility with the GRUB-side reader
 
-It is intentionally not a journaled or crash-safe disk filesystem.
+It is intentionally not a journaled or crash-safe disk filesystem. K64FS is still a compact image-backed filesystem, not a modern extent/tree allocator, but the kernel side now enforces stricter structure checks and carries enough metadata for real userland tools.
 
 ### On-image layout
 
@@ -896,11 +899,11 @@ Entry:
 typedef struct {
     uint32_t parent_index;
     uint16_t type;
-    uint16_t reserved0;
+    uint16_t reserved0; /* mode bits in current images */
     uint32_t name_offset;
     uint32_t data_offset;
     uint32_t data_size;
-    uint32_t reserved1;
+    uint32_t reserved1; /* low modified tick in current images */
 } __attribute__((packed)) k64fs_entry_t;
 ```
 
@@ -909,13 +912,15 @@ Type values:
 - `1`: directory
 - `2`: file
 
+Current images store simple mode bits in `reserved0`; older images with zero mode fields still mount and receive default file/directory modes in memory.
+
 ### Kernel-side representation
 
 The mounted image is parsed into a fixed in-memory node table:
 
-- max nodes: `256`
-- max image size: `2 MiB`
-- mutable write buffer: `512 KiB`
+- max nodes: `1024`
+- max packed image size: `16 MiB`
+- mutable write buffer: `16 MiB`
 
 Each node tracks:
 
@@ -924,6 +929,9 @@ Each node tracks:
 - parent index
 - short name
 - file offsets and sizes
+- mode bits
+- created/modified ticks
+- generation counters
 - whether the file content is “dirty” and backed by the mutable area
 
 ### Mount behavior
@@ -946,9 +954,12 @@ Unmodified files are read directly from the packed image already loaded into RAM
 Mutations such as:
 
 - `mkdir`
+- `mkdirp`
 - `touch`
 - `write`
+- range write
 - `append`
+- `truncate`
 - `rm`
 - `rmdir`
 - `mv`
@@ -960,11 +971,14 @@ If the mounted root came from a block device, the rebuilt image is also flushed 
 
 That means `K64FS` now behaves as a real read/write filesystem for everyday shell usage, not just a static system-image mount. Files and directories can be created, modified, moved, copied, inspected, and removed through the `fsctl` command surface, and those changes survive reboot when booted with the default attached disk image.
 
+The parser rejects malformed names, unterminated strings, duplicate sibling names, invalid parent ordering, invalid roots, and data ranges outside the packed image. Path resolution now rejects overlong path components instead of silently truncating them.
+
 Current boundaries:
 
 - the persistent path supports both older raw `K64FS` disks and the current BIOS-bootable disk layout
 - the first implemented backend is ATA PIO, not AHCI or NVMe
 - there is no journal or crash-recovery layer
+- writes still repack the image rather than updating independently allocated blocks
 
 ### GRUB-side support
 

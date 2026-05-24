@@ -1429,6 +1429,15 @@ static bool fsctl_write_handler(const char* command, const char* args) {
     return true;
 }
 
+static bool fsctl_mkdirp_handler(const char* command, const char* args) {
+    (void)command;
+    if (!args || !args[0] || !k64_fs_mkdir_p(args)) {
+        fsctl_print("mkdirp failed");
+        return true;
+    }
+    return true;
+}
+
 static bool fsctl_append_handler(const char* command, const char* args) {
     char path[64];
     const char* rest;
@@ -1566,6 +1575,10 @@ static bool fsctl_stat_handler(const char* command, const char* args) {
     k64_term_write(st.path);
     k64_term_write(" size=");
     k64_term_write_dec(st.size);
+    k64_term_write(" mode=");
+    k64_term_write_hex(st.mode);
+    k64_term_write(" gen=");
+    k64_term_write_dec(st.generation);
     k64_term_putc('\n');
     return true;
 }
@@ -1605,6 +1618,7 @@ static bool fsctl_start(k64_service_t* service) {
     (void)k64_system_register_command("fsctl", "ls", fsctl_ls_handler);
     (void)k64_system_register_command("fsctl", "cd", fsctl_cd_handler);
     (void)k64_system_register_command("fsctl", "mkdir", fsctl_mkdir_handler);
+    (void)k64_system_register_command("fsctl", "mkdirp", fsctl_mkdirp_handler);
     (void)k64_system_register_command("fsctl", "touch", fsctl_touch_handler);
     (void)k64_system_register_command("fsctl", "cat", fsctl_cat_handler);
     (void)k64_system_register_command("fsctl", "write", fsctl_write_handler);

@@ -28,6 +28,7 @@
 #define K64_SYSCALL_WAITPID 21ULL
 #define K64_SYSCALL_PIPE 22ULL
 #define K64_SYSCALL_WRITEFD 23ULL
+#define K64_SYSCALL_STAT 24ULL
 
 #define K64_PROC_STATE_EMPTY 0ULL
 #define K64_PROC_STATE_RUNNING 1ULL
@@ -52,6 +53,16 @@ typedef struct {
     uint64_t fault_rip;
     char     path[K64_PROC_PATH_MAX];
 } k64_proc_info_t;
+
+typedef struct {
+    uint64_t type;
+    uint64_t size;
+    uint64_t flags;
+    uint64_t mode;
+    uint64_t created_tick;
+    uint64_t modified_tick;
+    uint64_t generation;
+} k64_stat_t;
 
 void k64_usermode_init(void);
 int64_t k64_usermode_execute(const k64_vm_space_t* space, uint64_t entry, uint64_t user_stack_top);
