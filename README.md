@@ -306,6 +306,14 @@ Current syscall ABI:
 
 This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64FS`, save complete files, use structured key input, move files, list directories, spawn another `/ex` program through the kernel worker queue, and draw text-mode cell regions. It is not a POSIX-compatible libc and there is no Unix process tree, dynamic linker, pipe model, or fork/exec ABI. The current process table is accounting and lifecycle visibility for K64-native ELF runs.
 
+Security boundary:
+
+- syscall strings and byte buffers are copied through VMM-checked user-memory helpers instead of being dereferenced as kernel pointers
+- kernel-to-user outputs such as `read`, `fb_info`, and `list_dir` are written back only through checked user mappings
+- large user writes are bounded before the filesystem sees them
+- text framebuffer blits are copied into a bounded kernel staging buffer before drawing
+- malformed user pointers return syscall errors instead of letting user programs read or write arbitrary kernel addresses
+
 ### Userland libc seed
 
 Files:
@@ -1331,6 +1339,8 @@ Important limits:
 - no relocations beyond simple PT_LOAD copying
 - no dynamic linker
 - no symbol resolution
+- loadable segments must fit inside the accepted user virtual-address window and stay below the per-segment size cap
+- ELF program headers are rejected when their file ranges, memory ranges, or alignments overflow or contradict the file size
 - only `/ex/*.elf` currently use the ring-3 path
 - ELF-backed services and drivers still execute on the kernel side
 - file writes are whole-file saves, not writable file descriptors
@@ -1703,9 +1713,9 @@ In practical terms:
 
 These are the main technical limits of the repository as it exists today.
 
-### 1. Virtual memory is isolated by address space, but not by privilege level
+### 1. Virtual memory isolation is strongest for `/ex` user programs
 
-Services and ELF-backed executables now get separate page tables and private stacks, but K64 still runs them in ring 0 and still shares the low identity-mapped kernel region. That is real address-space separation for service/app-private mappings, but it is not yet a hardened user/kernel security boundary.
+Standalone `/ex` user programs enter ring 3, use checked syscall copies for user pointers, and fault back into the kernel on invalid memory access. Services and ELF-backed drivers still get separate page tables and private stacks, but they execute on the kernel side and are not yet a full untrusted-code boundary.
 
 ### 2. Persistent storage is intentionally simple
 
@@ -1732,9 +1742,9 @@ The platform assumptions are still:
 
 That is appropriate for QEMU and some older real hardware, but not yet for modern UEFI/USB/NVMe-first systems.
 
-### 5. User security is intentionally simple
+### 5. Account security is intentionally simple
 
-Passwords are hashed rather than stored in clear text, but the scheme is still lightweight, session state is simple, and privilege elevation is a service-level model rather than a hardened security architecture.
+Passwords are hashed rather than stored in clear text, but the scheme is still lightweight, session state is simple, and privilege elevation is a service-level model. This is better than plain text storage, but it is not a modern password-authentication subsystem yet.
 
 ### 6. Services and drivers are registry-based, not full on-disk executables
 

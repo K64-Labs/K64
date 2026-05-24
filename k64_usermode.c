@@ -17,6 +17,8 @@
 #define K64_USER_PROCESS_PATH_MAX 96
 #define K64_USER_SPAWN_MAX 8
 #define K64_USER_SPAWN_ARGS_MAX 256
+#define K64_USER_SYSCALL_IO_MAX 65536
+#define K64_USER_FBBLIT_CELLS_MAX 4096
 
 typedef struct {
     uint32_t width;
@@ -74,6 +76,7 @@ typedef struct {
     int64_t  result;
     uint64_t active;
     int      process_index;
+    const k64_vm_space_t* space;
     k64_user_fd_t fds[8];
 } k64_user_exec_context_t;
 
@@ -124,6 +127,9 @@ extern void k64_syscall_stub(void);
 
 static k64_tss64_t tss64;
 static uint8_t syscall_stack[16384] __attribute__((aligned(16)));
+static uint8_t syscall_io_buffer[K64_USER_SYSCALL_IO_MAX];
+static char syscall_text_buffer[512];
+static uint16_t syscall_cell_buffer[K64_USER_FBBLIT_CELLS_MAX];
 static k64_user_exec_context_t active_ctx;
 static k64_user_process_t process_table[K64_USER_PROCESS_MAX];
 static uint64_t next_user_pid = 5000;
@@ -165,6 +171,7 @@ static void ctx_clear(void) {
     active_ctx.result = -1;
     active_ctx.active = 0;
     active_ctx.process_index = -1;
+    active_ctx.space = NULL;
     for (size_t i = 0; i < sizeof(active_ctx.fds) / sizeof(active_ctx.fds[0]); ++i) {
         active_ctx.fds[i].used = false;
         active_ctx.fds[i].data = NULL;
@@ -248,6 +255,31 @@ static void process_finish(int index, k64_user_process_state_t state, int64_t ex
     process_table[index].end_tick = k64_pit_get_ticks();
 }
 
+static bool user_read(uint64_t user_ptr, void* out, size_t size) {
+    if (size == 0) {
+        return true;
+    }
+    return active_ctx.space && k64_vmm_read_user(active_ctx.space, user_ptr, out, size);
+}
+
+static bool user_write(uint64_t user_ptr, const void* data, size_t size) {
+    if (size == 0) {
+        return true;
+    }
+    return active_ctx.space && k64_vmm_write_user(active_ctx.space, user_ptr, data, size);
+}
+
+static bool user_buffer_range_ok(uint64_t user_ptr, size_t size) {
+    if (size == 0) {
+        return true;
+    }
+    if (!active_ctx.space || user_ptr + (uint64_t)(size - 1) < user_ptr) {
+        return false;
+    }
+    return k64_vmm_is_mapped(active_ctx.space, user_ptr, true) &&
+           k64_vmm_is_mapped(active_ctx.space, user_ptr + (uint64_t)(size - 1), true);
+}
+
 static void write_text(const char* text, size_t len) {
     for (size_t i = 0; i < len; ++i) {
         if (!text[i]) {
@@ -257,14 +289,42 @@ static void write_text(const char* text, size_t len) {
     }
 }
 
+static int64_t write_user_text(uint64_t user_ptr, size_t len) {
+    size_t written = 0;
+
+    if (len == 0) {
+        return 0;
+    }
+    if (!user_buffer_range_ok(user_ptr, len)) {
+        return -1;
+    }
+    while (written < len) {
+        size_t chunk = len - written;
+        if (chunk > sizeof(syscall_text_buffer)) {
+            chunk = sizeof(syscall_text_buffer);
+        }
+        if (!user_read(user_ptr + written, syscall_text_buffer, chunk)) {
+            return -1;
+        }
+        write_text(syscall_text_buffer, chunk);
+        written += chunk;
+    }
+    return (int64_t)written;
+}
+
 static bool copy_user_string(const char* user_ptr, char* out, size_t out_size) {
     size_t i = 0;
+    uint64_t addr = (uint64_t)(uintptr_t)user_ptr;
 
     if (!user_ptr || !out || out_size == 0) {
         return false;
     }
     while (i + 1 < out_size) {
-        char ch = user_ptr[i];
+        char ch;
+        if (!user_read(addr + i, &ch, sizeof(ch))) {
+            out[i] = '\0';
+            return false;
+        }
         out[i] = ch;
         if (ch == '\0') {
             return true;
@@ -441,11 +501,9 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             break;
         case K64_SYSCALL_WRITE:
             if (frame->rdi <= 2 && frame->rdx > 0) {
-                write_text((const char*)(uintptr_t)frame->rsi, (size_t)frame->rdx);
-                return (int64_t)frame->rdx;
+                return write_user_text(frame->rsi, (size_t)frame->rdx);
             }
-            write_text((const char*)(uintptr_t)frame->rdi, (size_t)frame->rsi);
-            return (int64_t)frame->rsi;
+            return write_user_text(frame->rdi, (size_t)frame->rsi);
         case K64_SYSCALL_YIELD:
             k64_sched_yield();
             return 0;
@@ -478,13 +536,23 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             if (!buf || want == 0) {
                 return 0;
             }
+            if (!user_buffer_range_ok((uint64_t)(uintptr_t)buf, want)) {
+                return -1;
+            }
             if (fd == 0) {
-                buf[0] = (uint8_t)read_stdin_char_blocking();
+                uint8_t ch = (uint8_t)read_stdin_char_blocking();
+                if (!user_write((uint64_t)(uintptr_t)buf, &ch, sizeof(ch))) {
+                    return -1;
+                }
                 count = 1;
                 while (count < want) {
                     char ch;
                     if (k64_serial_get_char(&ch) || k64_keyboard_get_char(&ch)) {
-                        buf[count++] = (uint8_t)ch;
+                        uint8_t byte = (uint8_t)ch;
+                        if (!user_write((uint64_t)(uintptr_t)buf + count, &byte, sizeof(byte))) {
+                            return -1;
+                        }
+                        count++;
                     } else {
                         break;
                     }
@@ -500,8 +568,10 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             }
             remaining = active_ctx.fds[fd_index].size - active_ctx.fds[fd_index].offset;
             count = want < remaining ? want : remaining;
-            for (size_t i = 0; i < count; ++i) {
-                buf[i] = active_ctx.fds[fd_index].data[active_ctx.fds[fd_index].offset + i];
+            if (!user_write((uint64_t)(uintptr_t)buf,
+                            active_ctx.fds[fd_index].data + active_ctx.fds[fd_index].offset,
+                            count)) {
+                return -1;
             }
             active_ctx.fds[fd_index].offset += count;
             return (int64_t)count;
@@ -536,9 +606,11 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             if (!copy_user_string((const char*)(uintptr_t)frame->rdi, path, sizeof(path))) {
                 return -1;
             }
-            return k64_fs_write_file_raw(path,
-                                         (const uint8_t*)(uintptr_t)frame->rsi,
-                                         (size_t)frame->rdx) ? 0 : -1;
+            if (frame->rdx > K64_USER_SYSCALL_IO_MAX ||
+                !user_read(frame->rsi, syscall_io_buffer, (size_t)frame->rdx)) {
+                return -1;
+            }
+            return k64_fs_write_file_raw(path, syscall_io_buffer, (size_t)frame->rdx) ? 0 : -1;
         }
         case K64_SYSCALL_CLEAR:
             k64_term_clear();
@@ -554,33 +626,37 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             return (int64_t)((uint64_t)(uint16_t)k64_term_cols() |
                              ((uint64_t)(uint16_t)k64_term_rows() << 16));
         case K64_SYSCALL_FBINFO: {
-            k64_user_fb_info_t* info = (k64_user_fb_info_t*)(uintptr_t)frame->rdi;
-            if (!info) {
+            k64_user_fb_info_t info;
+            if (!frame->rdi) {
                 return -1;
             }
-            info->width = (uint32_t)k64_term_cols();
-            info->height = (uint32_t)k64_term_rows();
-            info->pitch = (uint32_t)k64_term_cols();
-            info->format = 1; /* VGA text cells: low byte char, high byte color. */
-            info->cell_size = sizeof(uint16_t);
-            info->flags = 1;
-            return 0;
+            info.width = (uint32_t)k64_term_cols();
+            info.height = (uint32_t)k64_term_rows();
+            info.pitch = (uint32_t)k64_term_cols();
+            info.format = 1; /* VGA text cells: low byte char, high byte color. */
+            info.cell_size = sizeof(uint16_t);
+            info.flags = 1;
+            return user_write(frame->rdi, &info, sizeof(info)) ? 0 : -1;
         }
         case K64_SYSCALL_FBBLIT: {
-            k64_user_fb_blit_t* req = (k64_user_fb_blit_t*)(uintptr_t)frame->rdi;
+            k64_user_fb_blit_t req;
             uint64_t max_cells;
-            if (!req || !req->cells || req->width == 0 || req->height == 0) {
+            if (!frame->rdi || !user_read(frame->rdi, &req, sizeof(req)) ||
+                !req.cells || req.width == 0 || req.height == 0) {
                 return -1;
             }
-            max_cells = (uint64_t)req->width * (uint64_t)req->height;
-            if (req->count < max_cells) {
+            max_cells = (uint64_t)req.width * (uint64_t)req.height;
+            if (req.width > 512 || req.height > 512 ||
+                max_cells == 0 || max_cells > K64_USER_FBBLIT_CELLS_MAX ||
+                req.count < max_cells ||
+                !user_read((uint64_t)(uintptr_t)req.cells, syscall_cell_buffer, (size_t)max_cells * sizeof(uint16_t))) {
                 return -1;
             }
-            k64_term_blit_cells(req->x,
-                                req->y,
-                                (int)req->width,
-                                (int)req->height,
-                                req->cells,
+            k64_term_blit_cells(req.x,
+                                req.y,
+                                (int)req.width,
+                                (int)req.height,
+                                syscall_cell_buffer,
                                 (size_t)max_cells);
             return (int64_t)max_cells;
         }
@@ -593,7 +669,18 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
                 !out || out_size <= 0) {
                 return -1;
             }
-            return k64_fs_ls(path, out, out_size) ? 0 : -1;
+            if (out_size > (int)sizeof(syscall_io_buffer)) {
+                out_size = (int)sizeof(syscall_io_buffer);
+            }
+            for (int i = 0; i < out_size; ++i) {
+                syscall_io_buffer[i] = 0;
+            }
+            if (!k64_fs_ls(path, (char*)syscall_io_buffer, out_size)) {
+                return -1;
+            }
+            return user_write((uint64_t)(uintptr_t)out,
+                              syscall_io_buffer,
+                              k64_strlen((const char*)syscall_io_buffer) + 1) ? 0 : -1;
         }
         case K64_SYSCALL_MOVE: {
             char src[256];
@@ -659,6 +746,7 @@ int64_t k64_usermode_execute_named(const k64_vm_space_t* space,
     active_ctx.active = 1;
     active_ctx.result = -1;
     active_ctx.process_index = process_index;
+    active_ctx.space = space;
     active_ctx.result = k64_user_enter_asm(space->cr3, user_stack_top, entry, &active_ctx);
     if (process_table[process_index].state == K64_USER_PROCESS_RUNNING) {
         process_finish(process_index, K64_USER_PROCESS_EXITED, active_ctx.result);

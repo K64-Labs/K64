@@ -37,6 +37,7 @@ bool k64_vmm_map_user_range(k64_vm_space_t* space,
                             size_t file_size,
                             size_t mem_size);
 bool k64_vmm_is_mapped(const k64_vm_space_t* space, uint64_t virt_addr, bool require_user);
+bool k64_vmm_read_user(const k64_vm_space_t* space, uint64_t virt_addr, void* data, size_t size);
 bool k64_vmm_write_user(const k64_vm_space_t* space, uint64_t virt_addr, const void* data, size_t size);
 uint64_t k64_vmm_call_isolated(const k64_vm_space_t* space,
                                uint64_t entry,

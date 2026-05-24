@@ -451,6 +451,10 @@ bool k64_vmm_is_mapped(const k64_vm_space_t* space, uint64_t virt_addr, bool req
     return (entry & (K64_PAGE_PRESENT | user_mask)) == (K64_PAGE_PRESENT | user_mask);
 }
 
+static bool vmm_range_overflows(uint64_t virt_addr, size_t size) {
+    return size != 0 && virt_addr + (uint64_t)(size - 1) < virt_addr;
+}
+
 static bool vmm_translate(const k64_vm_space_t* space,
                           uint64_t virt_addr,
                           bool require_user,
@@ -501,11 +505,39 @@ static bool vmm_translate(const k64_vm_space_t* space,
     return true;
 }
 
+bool k64_vmm_read_user(const k64_vm_space_t* space, uint64_t virt_addr, void* data, size_t size) {
+    uint8_t* dst = (uint8_t*)data;
+    size_t done = 0;
+
+    if ((!data && size != 0) || vmm_range_overflows(virt_addr, size)) {
+        return false;
+    }
+    while (done < size) {
+        uint64_t phys;
+        size_t page_off = (size_t)((virt_addr + done) & (K64_PAGE_SIZE - 1ULL));
+        size_t chunk = K64_PAGE_SIZE - page_off;
+        const uint8_t* src;
+
+        if (chunk > size - done) {
+            chunk = size - done;
+        }
+        if (!vmm_translate(space, virt_addr + done, true, &phys)) {
+            return false;
+        }
+        src = (const uint8_t*)(uintptr_t)phys;
+        for (size_t i = 0; i < chunk; ++i) {
+            dst[done + i] = src[i];
+        }
+        done += chunk;
+    }
+    return true;
+}
+
 bool k64_vmm_write_user(const k64_vm_space_t* space, uint64_t virt_addr, const void* data, size_t size) {
     const uint8_t* src = (const uint8_t*)data;
     size_t done = 0;
 
-    if (!data && size != 0) {
+    if ((!data && size != 0) || vmm_range_overflows(virt_addr, size)) {
         return false;
     }
     while (done < size) {

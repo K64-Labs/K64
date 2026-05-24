@@ -18,6 +18,9 @@
 #define K64_ELF_VM_STRIDE 0x0000000001000000ULL
 #define K64_ELF_VM_MAX_SLOTS 256ULL
 #define K64_ELF_PID_BASE 0x100000000ULL
+#define K64_ELF_USER_MIN 0x0000000000010000ULL
+#define K64_ELF_USER_MAX 0x0000000080000000ULL
+#define K64_ELF_SEGMENT_MAX 0x0000000001000000ULL
 #define K64_ELF_ARG_MAX 16
 #define K64_ELF_ARG_TEXT_MAX 384
 
@@ -60,6 +63,20 @@ static k64_elf_args_t elf_args;
 
 static uint64_t elf_align_up(uint64_t value, uint64_t align) {
     return (value + align - 1ULL) & ~(align - 1ULL);
+}
+
+static bool elf_add_overflows(uint64_t a, uint64_t b) {
+    return a + b < a;
+}
+
+static bool elf_range_valid(uint64_t start, uint64_t size, uint64_t min, uint64_t max) {
+    uint64_t end;
+
+    if (size == 0 || elf_add_overflows(start, size)) {
+        return false;
+    }
+    end = start + size;
+    return start >= min && end <= max;
 }
 
 static uint64_t elf_pid_for_entry(uint64_t fallback_pid, uint64_t entry) {
@@ -197,6 +214,8 @@ static bool elf_execute_impl(const char* path, bool user_mode, const char* args_
         return false;
     }
     if (ehdr->e_phentsize != sizeof(k64_elf64_phdr_t) ||
+        ehdr->e_phnum == 0 ||
+        elf_add_overflows(ehdr->e_phoff, (uint64_t)ehdr->e_phnum * sizeof(k64_elf64_phdr_t)) ||
         ehdr->e_phoff + (uint64_t)ehdr->e_phnum * sizeof(k64_elf64_phdr_t) > file_size) {
         K64_LOG_WARN("ELF: bad program header table.");
         return false;
@@ -207,16 +226,37 @@ static bool elf_execute_impl(const char* path, bool user_mode, const char* args_
         const k64_elf64_phdr_t* ph = &phdrs[i];
         uint64_t seg_start;
         uint64_t seg_end;
+        uint64_t seg_limit;
 
         if (ph->p_type != K64_PT_LOAD || ph->p_memsz == 0) {
             continue;
         }
-        if (ph->p_offset + ph->p_filesz > file_size) {
+        if (ph->p_filesz > ph->p_memsz ||
+            ph->p_memsz > K64_ELF_SEGMENT_MAX ||
+            elf_add_overflows(ph->p_offset, ph->p_filesz) ||
+            ph->p_offset + ph->p_filesz > file_size) {
             K64_LOG_WARN("ELF: segment exceeds file.");
             return false;
         }
+        if (!elf_range_valid(ph->p_vaddr, ph->p_memsz, K64_ELF_USER_MIN, K64_ELF_USER_MAX)) {
+            K64_LOG_WARN("ELF: segment address is outside user range.");
+            return false;
+        }
+        if (ph->p_align != 0 && (ph->p_align & (ph->p_align - 1ULL)) != 0) {
+            K64_LOG_WARN("ELF: segment alignment is invalid.");
+            return false;
+        }
+        if (elf_add_overflows(ph->p_vaddr, ph->p_memsz)) {
+            K64_LOG_WARN("ELF: segment address overflow.");
+            return false;
+        }
+        seg_limit = ph->p_vaddr + ph->p_memsz;
         seg_start = ph->p_vaddr & ~(K64_ELF_PAGE - 1ULL);
-        seg_end = elf_align_up(ph->p_vaddr + ph->p_memsz, K64_ELF_PAGE);
+        if (elf_add_overflows(seg_limit, K64_ELF_PAGE - 1ULL)) {
+            K64_LOG_WARN("ELF: segment alignment overflow.");
+            return false;
+        }
+        seg_end = elf_align_up(seg_limit, K64_ELF_PAGE);
         if (seg_start < min_vaddr) {
             min_vaddr = seg_start;
         }
@@ -225,7 +265,9 @@ static bool elf_execute_impl(const char* path, bool user_mode, const char* args_
         }
     }
 
-    if (min_vaddr == UINT64_MAX || max_vaddr <= min_vaddr || ehdr->e_entry < min_vaddr || ehdr->e_entry >= max_vaddr) {
+    if (min_vaddr == UINT64_MAX || max_vaddr <= min_vaddr ||
+        ehdr->e_entry < min_vaddr || ehdr->e_entry >= max_vaddr ||
+        ehdr->e_entry < K64_ELF_USER_MIN || ehdr->e_entry >= K64_ELF_USER_MAX) {
         K64_LOG_WARN("ELF: no loadable image.");
         return false;
     }

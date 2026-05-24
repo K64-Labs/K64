@@ -328,6 +328,7 @@ def main():
             ("elfrun /ex/procinfo.elf", "procinfo: pid="),
             ("elfrun /ex/args.elf one two", "argv[2]=two"),
             ("elfrun /ex/libctest.elf", "libctest: OK"),
+            ("elfrun /ex/secprobe.elf", "security-probe: OK"),
             ("unknown-smoke-command", "Unknown command: unknown-smoke-command"),
             ]
             if net_driver == "rtl8139":
