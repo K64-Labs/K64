@@ -193,6 +193,18 @@ class Guest:
             return read_until_fd(self.serial_fd, needle, timeout)
         return read_until_socket(self.sock, needle, timeout)
 
+    def read_chunk(self, timeout):
+        if self.serial_fd is not None:
+            ready, _, _ = select.select([self.serial_fd], [], [], timeout)
+            if not ready:
+                return ""
+            return os.read(self.serial_fd, 2048).decode("utf-8", errors="replace")
+        self.sock.setblocking(False)
+        ready, _, _ = select.select([self.sock], [], [], timeout)
+        if not ready:
+            return ""
+        return self.sock.recv(2048).decode("utf-8", errors="replace")
+
     def drain(self):
         deadline = time.time() + 0.15
         while time.time() < deadline:
@@ -232,13 +244,7 @@ class Guest:
             expected_seen = expected == PROMPT_NEEDLE or expected in post_command
             if expected_seen and PROMPT_NEEDLE in post_command:
                 return captured
-            needle = PROMPT_NEEDLE if expected_seen else expected
-            try:
-                captured += self.read_until(needle, max(0.1, deadline - time.time()))
-            except RuntimeError as exc:
-                if expected_seen:
-                    raise RuntimeError(f"{cmd!r} did not return to prompt\nCaptured before timeout:\n{captured}") from exc
-                raise RuntimeError(f"{cmd!r} did not produce {expected!r}\nCaptured before timeout:\n{captured}") from exc
+            captured += self.read_chunk(max(0.0, min(0.25, deadline - time.time())))
         if expected != PROMPT_NEEDLE and expected not in captured[output_start:]:
             raise RuntimeError(f"{cmd!r} did not produce {expected!r}\nCaptured:\n{captured}")
         if PROMPT_NEEDLE not in captured[output_start:]:
