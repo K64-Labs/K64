@@ -226,12 +226,23 @@ class Guest:
         captured += self.read_until(cmd, timeout)
         command_pos = captured.find(cmd)
         output_start = command_pos + len(cmd) if command_pos >= 0 else 0
-        try:
-            captured += self.read_until(PROMPT_NEEDLE, timeout)
-        except RuntimeError as exc:
-            raise RuntimeError(f"{cmd!r} did not return to prompt\nCaptured before timeout:\n{captured}") from exc
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            post_command = captured[output_start:]
+            expected_seen = expected == PROMPT_NEEDLE or expected in post_command
+            if expected_seen and PROMPT_NEEDLE in post_command:
+                return captured
+            needle = PROMPT_NEEDLE if expected_seen else expected
+            try:
+                captured += self.read_until(needle, max(0.1, deadline - time.time()))
+            except RuntimeError as exc:
+                if expected_seen:
+                    raise RuntimeError(f"{cmd!r} did not return to prompt\nCaptured before timeout:\n{captured}") from exc
+                raise RuntimeError(f"{cmd!r} did not produce {expected!r}\nCaptured before timeout:\n{captured}") from exc
         if expected != PROMPT_NEEDLE and expected not in captured[output_start:]:
             raise RuntimeError(f"{cmd!r} did not produce {expected!r}\nCaptured:\n{captured}")
+        if PROMPT_NEEDLE not in captured[output_start:]:
+            raise RuntimeError(f"{cmd!r} did not return to prompt\nCaptured:\n{captured}")
         return captured
 
 
