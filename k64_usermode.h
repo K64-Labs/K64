@@ -60,6 +60,8 @@ typedef struct {
     uint64_t size;
     uint64_t flags;
     uint64_t mode;
+    uint64_t uid;
+    uint64_t gid;
     uint64_t created_tick;
     uint64_t modified_tick;
     uint64_t generation;

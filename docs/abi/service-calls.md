@@ -15,6 +15,8 @@ Calls are dispatchable only while their owner service is running. The v0.3.21 us
 
 Most service handlers are still kernel-hosted in v0.3.21 because K64 does not yet have message queues, resumable service processes, or a safe Ring-3 service registration ABI. The registry now exposes service ownership and method flags so those handlers can move behind Ring-3 service processes incrementally without changing callers.
 
+v0.3.22 adds a first multiuser permission layer on top of those service calls. Filesystem and process-launch calls now consult the effective UID/GID from `userctl` and check owner/group/other mode bits before reading, writing, creating, opening, listing, moving, or executing paths.
+
 ## Security Rules
 
 Userland cannot pass function pointers or kernel addresses. The `service_call` syscall copies the user argument block, copies service and method strings through checked user memory, rejects payloads larger than 65536 bytes, copies request bytes into a kernel staging buffer, dispatches the service call, then copies the bounded response back through checked user memory.
@@ -45,3 +47,14 @@ Common errors:
 ## Legacy Syscalls
 
 Feature-specific syscall numbers `0` through `24` are no longer supported from Ring 3 and return `K64_ERR_NOSYS`. The libc shim keeps the old C function names, but those wrappers marshal service-call requests instead of issuing the old syscall numbers. The raw `k64_syscall3()` helper remains only for low-level tests of the syscall gate.
+
+## Permission Model
+
+Service handlers receive a caller UID and caller flags. For user callers, K64 derives UID/GID from the active `userctl` session:
+
+- root has UID `0` and bypasses path permission checks
+- regular accounts receive stable runtime UIDs starting at `1000`
+- primary and supplemental groups receive runtime GIDs starting at `1000`, with root group `0`
+- `sudo`, `sudo on`, and password-checked `sudo <password>` switch the effective UID to root until `sudo off` or command-scope cleanup
+
+The current filesystem checks are POSIX-like but not fully POSIX. They cover service-backed `fs.*`, `io.open`, `proc.spawn`, ELF execution, and the `fsctl` command surface. K64FS persists mode bits today; UID/GID ownership is runtime metadata and is rebuilt at boot for user homes and account files.

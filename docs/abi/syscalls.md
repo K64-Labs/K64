@@ -55,7 +55,9 @@ v0.3.21 makes `service_call` the only supported user/kernel syscall gate. Former
 - File descriptors are per active user process. `0`, `1`, and `2` are stdin, stdout, and stderr; `open()` returns `>= 3`.
 - Anonymous pipes use fixed kernel buffers. Empty pipes with an open write end return `K64_ERR_AGAIN`; empty pipes with no write end return `0`.
 - `write_file` is still a whole-file helper and is not the same as POSIX `write`.
-- `stat(path, out)` returns type, size, flags, mode, created tick, modified tick, and generation fields through the userland `k64_stat_t` structure.
+- `stat(path, out)` returns type, size, flags, mode, UID, GID, created tick, modified tick, and generation fields through the userland `k64_stat_t` structure.
+- Filesystem service calls enforce the current effective user against owner/group/other mode bits for read, write, execute, create, open, and ELF execution paths. Root bypasses these checks.
+- UID/GID ownership is runtime metadata in this release. Mode bits persist in current K64FS images, but UID/GID fields are re-derived during boot from the user database and service policy until the on-image format grows dedicated ownership fields.
 - The ELF loader keeps a small nested execution context stack so a parent `/ex` program can safely run a child during blocking wait without clobbering the parent's loader or syscall-stack state.
 - `service_call(call_ptr)` reads a `k64_service_call_user_t` through checked user memory, copies service and method names, bounds request/response payloads to 65536 bytes, dispatches through the service-call registry, and copies the response back through checked user memory.
 - The libc wrappers for process, scheduler, FD, pipe, filesystem, terminal, and text-framebuffer operations use service methods rather than old syscall numbers.

@@ -9,6 +9,7 @@
 #include "k64_pit.h"
 #include "k64_string.h"
 #include "k64_terminal.h"
+#include "k64_user.h"
 #include "k64_usermode.h"
 
 #define K64_MAX_SERVICES 32
@@ -232,6 +233,43 @@ static void copy_response(k64_service_call_request_t* req, const void* data, siz
     memcpy(req->out, data, count);
 }
 
+static bool fs_call_can_access_path(const char* path, uint32_t mask) {
+    k64_fs_stat_t st;
+
+    if (!path || !path[0]) {
+        return false;
+    }
+    if (!k64_fs_stat(path, &st)) {
+        return false;
+    }
+    return k64_user_can_access(st.uid, st.gid, st.mode, mask);
+}
+
+static bool fs_call_can_create_path(const char* path) {
+    char parent[256];
+    size_t len;
+
+    if (!path || !path[0]) {
+        return false;
+    }
+    copy_string(parent, sizeof(parent), path);
+    len = k64_strlen(parent);
+    while (len > 1 && parent[len - 1] == '/') {
+        parent[--len] = '\0';
+    }
+    while (len > 0 && parent[len - 1] != '/') {
+        parent[--len] = '\0';
+    }
+    if (len == 0) {
+        copy_string(parent, sizeof(parent), ".");
+    } else if (len == 1) {
+        parent[1] = '\0';
+    } else if (len > 1) {
+        parent[len - 1] = '\0';
+    }
+    return fs_call_can_access_path(parent, K64_ACCESS_WRITE | K64_ACCESS_EXEC);
+}
+
 static int64_t kernel_version_call(const k64_service_call_request_t* req) {
     k64_service_call_request_t* mutable_req = (k64_service_call_request_t*)req;
 
@@ -272,10 +310,15 @@ static int64_t fs_stat_call(const k64_service_call_request_t* req) {
     if (!k64_fs_stat(path, &fs_stat)) {
         return K64_ERR_NOENT;
     }
+    if (!k64_user_can_access(fs_stat.uid, fs_stat.gid, fs_stat.mode, K64_ACCESS_READ)) {
+        return K64_ERR_ACCESS;
+    }
     out.type = fs_stat.is_dir ? 1u : 2u;
     out.size = fs_stat.size;
     out.flags = 0;
     out.mode = fs_stat.mode;
+    out.uid = fs_stat.uid;
+    out.gid = fs_stat.gid;
     out.created_tick = fs_stat.created_tick;
     out.modified_tick = fs_stat.modified_tick;
     out.generation = fs_stat.generation;
@@ -294,6 +337,9 @@ static int64_t fs_list_dir_call(const k64_service_call_request_t* req) {
     path = (const char*)req->in;
     if (!path[0] || ((const char*)req->in)[req->in_len - 1] != '\0') {
         return K64_ERR_INVAL;
+    }
+    if (!fs_call_can_access_path(path, K64_ACCESS_READ | K64_ACCESS_EXEC)) {
+        return K64_ERR_ACCESS;
     }
     memset(req->out, 0, req->out_len);
     if (!k64_fs_ls(path, (char*)req->out, (int)req->out_len)) {
@@ -338,10 +384,19 @@ static int64_t fs_write_file_call(const k64_service_call_request_t* req) {
     if (packed_path[user_req->path_len - 1] != '\0') {
         return K64_ERR_INVAL;
     }
+    if (k64_fs_stat(packed_path, &(k64_fs_stat_t){0})) {
+        if (!fs_call_can_access_path(packed_path, K64_ACCESS_WRITE)) {
+            return K64_ERR_ACCESS;
+        }
+    } else if (!fs_call_can_create_path(packed_path)) {
+        return K64_ERR_ACCESS;
+    }
     packed_data = (const uint8_t*)packed_path + user_req->path_len;
-    return k64_fs_write_file_raw(packed_path, packed_data, (size_t)user_req->data_len)
-               ? K64_OK
-               : K64_ERR_ACCESS;
+    if (!k64_fs_write_file_raw(packed_path, packed_data, (size_t)user_req->data_len)) {
+        return K64_ERR_ACCESS;
+    }
+    (void)k64_fs_chown(packed_path, k64_user_effective_uid(), k64_user_effective_gid());
+    return K64_OK;
 }
 
 static int64_t fs_move_call(const k64_service_call_request_t* req) {
@@ -360,6 +415,9 @@ static int64_t fs_move_call(const k64_service_call_request_t* req) {
     dst = src + src_len;
     if (!dst[0] || ((const char*)req->in)[req->in_len - 1] != '\0') {
         return K64_ERR_INVAL;
+    }
+    if (!fs_call_can_access_path(src, K64_ACCESS_WRITE) || !fs_call_can_create_path(dst)) {
+        return K64_ERR_ACCESS;
     }
     return k64_fs_move(src, dst) ? K64_OK : K64_ERR_NOENT;
 }
@@ -1223,7 +1281,7 @@ int64_t k64_system_dispatch_call(const char* service,
         }
 
         req.caller_pid = caller_pid;
-        req.caller_uid = 0;
+        req.caller_uid = (caller_flags & K64_SERVICE_CALLER_KERNEL) ? 0 : k64_user_effective_uid();
         req.caller_flags = caller_flags;
         copy_string(req.service, sizeof(req.service), service);
         copy_string(req.method, sizeof(req.method), method);

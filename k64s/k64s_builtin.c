@@ -900,6 +900,61 @@ static void fsctl_print(const char* text) {
     k64_term_putc('\n');
 }
 
+static bool fsctl_can_access_path(const char* path, uint32_t mask) {
+    k64_fs_stat_t st;
+
+    if (!path || !path[0] || !k64_fs_stat(path, &st)) {
+        return false;
+    }
+    return k64_user_can_access(st.uid, st.gid, st.mode, mask);
+}
+
+static bool fsctl_require_access(const char* path, uint32_t mask) {
+    if (fsctl_can_access_path(path, mask)) {
+        return true;
+    }
+    fsctl_print("permission denied");
+    return false;
+}
+
+static bool fsctl_parent_path(const char* path, char* parent, int parent_size) {
+    int len;
+
+    if (!path || !path[0] || !parent || parent_size <= 0) {
+        return false;
+    }
+    svc_copy(parent, parent_size, path);
+    len = (int)k64_strlen(parent);
+    while (len > 1 && parent[len - 1] == '/') {
+        parent[--len] = '\0';
+    }
+    while (len > 0 && parent[len - 1] != '/') {
+        parent[--len] = '\0';
+    }
+    if (len == 0) {
+        svc_copy(parent, parent_size, ".");
+    } else if (len == 1) {
+        parent[1] = '\0';
+    } else {
+        parent[len - 1] = '\0';
+    }
+    return true;
+}
+
+static bool fsctl_require_create_access(const char* path) {
+    char parent[128];
+
+    if (!fsctl_parent_path(path, parent, sizeof(parent))) {
+        fsctl_print("permission denied");
+        return false;
+    }
+    return fsctl_require_access(parent, K64_ACCESS_WRITE | K64_ACCESS_EXEC);
+}
+
+static void fsctl_apply_new_owner(const char* path) {
+    (void)k64_fs_chown(path, k64_user_effective_uid(), k64_user_effective_gid());
+}
+
 static bool storagectl_command(const char* command, const char* args) {
     char sub[32];
     char dev_name[32];
@@ -1353,6 +1408,9 @@ static bool fsctl_pwd_handler(const char* command, const char* args) {
 static bool fsctl_ls_handler(const char* command, const char* args) {
     char buf[512];
     (void)command;
+    if (!fsctl_require_access(args && args[0] ? args : ".", K64_ACCESS_READ | K64_ACCESS_EXEC)) {
+        return true;
+    }
     if (!k64_fs_ls(args && args[0] ? args : NULL, buf, sizeof(buf))) {
         fsctl_print("ls failed");
         return true;
@@ -1363,7 +1421,7 @@ static bool fsctl_ls_handler(const char* command, const char* args) {
 
 static bool fsctl_cd_handler(const char* command, const char* args) {
     (void)command;
-    if (!args || !args[0] || !k64_fs_cd(args)) {
+    if (!args || !args[0] || !fsctl_require_access(args, K64_ACCESS_EXEC) || !k64_fs_cd(args)) {
         fsctl_print("cd failed");
         return true;
     }
@@ -1372,26 +1430,31 @@ static bool fsctl_cd_handler(const char* command, const char* args) {
 
 static bool fsctl_mkdir_handler(const char* command, const char* args) {
     (void)command;
-    if (!args || !args[0] || !k64_fs_mkdir(args)) {
+    if (!args || !args[0] || !fsctl_require_create_access(args) || !k64_fs_mkdir(args)) {
         fsctl_print("mkdir failed");
         return true;
     }
+    fsctl_apply_new_owner(args);
     return true;
 }
 
 static bool fsctl_touch_handler(const char* command, const char* args) {
     (void)command;
-    if (!args || !args[0] || !k64_fs_touch(args)) {
+    if (!args || !args[0] ||
+        (!k64_fs_stat(args, &(k64_fs_stat_t){0}) && !fsctl_require_create_access(args)) ||
+        (k64_fs_stat(args, &(k64_fs_stat_t){0}) && !fsctl_require_access(args, K64_ACCESS_WRITE)) ||
+        !k64_fs_touch(args)) {
         fsctl_print("touch failed");
         return true;
     }
+    fsctl_apply_new_owner(args);
     return true;
 }
 
 static bool fsctl_cat_handler(const char* command, const char* args) {
     char buf[512];
     (void)command;
-    if (!args || !args[0] || !k64_fs_cat(args, buf, sizeof(buf))) {
+    if (!args || !args[0] || !fsctl_require_access(args, K64_ACCESS_READ) || !k64_fs_cat(args, buf, sizeof(buf))) {
         fsctl_print("cat failed");
         return true;
     }
@@ -1422,19 +1485,24 @@ static bool fsctl_write_handler(const char* command, const char* args) {
     while (*rest == ' ' || *rest == '\t') {
         rest++;
     }
-    if (!path[0] || !k64_fs_write_file(path, rest)) {
+    if (!path[0] ||
+        (k64_fs_stat(path, &(k64_fs_stat_t){0}) && !fsctl_require_access(path, K64_ACCESS_WRITE)) ||
+        (!k64_fs_stat(path, &(k64_fs_stat_t){0}) && !fsctl_require_create_access(path)) ||
+        !k64_fs_write_file(path, rest)) {
         fsctl_print("write failed");
         return true;
     }
+    fsctl_apply_new_owner(path);
     return true;
 }
 
 static bool fsctl_mkdirp_handler(const char* command, const char* args) {
     (void)command;
-    if (!args || !args[0] || !k64_fs_mkdir_p(args)) {
+    if (!args || !args[0] || !fsctl_require_create_access(args) || !k64_fs_mkdir_p(args)) {
         fsctl_print("mkdirp failed");
         return true;
     }
+    fsctl_apply_new_owner(args);
     return true;
 }
 
@@ -1461,16 +1529,20 @@ static bool fsctl_append_handler(const char* command, const char* args) {
     while (*rest == ' ' || *rest == '\t') {
         rest++;
     }
-    if (!path[0] || !k64_fs_append_file(path, rest)) {
+    if (!path[0] ||
+        (k64_fs_stat(path, &(k64_fs_stat_t){0}) && !fsctl_require_access(path, K64_ACCESS_WRITE)) ||
+        (!k64_fs_stat(path, &(k64_fs_stat_t){0}) && !fsctl_require_create_access(path)) ||
+        !k64_fs_append_file(path, rest)) {
         fsctl_print("append failed");
         return true;
     }
+    fsctl_apply_new_owner(path);
     return true;
 }
 
 static bool fsctl_rm_handler(const char* command, const char* args) {
     (void)command;
-    if (!args || !args[0] || !k64_fs_remove(args)) {
+    if (!args || !args[0] || !fsctl_require_access(args, K64_ACCESS_WRITE) || !k64_fs_remove(args)) {
         fsctl_print("rm failed");
         return true;
     }
@@ -1479,7 +1551,7 @@ static bool fsctl_rm_handler(const char* command, const char* args) {
 
 static bool fsctl_rmdir_handler(const char* command, const char* args) {
     (void)command;
-    if (!args || !args[0] || !k64_fs_rmdir(args)) {
+    if (!args || !args[0] || !fsctl_require_access(args, K64_ACCESS_WRITE) || !k64_fs_rmdir(args)) {
         fsctl_print("rmdir failed");
         return true;
     }
@@ -1517,7 +1589,10 @@ static bool fsctl_mv_handler(const char* command, const char* args) {
         }
         dst[i] = '\0';
     }
-    if (!src[0] || !dst[0] || !k64_fs_move(src, dst)) {
+    if (!src[0] || !dst[0] ||
+        !fsctl_require_access(src, K64_ACCESS_WRITE) ||
+        !fsctl_require_create_access(dst) ||
+        !k64_fs_move(src, dst)) {
         fsctl_print("mv failed");
         return true;
     }
@@ -1555,10 +1630,90 @@ static bool fsctl_cp_handler(const char* command, const char* args) {
         }
         dst[i] = '\0';
     }
-    if (!src[0] || !dst[0] || !k64_fs_copy(src, dst)) {
+    if (!src[0] || !dst[0] ||
+        !fsctl_require_access(src, K64_ACCESS_READ) ||
+        !fsctl_require_create_access(dst) ||
+        !k64_fs_copy(src, dst)) {
         fsctl_print("cp failed");
         return true;
     }
+    fsctl_apply_new_owner(dst);
+    return true;
+}
+
+static bool svc_parse_octal_mode(const char* text, uint32_t* out) {
+    uint32_t value = 0;
+
+    if (!text || !text[0] || !out) {
+        return false;
+    }
+    while (*text) {
+        if (*text < '0' || *text > '7') {
+            return false;
+        }
+        value = (value << 3) | (uint32_t)(*text - '0');
+        text++;
+    }
+    *out = value & 07777u;
+    return true;
+}
+
+static bool fsctl_chmod_handler(const char* command, const char* args) {
+    char mode_text[16];
+    char path[128];
+    uint32_t mode;
+    (void)command;
+
+    if (!k64_user_is_root()) {
+        fsctl_print("permission denied");
+        return true;
+    }
+    args = svc_next_token(args, mode_text, sizeof(mode_text));
+    args = svc_next_token(args, path, sizeof(path));
+    if (!svc_parse_octal_mode(mode_text, &mode) || !path[0] || !k64_fs_chmod(path, mode)) {
+        fsctl_print("usage: chmod <mode> <path>");
+        return true;
+    }
+    fsctl_print("mode updated");
+    return true;
+}
+
+static bool fsctl_chown_handler(const char* command, const char* args) {
+    char owner[32];
+    char path[128];
+    char user[16];
+    char group[16];
+    uint32_t uid;
+    uint32_t gid;
+    int split = -1;
+    (void)command;
+
+    if (!k64_user_is_root()) {
+        fsctl_print("permission denied");
+        return true;
+    }
+    args = svc_next_token(args, owner, sizeof(owner));
+    args = svc_next_token(args, path, sizeof(path));
+    for (int i = 0; owner[i]; ++i) {
+        if (owner[i] == ':') {
+            split = i;
+            break;
+        }
+    }
+    if (split < 0 || !path[0]) {
+        fsctl_print("usage: chown <user>:<group> <path>");
+        return true;
+    }
+    owner[split] = '\0';
+    svc_copy(user, sizeof(user), owner);
+    svc_copy(group, sizeof(group), owner + split + 1);
+    if (!k64_user_name_to_uid(user, &uid) ||
+        !k64_user_group_to_gid(group, &gid) ||
+        !k64_fs_chown(path, uid, gid)) {
+        fsctl_print("chown failed");
+        return true;
+    }
+    fsctl_print("owner updated");
     return true;
 }
 
@@ -1577,6 +1732,10 @@ static bool fsctl_stat_handler(const char* command, const char* args) {
     k64_term_write_dec(st.size);
     k64_term_write(" mode=");
     k64_term_write_hex(st.mode);
+    k64_term_write(" uid=");
+    k64_term_write_dec(st.uid);
+    k64_term_write(" gid=");
+    k64_term_write_dec(st.gid);
     k64_term_write(" gen=");
     k64_term_write_dec(st.generation);
     k64_term_putc('\n');
@@ -1627,6 +1786,8 @@ static bool fsctl_start(k64_service_t* service) {
     (void)k64_system_register_command("fsctl", "rmdir", fsctl_rmdir_handler);
     (void)k64_system_register_command("fsctl", "mv", fsctl_mv_handler);
     (void)k64_system_register_command("fsctl", "cp", fsctl_cp_handler);
+    (void)k64_system_register_command("fsctl", "chmod", fsctl_chmod_handler);
+    (void)k64_system_register_command("fsctl", "chown", fsctl_chown_handler);
     (void)k64_system_register_command("fsctl", "stat", fsctl_stat_handler);
     (void)k64_system_register_command("fsctl", "sync", fsctl_sync_handler);
     (void)k64_system_register_command("fsctl", "grow", fsctl_grow_handler);

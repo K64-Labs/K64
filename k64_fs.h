@@ -10,6 +10,8 @@ typedef struct {
     bool is_dir;
     size_t size;
     uint32_t mode;
+    uint32_t uid;
+    uint32_t gid;
     uint64_t created_tick;
     uint64_t modified_tick;
     uint64_t generation;
@@ -32,6 +34,8 @@ bool k64_fs_write_file_raw(const char* path, const uint8_t* data, size_t size);
 bool k64_fs_write_file_range(const char* path, size_t offset, const uint8_t* data, size_t size);
 bool k64_fs_append_file(const char* path, const char* text);
 bool k64_fs_truncate(const char* path, size_t size);
+bool k64_fs_chmod(const char* path, uint32_t mode);
+bool k64_fs_chown(const char* path, uint32_t uid, uint32_t gid);
 bool k64_fs_remove(const char* path);
 bool k64_fs_rmdir(const char* path);
 bool k64_fs_move(const char* src_path, const char* dst_path);

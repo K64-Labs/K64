@@ -622,10 +622,21 @@ static void user_ensure_layout(void) {
     user_ensure_dir("/tmp");
     user_ensure_dir("/usr");
     user_ensure_dir("/var");
+    (void)k64_fs_chmod("/tmp", 0777u);
+    (void)k64_fs_chmod(K64_USER_DB_PATH, 0600u);
+    (void)k64_fs_chown(K64_USER_DB_PATH, 0u, 0u);
+    (void)k64_fs_chmod(K64_GROUP_DB_PATH, 0644u);
+    (void)k64_fs_chown(K64_GROUP_DB_PATH, 0u, 0u);
 
     for (int i = 0; i < user_state.count; ++i) {
+        int primary_group_idx;
         user_home_path(user_state.accounts[i].name, path, sizeof(path));
         user_ensure_dir(path);
+        primary_group_idx = group_find(user_state.accounts[i].primary_group);
+        (void)k64_fs_chmod(path, 0750u);
+        (void)k64_fs_chown(path,
+                           user_state.accounts[i].is_root ? 0u : 1000u + (uint32_t)i,
+                           primary_group_idx <= 0 ? 0u : 1000u + (uint32_t)primary_group_idx);
     }
 }
 
@@ -799,21 +810,42 @@ static bool user_command_logout(const char* command, const char* args) {
 }
 
 static bool user_command_sudo(const char* command, const char* args) {
+    char action[K64_USER_PASS_MAX];
     (void)command;
-    (void)args;
 
     if (!user_require_login()) {
         return true;
     }
-    if (k64_user_is_root()) {
-        user_print_line("already root");
+    args = user_next_token(args, action, sizeof(action));
+    if (!action[0] || k64_streq(action, "on")) {
+        if (k64_user_is_root()) {
+            user_print_line("already root");
+            return true;
+        }
+        if (!user_state.accounts[user_state.current_index].sudoer) {
+            user_print_line("permission denied: account is not in sudo");
+            return true;
+        }
+        user_state.sudo_active = true;
+        user_print_line("sudo active");
         return true;
     }
+    if (k64_streq(action, "off")) {
+        user_state.sudo_active = false;
+        user_print_line("sudo inactive");
+        return true;
+    }
+
     if (!user_state.accounts[user_state.current_index].sudoer) {
         user_print_line("permission denied: account is not in sudo");
         return true;
     }
-    user_print_line("usage: sudo <command>");
+    if (!user_password_matches(&user_state.accounts[user_state.current_index], action)) {
+        user_print_line("authentication failed");
+        return true;
+    }
+    user_state.sudo_active = true;
+    user_print_line("sudo active");
     return true;
 }
 
@@ -855,6 +887,7 @@ static bool user_command_useradd(const char* command, const char* args) {
     char role[8];
     char primary_group[K64_GROUP_NAME_MAX];
     char path[64];
+    int idx;
     bool is_root = false;
     bool sudoer = false;
     (void)command;
@@ -888,6 +921,14 @@ static bool user_command_useradd(const char* command, const char* args) {
     user_sync_role_groups();
     user_home_path(name, path, sizeof(path));
     user_ensure_dir(path);
+    idx = user_find(name);
+    if (idx >= 0) {
+        int group_idx = group_find(user_state.accounts[idx].primary_group);
+        (void)k64_fs_chmod(path, 0750u);
+        (void)k64_fs_chown(path,
+                           user_state.accounts[idx].is_root ? 0u : 1000u + (uint32_t)idx,
+                           group_idx <= 0 ? 0u : 1000u + (uint32_t)group_idx);
+    }
     (void)user_save_state();
     user_print_line("user added");
     return true;
@@ -1259,4 +1300,93 @@ const char* k64_user_effective_name(void) {
         return "root";
     }
     return user_state.accounts[user_state.current_index].name;
+}
+
+const char* k64_user_real_name(void) {
+    if (!user_state.ready || user_state.current_index < 0 || user_state.current_index >= user_state.count) {
+        return "guest";
+    }
+    return user_state.accounts[user_state.current_index].name;
+}
+
+uint32_t k64_user_real_uid(void) {
+    if (!user_state.ready || user_state.current_index < 0 || user_state.current_index >= user_state.count) {
+        return 1000u;
+    }
+    if (user_state.accounts[user_state.current_index].is_root) {
+        return 0u;
+    }
+    return 1000u + (uint32_t)user_state.current_index;
+}
+
+uint32_t k64_user_effective_uid(void) {
+    return k64_user_is_root() ? 0u : k64_user_real_uid();
+}
+
+uint32_t k64_user_effective_gid(void) {
+    int group_idx;
+
+    if (k64_user_is_root()) {
+        return 0u;
+    }
+    if (!user_state.ready || user_state.current_index < 0 || user_state.current_index >= user_state.count) {
+        return 1000u;
+    }
+    group_idx = group_find(user_state.accounts[user_state.current_index].primary_group);
+    return group_idx >= 0 ? 1000u + (uint32_t)group_idx : 1000u;
+}
+
+bool k64_user_name_to_uid(const char* name, uint32_t* uid_out) {
+    int idx = user_find(name);
+
+    if (!uid_out || idx < 0) {
+        return false;
+    }
+    *uid_out = user_state.accounts[idx].is_root ? 0u : 1000u + (uint32_t)idx;
+    return true;
+}
+
+bool k64_user_group_to_gid(const char* name, uint32_t* gid_out) {
+    int idx = group_find(name);
+
+    if (!gid_out || idx < 0) {
+        return false;
+    }
+    *gid_out = k64_streq(name, "root") ? 0u : 1000u + (uint32_t)idx;
+    return true;
+}
+
+bool k64_user_is_member_gid(uint32_t gid) {
+    int group_idx;
+
+    if (!user_state.ready || user_state.current_index < 0 || user_state.current_index >= user_state.count) {
+        return false;
+    }
+    if (k64_user_is_root()) {
+        return true;
+    }
+    if (gid == 0) {
+        group_idx = group_find("root");
+    } else if (gid >= 1000u) {
+        group_idx = (int)(gid - 1000u);
+    } else {
+        return false;
+    }
+    return group_is_member(group_idx, user_state.current_index);
+}
+
+bool k64_user_can_access(uint32_t owner_uid, uint32_t owner_gid, uint32_t mode, uint32_t mask) {
+    uint32_t bits;
+
+    if (k64_user_is_root()) {
+        return true;
+    }
+    if (k64_user_effective_uid() == owner_uid) {
+        bits = (mode >> 6) & 7u;
+    } else if (k64_user_is_member_gid(owner_gid)) {
+        bits = (mode >> 3) & 7u;
+    } else {
+        bits = mode & 7u;
+    }
+    return (bits & mask) == mask;
 }

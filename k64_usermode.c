@@ -10,6 +10,7 @@
 #include "k64_system.h"
 #include "k64_terminal.h"
 #include "k64_string.h"
+#include "k64_user.h"
 
 #define K64_GDT_TSS_SELECTOR  0x28
 #define K64_USER_DATA_SELECTOR 0x1B
@@ -451,6 +452,15 @@ static int64_t proc_spawn_service_call(const k64_service_call_request_t* req) {
     in = (const k64_service_proc_spawn_req_t*)req->in;
     if (!in->path[0]) {
         return K64_ERR_INVAL;
+    }
+    {
+        k64_fs_stat_t st;
+        if (!k64_fs_stat(in->path, &st)) {
+            return K64_ERR_NOENT;
+        }
+        if (!k64_user_can_access(st.uid, st.gid, st.mode, K64_ACCESS_EXEC | K64_ACCESS_READ)) {
+            return K64_ERR_ACCESS;
+        }
     }
     pid = queue_spawn(in->path, in->args);
     if (pid < 0) {
@@ -1076,6 +1086,21 @@ static int64_t io_open_service_call(const k64_service_call_request_t* req) {
     path = (const char*)req->in;
     if (!path[0] || path[req->in_len - 1] != '\0') {
         return K64_ERR_INVAL;
+    }
+    {
+        k64_fs_stat_t st;
+        if (!k64_fs_stat(path, &st)) {
+            fd = K64_ERR_NOENT;
+            memcpy(req->out, &fd, sizeof(fd));
+            ((k64_service_call_request_t*)req)->actual_out_len = sizeof(fd);
+            return K64_OK;
+        }
+        if (!k64_user_can_access(st.uid, st.gid, st.mode, K64_ACCESS_READ)) {
+            fd = K64_ERR_ACCESS;
+            memcpy(req->out, &fd, sizeof(fd));
+            ((k64_service_call_request_t*)req)->actual_out_len = sizeof(fd);
+            return K64_OK;
+        }
     }
     if (!k64_fs_read_file_raw(path, &data, &size)) {
         fd = K64_ERR_NOENT;

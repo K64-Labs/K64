@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include "k64_fs.h"
 #include "k64_log.h"
+#include "k64_user.h"
 #include "k64_terminal.h"
 #include "k64_usermode.h"
 #include "k64_vmm.h"
@@ -210,6 +211,14 @@ static bool elf_execute_impl_ex(const char* path,
 
     if (!path || !path[0]) {
         return false;
+    }
+    if (user_mode) {
+        k64_fs_stat_t st;
+        if (!k64_fs_stat(path, &st) ||
+            !k64_user_can_access(st.uid, st.gid, st.mode, K64_ACCESS_READ | K64_ACCESS_EXEC)) {
+            K64_LOG_WARN("ELF: execute permission denied.");
+            return false;
+        }
     }
     if (!k64_fs_read_file_raw(path, &file_data, &file_size) || !file_data || file_size < sizeof(k64_elf64_ehdr_t)) {
         K64_LOG_WARN("ELF: file unavailable.");

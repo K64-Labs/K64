@@ -18,7 +18,7 @@ K64 is currently best understood as:
 
 It is not yet:
 
-- a fully isolated multi-process OS with complete userland, libc, and process management
+- a fully isolated multi-process OS with complete POSIX userland, libc, and process management
 - a production-ready hot-reloadable kernel
 - a modern UEFI/USB-first OS
 
@@ -298,6 +298,8 @@ The process model now records a stable PID, parent PID, scheduler task ID, state
 The file descriptor model is early but real. Each active user process has a small fd table; `0`, `1`, and `2` are stdin/stdout/stderr; `open()` returns fd values `>= 3`; read/close validate descriptors; stdout/stderr writes go through the fd path; `stat()` exposes filesystem metadata to userland; and `pipe()` creates anonymous read/write endpoints backed by fixed kernel ring buffers. File writes are still primarily the whole-file `write_file()` helper.
 
 v0.3.21 makes the service-call ABI the userland ABI beside the existing service command registry. Services can register named methods such as `kernel.version`, `kernel.uptime`, `fs.stat`, `fs.list_dir`, `fs.write_file`, `fs.move`, `io.open`, `io.read`, `io.write`, `io.pipe`, `proc.getpid`, `proc.info`, `proc.spawn`, `proc.wait`, `proc.exit`, `sched.yield`, `sched.sleep`, and terminal methods. The `service_call` syscall is a thin checked gate: it copies user input into bounded kernel buffers, dispatches through the service registry, and copies bounded responses back through checked user mappings. Ring-3 service hosting is still not complete; handlers are kernel-hosted until K64 has a safe message/registration path for untrusted service processes.
+
+v0.3.22 adds a first POSIX-like multiuser permission core. The active `userctl` session has numeric runtime UID/GID identity, `stat()` reports owner and group IDs, `io.open`, `fs.*` service calls, `proc.spawn`, ELF execution, and `fsctl` operations check owner/group/other read, write, and execute bits, and root/sudo elevation maps to effective UID `0`.
 
 Security boundary:
 
@@ -913,6 +915,7 @@ Each node tracks:
 - short name
 - file offsets and sizes
 - mode bits
+- runtime owner UID and group GID
 - created/modified ticks
 - generation counters
 - whether the file content is “dirty” and backed by the mutable area
@@ -1110,9 +1113,11 @@ User home directories are created under:
 
 This is the current K64 convention.
 
+Home directories are initialized with the owning account UID, the account's primary group GID, and mode `0750`. `/tmp` is initialized as world-writable scratch space. `/etc/users.k64` is owned by root and mode `0600`; `/etc/groups.k64` is owned by root and mode `0644`.
+
 ### Privilege checks
 
-The effective user is computed by `k64_user_effective_name()`.
+The effective user is computed by `k64_user_effective_name()`, and the kernel also tracks runtime UID/GID identity for permission checks.
 
 Privilege rules currently include:
 
@@ -1121,6 +1126,20 @@ Privilege rules currently include:
 - only root can manage drivers
 - a sudo-capable user can elevate through `sudo`, `sudo on`, or `sudo <password>`
 - root and sudo membership are reflected into the `root` and `sudo` groups
+- root has UID/GID `0`
+- regular users and groups receive runtime IDs starting at `1000`
+- owner/group/other mode bits gate read, write, execute, create, open, move, and ELF execution paths when those operations go through service-backed filesystem APIs
+
+### Filesystem permissions
+
+`stat` and `fsctl stat` report file type, size, mode bits, owner UID, group GID, generation, and timestamp metadata.
+
+`fsctl` includes root-only administration commands:
+
+- `chmod <mode> <path>`
+- `chown <user>:<group> <path>`
+
+The current model is POSIX-like, not POSIX-complete. K64FS persists mode bits in the current image format, but UID/GID ownership is runtime metadata rebuilt from the user database and command/service policy during boot. Low-level `k64_fs_*` helpers remain trusted kernel mechanisms; permission enforcement is applied at the service-call, ELF-loader, userland open/spawn, and shell command layers.
 
 ### Session, account, and group commands
 
@@ -1162,6 +1181,8 @@ What they do:
 - `sudo on`: explicit form of `sudo`
 - `sudo <password>`: password-checked form of `sudo`
 - `sudo off`: drop effective root again
+- `chmod <mode> <path>`: update mode bits through `fsctl` when effective root
+- `chown <user>:<group> <path>`: update runtime owner/group through `fsctl` when effective root
 
 Examples:
 
@@ -1752,7 +1773,7 @@ That is appropriate for QEMU and some older real hardware, but not yet for moder
 
 ### 5. Account security is intentionally simple
 
-Passwords are hashed rather than stored in clear text, but the scheme is still lightweight, session state is simple, and privilege elevation is a service-level model. This is better than plain text storage, but it is not a modern password-authentication subsystem yet.
+Passwords are hashed rather than stored in clear text, but the scheme is still lightweight, session state is simple, and privilege elevation is a service-level model. UID/GID permissions now gate the service-backed filesystem and execution paths, but owner/group persistence is not yet part of the K64FS on-image format. This is better than plain text storage and ad hoc access, but it is not a modern password-authentication or full POSIX credentials subsystem yet.
 
 ### 6. Services and drivers are registry-based, not full on-disk executables
 

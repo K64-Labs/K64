@@ -285,8 +285,10 @@ def main():
             ("cat /etc/keyboard/layout.cfg", "us"),
             ("servicectl list", "PID   STATE"),
             ("calls", "kernel.version"),
-        ("call kernel.version", "0.3.21"),
+            ("call kernel.version", "0.3.22"),
             ("call fs.stat /etc/motd", "file /etc/motd"),
+            ("id", "real=guest"),
+            ("stat /usr/guest", "uid=1001"),
             ("driverctl list", "ID    STATE"),
             ("storagectl list", "size=" if attach_disk else PROMPT_NEEDLE),
             ("storagectl partitions ata0", "unallocated=" if attach_disk else "storagectl: disk not found"),
@@ -358,7 +360,8 @@ def main():
             for cmd, expected in checks:
                 guest.command(cmd, expected)
 
-            guest.send("edit /tmp/edit-smoke.txt\n")
+            edit_path = f"/tmp/edit-smoke-{net_driver}-{'disk' if attach_disk else 'iso'}.txt"
+            guest.send(f"edit {edit_path}\n")
             guest.read_until("K64 edit", 10)
             guest.send("hello from edit\nsecond line")
             time.sleep(0.2)
@@ -366,7 +369,7 @@ def main():
             guest.read_until("Saved", 10)
             guest.send("@q")
             guest.read_until(PROMPT_NEEDLE, 10)
-            guest.send("cat /tmp/edit-smoke.txt\n")
+            guest.send(f"cat {edit_path}\n")
             guest.read_until("second line", 10)
     finally:
         http_server.shutdown()

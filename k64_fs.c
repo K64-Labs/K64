@@ -50,10 +50,19 @@ typedef struct {
     int data_size;
     int dirty_offset;
     uint32_t mode;
+    uint32_t uid;
+    uint32_t gid;
     uint64_t created_tick;
     uint64_t modified_tick;
     uint64_t generation;
 } k64_fs_node_t;
+
+typedef struct {
+    bool used;
+    uint32_t uid;
+    uint32_t gid;
+    char path[256];
+} k64_fs_owner_snapshot_t;
 
 static k64_fs_node_t nodes[K64_FS_MAX_NODES];
 static uint8_t fs_image[K64_FS_IMAGE_MAX];
@@ -63,6 +72,7 @@ static uint8_t fs_append_buffer[K64_FS_MUTABLE_MAX];
 static uint8_t fs_block_buffer[K64_FS_BOOT_AREA_SECTORS * K64_FS_BLOCK_SIZE];
 static k64_fs_node_t fs_compact_buffer[K64_FS_MAX_NODES];
 static int fs_remap_buffer[K64_FS_MAX_NODES];
+static k64_fs_owner_snapshot_t fs_owner_snapshot[K64_FS_MAX_NODES];
 static size_t fs_image_size = 0;
 static size_t fs_volume_capacity = K64_FS_IMAGE_MAX;
 static size_t fs_mutable_used = 0;
@@ -134,6 +144,8 @@ static void fs_reset(void) {
         nodes[i].data_size = 0;
         nodes[i].dirty_offset = -1;
         nodes[i].mode = 0;
+        nodes[i].uid = 0;
+        nodes[i].gid = 0;
         nodes[i].created_tick = 0;
         nodes[i].modified_tick = 0;
         nodes[i].generation = 0;
@@ -148,6 +160,8 @@ static void fs_reset(void) {
     nodes[0].data_size = 0;
     nodes[0].dirty_offset = -1;
     nodes[0].mode = K64FS_MODE_DIR;
+    nodes[0].uid = 0;
+    nodes[0].gid = 0;
     nodes[0].created_tick = fs_next_clock();
     nodes[0].modified_tick = nodes[0].created_tick;
     nodes[0].generation = fs_next_generation();
@@ -174,6 +188,8 @@ static int fs_alloc_node(void) {
             nodes[i].data_size = 0;
             nodes[i].dirty_offset = -1;
             nodes[i].mode = 0;
+            nodes[i].uid = 0;
+            nodes[i].gid = 0;
             nodes[i].created_tick = 0;
             nodes[i].modified_tick = 0;
             nodes[i].generation = 0;
@@ -191,6 +207,8 @@ static void fs_init_node_metadata(k64_fs_node_t* node, bool is_dir) {
     }
     now = fs_next_clock();
     node->mode = is_dir ? K64FS_MODE_DIR : K64FS_MODE_FILE;
+    node->uid = 0;
+    node->gid = 0;
     node->created_tick = now;
     node->modified_tick = now;
     node->generation = fs_next_generation();
@@ -352,6 +370,8 @@ static bool fs_compact_nodes(void) {
         compacted[i].data_size = 0;
         compacted[i].dirty_offset = -1;
         compacted[i].mode = 0;
+        compacted[i].uid = 0;
+        compacted[i].gid = 0;
         compacted[i].created_tick = 0;
         compacted[i].modified_tick = 0;
         compacted[i].generation = 0;
@@ -487,6 +507,11 @@ static bool fs_parse_loaded_image(size_t size) {
             }
         }
         node->mode = entry->reserved0 ? entry->reserved0 : (node->is_dir ? K64FS_MODE_DIR : K64FS_MODE_FILE);
+        if (!node->is_dir && fs_path_has_suffix(node->name, ".elf") && (node->mode & 0111u) == 0) {
+            node->mode = 0100755u;
+        }
+        node->uid = 0;
+        node->gid = 0;
         node->created_tick = fs_next_clock();
         node->modified_tick = entry->reserved1 ? entry->reserved1 : node->created_tick;
         node->generation = fs_next_generation();
@@ -761,6 +786,7 @@ static bool fs_writeback_image(void) {
     size_t total_size;
     size_t string_cursor;
     size_t data_cursor;
+    int owner_snapshot_count = 0;
 
     if (!fs_compact_nodes()) {
         K64_LOG_WARN("K64FS: failed to compact nodes before writeback.");
@@ -772,6 +798,22 @@ static bool fs_writeback_image(void) {
     entry_count = fs_used_count();
     if (entry_count <= 0) {
         return false;
+    }
+
+    for (int i = 0; i < entry_count && owner_snapshot_count < K64_FS_MAX_NODES; ++i) {
+        fs_owner_snapshot[owner_snapshot_count].used = false;
+        if (!nodes[i].used || (nodes[i].uid == 0u && nodes[i].gid == 0u)) {
+            continue;
+        }
+        if (!fs_build_path(i,
+                           fs_owner_snapshot[owner_snapshot_count].path,
+                           (int)sizeof(fs_owner_snapshot[owner_snapshot_count].path))) {
+            continue;
+        }
+        fs_owner_snapshot[owner_snapshot_count].used = true;
+        fs_owner_snapshot[owner_snapshot_count].uid = nodes[i].uid;
+        fs_owner_snapshot[owner_snapshot_count].gid = nodes[i].gid;
+        owner_snapshot_count++;
     }
 
     for (int i = 0; i < entry_count; ++i) {
@@ -849,6 +891,19 @@ static bool fs_writeback_image(void) {
     }
     if (!fs_parse_loaded_image(total_size)) {
         return false;
+    }
+    for (int i = 0; i < owner_snapshot_count; ++i) {
+        int idx;
+
+        if (!fs_owner_snapshot[i].used) {
+            continue;
+        }
+        idx = fs_resolve(fs_owner_snapshot[i].path, false, NULL);
+        if (idx >= 0) {
+            nodes[idx].uid = fs_owner_snapshot[i].uid;
+            nodes[idx].gid = fs_owner_snapshot[i].gid;
+        }
+        fs_owner_snapshot[i].used = false;
     }
     fs_persistent = was_persistent;
     fs_block_device = saved_block_device;
@@ -1191,6 +1246,36 @@ bool k64_fs_truncate(const char* path, size_t size) {
     return fs_writeback_image();
 }
 
+bool k64_fs_chmod(const char* path, uint32_t mode) {
+    int idx = fs_resolve(path, false, NULL);
+    uint32_t new_mode;
+
+    if (idx < 0) {
+        return false;
+    }
+    new_mode = (nodes[idx].is_dir ? 0040000u : 0100000u) | (mode & 07777u);
+    if (nodes[idx].mode == new_mode) {
+        return true;
+    }
+    nodes[idx].mode = new_mode;
+    fs_mark_node_modified(&nodes[idx]);
+    return fs_writeback_image();
+}
+
+bool k64_fs_chown(const char* path, uint32_t uid, uint32_t gid) {
+    int idx = fs_resolve(path, false, NULL);
+
+    if (idx < 0) {
+        return false;
+    }
+    if (nodes[idx].uid == uid && nodes[idx].gid == gid) {
+        return true;
+    }
+    nodes[idx].uid = uid;
+    nodes[idx].gid = gid;
+    return true;
+}
+
 bool k64_fs_remove(const char* path) {
     int idx = fs_resolve(path, false, NULL);
 
@@ -1354,6 +1439,8 @@ bool k64_fs_stat(const char* path, k64_fs_stat_t* out) {
     out->is_dir = false;
     out->size = 0;
     out->mode = 0;
+    out->uid = 0;
+    out->gid = 0;
     out->created_tick = 0;
     out->modified_tick = 0;
     out->generation = 0;
@@ -1368,6 +1455,8 @@ bool k64_fs_stat(const char* path, k64_fs_stat_t* out) {
     out->is_dir = nodes[idx].is_dir;
     out->size = nodes[idx].is_dir ? 0u : (size_t)nodes[idx].data_size;
     out->mode = nodes[idx].mode;
+    out->uid = nodes[idx].uid;
+    out->gid = nodes[idx].gid;
     out->created_tick = nodes[idx].created_tick;
     out->modified_tick = nodes[idx].modified_tick;
     out->generation = nodes[idx].generation;
