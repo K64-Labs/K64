@@ -59,4 +59,4 @@ jobs:
           k64.iso
           k64-kernel-v*.elf
           build/root.disk
-          build/root.k64fs
+          build/root.xfs

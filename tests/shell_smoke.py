@@ -285,7 +285,7 @@ def main():
             ("cat /etc/keyboard/layout.cfg", "us"),
             ("servicectl list", "PID   STATE"),
             ("calls", "kernel.version"),
-            ("call kernel.version", "0.3.23"),
+            ("call kernel.version", "0.3.24"),
             ("call fs.stat /etc/motd", "file /etc/motd"),
             ("id", "real=guest"),
             ("stat /usr/guest", "uid=1001"),

@@ -57,6 +57,7 @@ def main():
     parser.add_argument("--grub-dir", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--disk-size", default="32M")
+    parser.add_argument("--kernel", required=True)
     args = parser.parse_args()
 
     grub_dir = Path(args.grub_dir)
@@ -78,7 +79,8 @@ def main():
         early_cfg.write_text(
             "set root=(hd0,msdos1)\n"
             "set prefix=(hd0,msdos1)/boot/grub\n"
-            "configfile /boot/grub/grub.cfg\n",
+            f"multiboot /boot/{args.kernel} pit_hz=1000 log_level=debug\n"
+            "boot\n",
             encoding="ascii",
         )
         subprocess.check_call([
@@ -90,9 +92,8 @@ def main():
             "-o", str(core_img),
             "biosdisk",
             "part_msdos",
-            "k64fs",
+            "k64xfs",
             "normal",
-            "configfile",
             "multiboot",
         ])
 

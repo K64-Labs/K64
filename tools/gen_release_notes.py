@@ -33,7 +33,7 @@ class Commit:
 SECTION_RULES = [
     ("Kernel and Runtime", ("k64_kernel.c", "k64_sched", "k64_vmm", "k64_pmm", "k64_idt", "k64_irq", "k64_isr", "boot.s", "longmode.s", "k64_hotreload", "k64_reload")),
     ("Services and Drivers", ("k64_system", "k64_modules", "k64s/", "k64m/", "k64s_def/", "k64m_def/")),
-    ("Filesystem and Loader", ("k64_fs", "grub/", "tools/mk_k64fs.py", "tools/build_k64x.py", "k64_elf", "ex/")),
+    ("Filesystem and Loader", ("k64_fs", "k64_xfs", "grub/", "tools/mk_k64xfs.py", "tools/build_k64x.py", "k64_elf", "ex/")),
     ("Shell and User Space", ("k64_shell", "k64_user", "k64_keyboard", "k64_terminal", "k64_serial")),
     ("Build, Tooling, and Docs", ("Makefile", ".github/", "tools/", "README.md", ".gitignore")),
     ("Tests", ("tests/",)),

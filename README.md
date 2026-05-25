@@ -11,8 +11,8 @@ K64 is currently best understood as:
 - a BIOS/GRUB-booted x86_64 kernel
 - a legacy-hardware-oriented runtime using VGA text mode, PIC, PIT, and PS/2 keyboard input
 - a registry-based service/driver environment
-- a boot image that includes the legacy custom root filesystem format, `K64FS`
-- a writable ATA-backed K64FS LegacyFS/BootFS root path in the default QEMU flow
+- a boot image that includes the legacy custom root filesystem format, `K64XFS`
+- a writable ATA-backed K64XFS LegacyFS/BootFS root path in the default QEMU flow
 - an experimental K64XFS modern block-backed filesystem core with `xfsctl` tooling
 - a first RTL8139/e1000-backed Ethernet path for QEMU and VMware-style VM networking
 - a system where user-facing commands are mostly exposed by services rather than hard-coded into the kernel core
@@ -45,9 +45,9 @@ Important directories and files:
 - `k64s/`: built-in service registration code
 - `k64m_def/`: source definitions compiled into binary `.k64m` driver files
 - `k64s_def/`: source definitions compiled into binary `.k64s` service files
-- `grub/k64fs.c`: custom GRUB filesystem module for `K64FS`
-- `rootfs/`: host-side source tree used to build `root.k64fs`
-- `tools/mk_k64fs.py`: image builder for the `K64FS` format
+- `grub/k64xfs.c`: custom GRUB filesystem module for `K64XFS`
+- `rootfs/`: host-side source tree used to build `root.xfs`
+- `tools/mk_k64xfs.py`: image builder for the `K64XFS` format
 - `tests/`: parser, filesystem, shell, userland, persistence, GRUB-config, and boot smoke tests
 
 ## Architectural Summary
@@ -118,7 +118,7 @@ There is also a first network path under the same driver model. The built-in `rt
 
 ### Layer 4: Root filesystem and boot image
 
-The running system now prefers a writable `K64FS` image on a block device and only falls back to the old Multiboot module image when no persistent root is available. The root filesystem contains normal user-visible paths plus system artifacts such as:
+The running system now prefers a writable `K64XFS` image on a block device and only falls back to the old Multiboot module image when no persistent root is available. The root filesystem contains normal user-visible paths plus system artifacts such as:
 
 - `/boot/k64-kernel-v<version>.elf`
 - `/boot/grub/grub.cfg`
@@ -126,7 +126,7 @@ The running system now prefers a writable `K64FS` image on a block device and on
 - `/k64m/*.k64m`
 - `/ex/*.elf`
 
-GRUB itself also understands `K64FS` through the custom module in `grub/k64fs.c`, so the ISO bootstrap path can hand off to the boot configuration stored inside the root filesystem.
+GRUB itself also understands `K64XFS` through the custom module in `grub/k64xfs.c`, so the ISO bootstrap path can hand off to the boot configuration stored inside the root filesystem.
 
 ## Boot Pipeline in Detail
 
@@ -138,13 +138,13 @@ The ISO-root GRUB config is generated into `build/grub-bootstrap.cfg` and instal
 
 Its job is to:
 
-- load GRUB modules `configfile` and `k64fs`
+- load GRUB modules `configfile` and `K64XFS`
 - remember the ISO root as `k64_iso_root`
 - try `(hd0)/boot/grub/grub.cfg` first
 - if a disk root is present, hand off to that config
-- otherwise boot the kernel from the ISO and pass `/k64fs/root.k64fs` directly as a Multiboot module
+- otherwise boot the kernel from the ISO and pass `/K64XFS/root.xfs` directly as a Multiboot module
 
-So the ISO config is a direct live-boot shim. It always boots the kernel from the ISO and passes the CD copy of `root.k64fs` as a Multiboot module. If a writable K64 disk is attached, the kernel mounts that disk as the persistent root after startup.
+So the ISO config is a direct live-boot shim. It always boots the kernel from the ISO and passes the CD copy of `root.xfs` as a Multiboot module. If a writable K64 disk is attached, the kernel mounts that disk as the persistent root after startup.
 
 ### Step 2: Rootfs GRUB config
 
@@ -156,8 +156,8 @@ The default menu entry does:
 
 That means the kernel can boot in two modes:
 
-- persistent disk-root mode, where GRUB boots from `build/root.disk` and `fs.k64m` mounts the K64FS partition on the ATA disk
-- ISO fallback mode, where GRUB passes `root.k64fs` in as a Multiboot module and the kernel mounts that image in memory
+- persistent disk-root mode, where GRUB boots from `build/root.disk` and `fs.k64m` mounts the K64XFS partition on the ATA disk
+- ISO fallback mode, where GRUB passes `root.xfs` in as a Multiboot module and the kernel mounts that image in memory
 
 The binary `.k64s` and `.k64m` files are discovered from the mounted rootfs by the native loaders in both modes.
 
@@ -165,10 +165,10 @@ The binary `.k64s` and `.k64m` files are discovered from the mounted rootfs by t
 
 `k64_fs_driver_start()` mounts in this order:
 
-1. first compatible writable block device with a valid `K64FS` header
-   - raw `K64FS` at LBA 0 for older disk images
-   - installed `K64FS` at LBA 2048 behind the BIOS boot area
-2. first Multiboot module whose path ends in `.k64fs`
+1. first compatible writable block device with a valid `K64XFS` header
+   - raw `K64XFS` at LBA 0 for older disk images
+   - installed `K64XFS` at LBA 2048 behind the BIOS boot area
+2. first Multiboot module whose path ends in `.K64XFS`
 3. tiny in-memory fallback tree
 
 In normal QEMU builds, the first path is used because `make` now builds and attaches `build/root.disk`.
@@ -290,7 +290,7 @@ Current syscall ABI is documented in `docs/abi/syscalls.md`. In v0.3.21 the acti
 
 The old feature-specific syscall numbers `0..24` are no longer public userland ABI and return `K64_ERR_NOSYS`. The libc function names remain, but they now marshal service-call requests such as `io.write`, `io.open`, `fs.stat`, `proc.wait`, `sched.sleep`, and `term.size`.
 
-This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64FS`, save complete files, use structured key input, move files, list directories, reserve child process identities, query process metadata, collect child exits with wait flags, create anonymous pipes, call service-owned methods, and draw text-mode cell regions. It is not a POSIX-compatible libc and there is no fork/execve ABI, dynamic linker, shared-library loader, socket API, or mature VFS.
+This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64XFS`, save complete files, use structured key input, move files, list directories, reserve child process identities, query process metadata, collect child exits with wait flags, create anonymous pipes, call service-owned methods, and draw text-mode cell regions. It is not a POSIX-compatible libc and there is no fork/execve ABI, dynamic linker, shared-library loader, socket API, or mature VFS.
 
 The process model now records a stable PID, parent PID, scheduler task ID, state, exit code, start/end ticks, runtime ticks, fault vector, fault RIP, and image path for each K64-native ELF run. Normal exits become `ZOMBIE` records and remain visible until a parent reaps them. `waitpid()` enforces direct parent-child ownership, `K64_WAIT_NOHANG` reports `K64_ERR_AGAIN` for a still-running child, and `K64_WAIT_BLOCK` runs a reserved child user context to completion through a cooperative wait-driven path before writing the exit code and reaping the child. This is a concrete step beyond reserved-only child identity, but it is not full timer-preemptive user process scheduling yet.
 
@@ -302,7 +302,7 @@ v0.3.21 makes the service-call ABI the userland ABI beside the existing service 
 
 v0.3.22 adds a first POSIX-like multiuser permission core. The active `userctl` session has numeric runtime UID/GID identity, `stat()` reports owner and group IDs, `io.open`, `fs.*` service calls, `proc.spawn`, ELF execution, and `fsctl` operations check owner/group/other read, write, and execute bits, and root/sudo elevation maps to effective UID `0`.
 
-v0.3.23 introduces K64XFS as a separate modern filesystem core. K64FS remains the default boot/root filesystem, while K64XFS can be formatted and mounted explicitly for testing through `xfsctl` at `/x`.
+v0.3.23 introduces K64XFS as a separate modern filesystem core. K64XFS remains the default boot/root filesystem, while K64XFS can be formatted and mounted explicitly for testing through `xfsctl` at `/x`.
 
 Security boundary:
 
@@ -467,7 +467,7 @@ Important details:
 
 ### Native rootfs `.k64m` format
 
-The native driver loader scans `/k64m` after the filesystem driver has mounted `K64FS`.
+The native driver loader scans `/k64m` after the filesystem driver has mounted `K64XFS`.
 
 At runtime, `.k64m` is a packed binary module file, not a text config. The binary stores:
 
@@ -517,7 +517,7 @@ The block layer provides:
 
 The first backend is the built-in ATA PIO driver. It now probes the primary and secondary IDE channels and can register multiple disks as `ata0`, `ata1`, `ata2`, and `ata3`. MBR partitions are exposed as child block devices such as `ata0p1`.
 
-In the default QEMU flow, `make` attaches `build/root.disk` as an IDE hard disk, the ATA driver registers it as `ata0`, scans its MBR, and the filesystem driver mounts the K64FS partition from `ata0p1`.
+In the default QEMU flow, `make` attaches `build/root.disk` as an IDE hard disk, the ATA driver registers it as `ata0`, scans its MBR, and the filesystem driver mounts the K64XFS partition from `ata0p1`.
 
 The `storagectl` service exposes that state at runtime:
 
@@ -531,9 +531,9 @@ The `storagectl` service exposes that state at runtime:
 - `install <device> yes`
 - `sync`
 
-`storagectl list` prints each disk/partition with block counts plus human-readable KiB/MiB/GiB size. `storagectl partitions <device>` reads the disk's MBR and reports each partition plus currently unallocated space. `storagectl root` reports the mounted rootfs source, used bytes, free bytes, mounted K64FS volume capacity, and the current packed-image runtime limit.
+`storagectl list` prints each disk/partition with block counts plus human-readable KiB/MiB/GiB size. `storagectl partitions <device>` reads the disk's MBR and reports each partition plus currently unallocated space. `storagectl root` reports the mounted rootfs source, used bytes, free bytes, mounted K64XFS volume capacity, and the current packed-image runtime limit.
 
-K64FS now distinguishes the mounted volume size from the packed in-memory image size. On an installed 8 GiB disk, a partition such as `ata3p1` can therefore report roughly 7.9 GiB of K64FS volume capacity instead of making the disk look like a 2 MiB device. The current packed image writer still has a bounded in-kernel image buffer, so `image_limit` is shown separately until K64FS grows into a streaming or block-allocation filesystem.
+K64XFS now distinguishes the mounted volume size from the packed in-memory image size. On an installed 8 GiB disk, a partition such as `ata3p1` can therefore report roughly 7.9 GiB of K64XFS volume capacity instead of making the disk look like a 2 MiB device. The current packed image writer still has a bounded in-kernel image buffer, so `image_limit` is shown separately until K64XFS grows into a streaming or block-allocation filesystem.
 
 `storagectl partition <device> k64 yes` writes a simple K64 MBR layout: one active Linux-type partition starting at LBA 2048 and using the rest of the disk. This is intentionally confirmation-gated because it overwrites the target disk's partition table.
 
@@ -828,22 +828,22 @@ This is how many user-facing commands are implemented. The shell parses a comman
 
 That model is central to K64 today.
 
-## Filesystems: `K64FS` and `K64XFS`
+## Filesystems: `K64XFS` and `K64XFS`
 
 Files:
 
 - `k64_fs.c`
 - `k64_fs.h`
-- `tools/mk_k64fs.py`
-- `grub/k64fs.c`
+- `tools/mk_k64xfs.py`
+- `grub/k64xfs.c`
 
-`K64FS` is now best understood as the LegacyFS/BootFS compatibility filesystem. It is the custom filesystem/image format used both by:
+`K64XFS` is now best understood as the LegacyFS/BootFS compatibility filesystem. It is the custom filesystem/image format used both by:
 
 - the kernel runtime filesystem driver
 - the GRUB-side filesystem module
 - the persistent raw disk image attached as `build/root.disk` in the default QEMU path
 
-### Design goals of `K64FS`
+### Design goals of `K64XFS`
 
 The format is optimized for:
 
@@ -854,7 +854,7 @@ The format is optimized for:
 - deterministic validation during kernel mount
 - compatibility with the GRUB-side reader
 
-It is intentionally not a journaled or crash-safe disk filesystem. K64FS is still a compact image-backed filesystem, not a modern extent/tree allocator, but the kernel side now enforces stricter structure checks and carries enough metadata for real userland tools.
+It is intentionally not a journaled or crash-safe disk filesystem. K64XFS is still a compact image-backed filesystem, not a modern extent/tree allocator, but the kernel side now enforces stricter structure checks and carries enough metadata for real userland tools.
 
 ### K64XFS
 
@@ -869,7 +869,7 @@ Files:
 - `k64_xfs_journal.c`
 - `k64_xfs_journal.h`
 
-K64XFS is a new block-backed filesystem introduced in v0.3.23. It is not a patch to K64FS and does not replace the current root filesystem yet.
+K64XFS is a new block-backed filesystem introduced in v0.3.23. It is not a patch to K64XFS and does not replace the current root filesystem yet.
 
 K64XFS currently provides:
 
@@ -885,7 +885,7 @@ K64XFS currently provides:
 - a read-only checker foundation
 - `xfsctl` format, mount, info, list, stat, mkdir, write, append, cat, remove, chmod, chown, sync, and check commands
 
-K64XFS is mounted explicitly for development at `/x`; normal `/` paths still use K64FS. See `docs/fs/k64xfs.md` for the on-disk layout and limitations.
+K64XFS is mounted explicitly for development at `/x`; normal `/` paths still use K64XFS. See `docs/fs/k64xfs.md` for the on-disk layout and limitations.
 
 ### On-image layout
 
@@ -909,7 +909,7 @@ typedef struct {
     uint32_t strings_offset;
     uint32_t data_offset;
     uint32_t image_size;
-} __attribute__((packed)) k64fs_header_t;
+} __attribute__((packed)) K64XFS_header_t;
 ```
 
 Entry:
@@ -923,7 +923,7 @@ typedef struct {
     uint32_t data_offset;
     uint32_t data_size;
     uint32_t reserved1; /* low modified tick in current images */
-} __attribute__((packed)) k64fs_entry_t;
+} __attribute__((packed)) K64XFS_entry_t;
 ```
 
 Type values:
@@ -959,8 +959,8 @@ Each node tracks:
 `k64_fs_driver_start()`:
 
 1. resets the filesystem state
-2. probes registered block devices for a valid `K64FS` image
-3. if no block-backed root is found, scans Multiboot modules for the first `.k64fs`
+2. probes registered block devices for a valid `K64XFS` image
+3. if no block-backed root is found, scans Multiboot modules for the first `.K64XFS`
 4. validates the header and entry table
 5. populates the node table
 6. if no mountable image exists, creates a fallback in-memory filesystem
@@ -985,26 +985,26 @@ Mutations such as:
 - `mv`
 - `cp`
 
-cause the in-memory node table to be repacked into a fresh `K64FS` image through `fs_writeback_image()`.
+cause the in-memory node table to be repacked into a fresh `K64XFS` image through `fs_writeback_image()`.
 
 If the mounted root came from a block device, the rebuilt image is also flushed back to that device. If the mounted root came from a Multiboot module, the writeback stays in memory only.
 
-That means `K64FS` now behaves as a real read/write filesystem for everyday shell usage, not just a static system-image mount. Files and directories can be created, modified, moved, copied, inspected, and removed through the `fsctl` command surface, and those changes survive reboot when booted with the default attached disk image.
+That means `K64XFS` now behaves as a real read/write filesystem for everyday shell usage, not just a static system-image mount. Files and directories can be created, modified, moved, copied, inspected, and removed through the `fsctl` command surface, and those changes survive reboot when booted with the default attached disk image.
 
 The parser rejects malformed names, unterminated strings, duplicate sibling names, invalid parent ordering, invalid roots, and data ranges outside the packed image. Path resolution now rejects overlong path components instead of silently truncating them.
 
 Current boundaries:
 
-- the persistent path supports both older raw `K64FS` disks and the current BIOS-bootable disk layout
+- the persistent path supports both older raw `K64XFS` disks and the current BIOS-bootable disk layout
 - the first implemented backend is ATA PIO, not AHCI or NVMe
 - there is no journal or crash-recovery layer
 - writes still repack the image rather than updating independently allocated blocks
 
 ### GRUB-side support
 
-`grub/k64fs.c` implements a GRUB filesystem module so that GRUB can:
+`grub/k64xfs.c` implements a GRUB filesystem module so that GRUB can:
 
-- mount `root.k64fs`
+- mount `root.xfs`
 - enumerate directories
 - open files such as `/boot/grub/grub.cfg`
 
@@ -1173,7 +1173,7 @@ Privilege rules currently include:
 - `chmod <mode> <path>`
 - `chown <user>:<group> <path>`
 
-The current model is POSIX-like, not POSIX-complete. K64FS persists mode bits in the current image format, but UID/GID ownership is runtime metadata rebuilt from the user database and command/service policy during boot. Low-level `k64_fs_*` helpers remain trusted kernel mechanisms; permission enforcement is applied at the service-call, ELF-loader, userland open/spawn, and shell command layers.
+The current model is POSIX-like, not POSIX-complete. K64XFS persists mode bits in the current image format, but UID/GID ownership is runtime metadata rebuilt from the user database and command/service policy during boot. Low-level `k64_fs_*` helpers remain trusted kernel mechanisms; permission enforcement is applied at the service-call, ELF-loader, userland open/spawn, and shell command layers.
 
 ### Session, account, and group commands
 
@@ -1389,7 +1389,7 @@ What it supports today:
 
 How execution works:
 
-1. `k64_fs_read_file_raw()` exposes the file bytes from `K64FS`
+1. `k64_fs_read_file_raw()` exposes the file bytes from `K64XFS`
 2. `k64_elf_execute_path()` validates the ELF header and program-header table
 3. the loader allocates a temporary isolated VM space
 4. it maps each PT_LOAD segment into that space at the ELF virtual address
@@ -1500,14 +1500,14 @@ Behavior:
 - `list` prints registered block devices, their mode, geometry, and human-readable size
 - `partitions` prints MBR partition sizes and unallocated space on a whole disk
 - `partition` writes a simple one-partition K64 MBR layout after explicit confirmation
-- `root` prints the current root mount source, persistent mode, used/free/total K64FS volume size, and packed image limit
-- `grow /` refreshes the mounted K64FS root volume capacity from the backing partition
-- `sync` flushes the mounted `K64FS` image back to the block device when one is active
+- `root` prints the current root mount source, persistent mode, used/free/total K64XFS volume size, and packed image limit
+- `grow /` refreshes the mounted K64XFS root volume capacity from the backing partition
+- `sync` flushes the mounted `K64XFS` image back to the block device when one is active
 - `install` prints installer guidance and writable target disks
 - `install <device> yes` writes the current K64 root filesystem to the target disk
 - bare `sync` is handled directly by the shell as a global filesystem flush
 
-The installer is confirmation-gated because it overwrites the target disk's boot area and K64FS contents. After `install <device> yes`, remove the ISO and boot from the target disk.
+The installer is confirmation-gated because it overwrites the target disk's boot area and K64XFS contents. After `install <device> yes`, remove the ISO and boot from the target disk.
 
 ## Reload Paths
 
@@ -1648,7 +1648,7 @@ Required Fedora-side tools include:
 - `xorriso`
 - `rsync`
 
-The custom GRUB `k64fs.mod` build also needs GRUB source headers. By default the helper script looks for them at `/tmp/grub-src`; override this with `GRUB_SRC=/path/to/grub-src` if needed.
+The custom GRUB `k64xfs.mod` build also needs GRUB source headers. By default the helper script looks for them at `/tmp/grub-src`; override this with `GRUB_SRC=/path/to/grub-src` if needed.
 
 ### Toolchain detection
 
@@ -1687,23 +1687,23 @@ The rootfs build process is:
 5. compile `k64s_def/*.svc` into binary `.k64s` files
 6. compile `k64m_def/*.drv` into binary `.k64m` files
 7. copy the compiled binary modules into the staged rootfs
-8. run `tools/mk_k64fs.py` to create `build/root.k64fs`
+8. run `tools/mk_k64xfs.py` to create `build/root.xfs`
 
 ### ISO creation flow
 
 The ISO build process is:
 
 1. build the kernel ELF
-2. build the GRUB `k64fs.mod`
+2. build the GRUB `k64xfs.mod`
 3. generate bootstrap and root GRUB configs
-4. build `root.k64fs`
-5. create `build/root.disk` with a BIOS boot area and K64FS partition
+4. build `root.xfs`
+5. create `build/root.disk` with a BIOS boot area and K64XFS partition
 6. assemble the `iso/` tree
 7. run `grub-mkrescue`
 
-The default QEMU targets attach both the ISO and `build/root.disk`, forcing CD boot with `-boot order=d`. The ISO is the boot medium; the disk is the persistent root device that the ATA driver mounts as `K64FS`.
+The default QEMU targets attach both the ISO and `build/root.disk`, forcing CD boot with `-boot order=d`. The ISO is the boot medium; the disk is the persistent root device that the ATA driver mounts as `K64XFS`.
 
-`build/root.disk` is also bootable by itself in BIOS/legacy mode. The build embeds a GRUB BIOS boot area in the first MiB and stores the K64FS root at LBA 2048, so the disk can be attached as the primary boot device without the ISO.
+`build/root.disk` is also bootable by itself in BIOS/legacy mode. The build embeds a GRUB BIOS boot area in the first MiB and stores the K64XFS root at LBA 2048, so the disk can be attached as the primary boot device without the ISO.
 
 The generated disk image size is configurable:
 
@@ -1713,7 +1713,7 @@ wsl.exe -d FedoraLinux-43 -e bash -lc "cd /mnt/c/Users/linob/Downloads/K64 && K6
 
 The MBR partition size inside the boot area follows `K64_DISK_SIZE`. The default remains `32M`.
 
-If you boot only the ISO in VMware or another VM without attaching `build/root.disk`, K64 now uses the Multiboot `root.k64fs` module from the ISO. That mode is ephemeral, but normal shell commands and `/ex/*.elf` programs are still expected to work.
+If you boot only the ISO in VMware or another VM without attaching `build/root.disk`, K64 now uses the Multiboot `root.xfs` module from the ISO. That mode is ephemeral, but normal shell commands and `/ex/*.elf` programs are still expected to work.
 
 ### Build targets
 
@@ -1782,7 +1782,7 @@ Standalone `/ex` user programs enter ring 3, use checked syscall copies for user
 
 ### 2. Persistent storage is intentionally simple
 
-The persistent path is now a K64FS image on an ATA block device, with the default disk image using a BIOS boot area plus a K64FS partition. That is enough for reboot-persistent writes and direct BIOS disk boot in the default QEMU flow, but it is still a minimal design:
+The persistent path is now a K64XFS image on an ATA block device, with the default disk image using a BIOS boot area plus a K64XFS partition. That is enough for reboot-persistent writes and direct BIOS disk boot in the default QEMU flow, but it is still a minimal design:
 
 - MBR-only partition support for the K64 boot disk path
 - no journal
@@ -1807,7 +1807,7 @@ That is appropriate for QEMU and some older real hardware, but not yet for moder
 
 ### 5. Account security is intentionally simple
 
-Passwords are hashed rather than stored in clear text, but the scheme is still lightweight, session state is simple, and privilege elevation is a service-level model. UID/GID permissions now gate the service-backed filesystem and execution paths, but owner/group persistence is not yet part of the K64FS on-image format. This is better than plain text storage and ad hoc access, but it is not a modern password-authentication or full POSIX credentials subsystem yet.
+Passwords are hashed rather than stored in clear text, but the scheme is still lightweight, session state is simple, and privilege elevation is a service-level model. UID/GID permissions now gate the service-backed filesystem and execution paths, but owner/group persistence is not yet part of the K64XFS on-image format. This is better than plain text storage and ad hoc access, but it is not a modern password-authentication or full POSIX credentials subsystem yet.
 
 ### 6. Services and drivers are registry-based, not full on-disk executables
 
@@ -1818,12 +1818,12 @@ The `.k64s` and `.k64m` naming and packaging are real binary module formats now,
 A typical boot looks like this:
 
 1. GRUB loads the bootstrap config from the ISO
-2. GRUB loads `k64fs.mod`
+2. GRUB loads `k64xfs.mod`
 3. GRUB first checks the attached writable disk for `/boot/grub/grub.cfg`
-4. if no disk config is present, GRUB loop-mounts the ISO copy of `root.k64fs`
+4. if no disk config is present, GRUB loop-mounts the ISO copy of `root.xfs`
 5. GRUB loads `/boot/grub/grub.cfg` from the disk or loop-mounted rootfs
 6. GRUB loads the kernel from `/boot/k64-kernel-v<version>.elf`
-7. GRUB passes `root.k64fs` as a Multiboot module only for the ISO fallback path
+7. GRUB passes `root.xfs` as a Multiboot module only for the ISO fallback path
 8. the kernel initializes its core subsystems
 9. the driver registry autostarts built-in drivers such as `screen`, `keyboard`, and `fs`
 10. the service registry starts `init`
@@ -1888,8 +1888,8 @@ The cleanest extension points today are:
 - add new built-in services in `k64s/k64s_builtin.c`
 - add new built-in drivers in `k64m/k64m_builtin.c`
 - add rootfs content under `rootfs/`
-- extend `K64FS` tooling in `tools/mk_k64fs.py`
-- improve the GRUB module if you want richer boot-time behavior from inside `root.k64fs`
+- extend `K64XFS` tooling in `tools/mk_k64xfs.py`
+- improve the GRUB module if you want richer boot-time behavior from inside `root.xfs`
 
 If you want to turn K64 into a more complete OS, the highest-value next steps are probably:
 

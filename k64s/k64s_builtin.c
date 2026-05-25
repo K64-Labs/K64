@@ -490,10 +490,10 @@ static bool sysfetch_command(const char* command, const char* args) {
     svc_print_uptime_line();
     svc_print_mib_line("Memory Available", free_mem);
     svc_print_mib_line("Memory Total", total_mem);
-    svc_print_mib_line("K64FS Available", fs_free);
-    svc_print_mib_line("K64FS Volume Total", fs_total);
-    svc_print_mib_line("K64FS Packed Image Used", fs_used);
-    svc_print_mib_line("K64FS Runtime Image Limit", (uint64_t)k64_fs_image_limit_bytes());
+    svc_print_mib_line("K64XFS Available", fs_free);
+    svc_print_mib_line("K64XFS Volume Total", fs_total);
+    svc_print_mib_line("K64XFS Used", fs_used);
+    svc_print_mib_line("K64XFS Runtime Read Limit", (uint64_t)k64_fs_image_limit_bytes());
     k64_term_write("Drivers Loaded: ");
     k64_term_write_dec(k64_modules_driver_count());
     k64_term_putc('\n');
@@ -1122,7 +1122,7 @@ static bool storagectl_command(const char* command, const char* args) {
             svc_print_line("Run exactly: install <device> yes");
             return true;
         }
-        k64_term_write("installer: writing K64FS root to ");
+        k64_term_write("installer: writing K64XFS root to ");
         k64_term_write(dev_name);
         k64_term_write("...\n");
         if (!k64_fs_install_to_block_device(dev_name)) {

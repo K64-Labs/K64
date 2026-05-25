@@ -293,6 +293,7 @@ static bool xfs_dir_add(k64_xfs_mount_t* fs,
                         uint16_t type) {
     uint64_t blocks;
     size_t name_len;
+    uint64_t new_block;
 
     if (!fs || !dir || !xfs_name_valid(name) || inode_id == 0 || xfs_dir_find(fs, dir, name, NULL, NULL, NULL)) {
         return false;
@@ -322,7 +323,33 @@ static bool xfs_dir_add(k64_xfs_mount_t* fs,
             }
         }
     }
-    return false;
+    if (!xfs_alloc_extent(fs, 1, &new_block)) {
+        return false;
+    }
+    memset(xfs_tmp_block, 0, K64_XFS_BLOCK_SIZE);
+    {
+        k64_xfs_dirent_disk_t* entries = (k64_xfs_dirent_disk_t*)xfs_tmp_block;
+        memset(&entries[0], 0, sizeof(entries[0]));
+        entries[0].inode_id = inode_id;
+        entries[0].type = type;
+        entries[0].name_len = (uint16_t)name_len;
+        memcpy(entries[0].name, name, name_len);
+        entries[0].checksum = k64_xfs_dirent_checksum(&entries[0]);
+    }
+    if (!xfs_block_write(fs, new_block, xfs_tmp_block)) {
+        return false;
+    }
+    if (dir->extent_count >= K64_XFS_DIRECT_EXTENTS) {
+        (void)xfs_free_extent(fs, new_block, 1);
+        return false;
+    }
+    dir->direct_extents[dir->extent_count].logical_block = dir->extent_count;
+    dir->direct_extents[dir->extent_count].physical_block = new_block;
+    dir->direct_extents[dir->extent_count].block_count = 1;
+    dir->extent_count++;
+    dir->size += K64_XFS_BLOCK_SIZE;
+    dir->modified_tick++;
+    return xfs_write_inode(fs, dir);
 }
 
 static bool xfs_dir_remove(k64_xfs_mount_t* fs, k64_xfs_inode_disk_t* dir, const char* name) {
@@ -761,7 +788,7 @@ bool k64_xfs_write_file(k64_xfs_mount_t* fs, const char* path, const uint8_t* da
         return false;
     }
     blocks = (size + K64_XFS_BLOCK_SIZE - 1u) / K64_XFS_BLOCK_SIZE;
-    if (blocks > K64_XFS_DIRECT_EXTENTS) {
+    if (blocks > UINT32_MAX) {
         return false;
     }
     if (!k64_xfs_journal_begin(fs) || !xfs_free_file_extents(fs, &inode)) {

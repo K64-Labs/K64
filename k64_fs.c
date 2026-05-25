@@ -3,104 +3,36 @@
 #include "k64_log.h"
 #include "k64_multiboot.h"
 #include "k64_string.h"
+#include "k64_xfs.h"
 
-#define K64_FS_MAX_NODES   1024
-#define K64_FS_NAME_MAX    64
-#define K64_FS_IMAGE_MAX   (16 * 1024 * 1024)
-#define K64_FS_MUTABLE_MAX K64_FS_IMAGE_MAX
-#define K64_FS_BLOCK_SIZE  512u
-#define K64_FS_PARTITION_LBA 2048u
-#define K64_FS_BOOT_AREA_SECTORS K64_FS_PARTITION_LBA
-#define K64FS_MAGIC_0      0x4B363446u
-#define K64FS_MAGIC_1      0x00010053u
-#define K64FS_TYPE_DIR     1u
-#define K64FS_TYPE_FILE    2u
-#define K64FS_MODE_DIR     0040755u
-#define K64FS_MODE_FILE    0100644u
+#define K64_ROOTFS_BLOCK_SIZE 512u
+#define K64_ROOTFS_PARTITION_LBA 2048u
+#define K64_ROOTFS_BOOT_AREA_SECTORS K64_ROOTFS_PARTITION_LBA
+#define K64_ROOTFS_FALLBACK_BYTES (8u * 1024u * 1024u)
+#define K64_ROOTFS_RAW_MAX (16u * 1024u * 1024u)
 
 typedef struct {
-    uint32_t magic0;
-    uint32_t magic1;
-    uint16_t version;
-    uint16_t reserved;
-    uint32_t entry_count;
-    uint32_t entries_offset;
-    uint32_t strings_offset;
-    uint32_t data_offset;
-    uint32_t image_size;
-} __attribute__((packed)) k64fs_header_t;
+    uint8_t* data;
+    size_t size;
+} k64_memdev_t;
 
-typedef struct {
-    uint32_t parent_index;
-    uint16_t type;
-    uint16_t reserved0;
-    uint32_t name_offset;
-    uint32_t data_offset;
-    uint32_t data_size;
-    uint32_t reserved1;
-} __attribute__((packed)) k64fs_entry_t;
-
-typedef struct {
-    bool used;
-    bool is_dir;
-    int parent;
-    char name[K64_FS_NAME_MAX];
-    bool dirty;
-    int data_offset;
-    int data_size;
-    int dirty_offset;
-    uint32_t mode;
-    uint32_t uid;
-    uint32_t gid;
-    uint64_t created_tick;
-    uint64_t modified_tick;
-    uint64_t generation;
-} k64_fs_node_t;
-
-typedef struct {
-    bool used;
-    uint32_t uid;
-    uint32_t gid;
-    char path[256];
-} k64_fs_owner_snapshot_t;
-
-static k64_fs_node_t nodes[K64_FS_MAX_NODES];
-static uint8_t fs_image[K64_FS_IMAGE_MAX];
-static uint8_t fs_image_scratch[K64_FS_IMAGE_MAX];
-static uint8_t fs_mutable[K64_FS_MUTABLE_MAX];
-static uint8_t fs_append_buffer[K64_FS_MUTABLE_MAX];
-static uint8_t fs_block_buffer[K64_FS_BOOT_AREA_SECTORS * K64_FS_BLOCK_SIZE];
-static k64_fs_node_t fs_compact_buffer[K64_FS_MAX_NODES];
-static int fs_remap_buffer[K64_FS_MAX_NODES];
-static k64_fs_owner_snapshot_t fs_owner_snapshot[K64_FS_MAX_NODES];
-static size_t fs_image_size = 0;
-static size_t fs_volume_capacity = K64_FS_IMAGE_MAX;
-static size_t fs_mutable_used = 0;
+static k64_xfs_mount_t rootfs;
 static bool fs_running = false;
 static bool fs_persistent = false;
-static bool fs_dirty = false;
-static k64_block_device_t* fs_block_device = NULL;
-static uint64_t fs_block_lba = 0;
-static char fs_mount_name[32];
-static int cwd_index = 0;
-static uint64_t fs_clock = 1;
-static uint64_t fs_generation = 1;
+static char fs_mount_name[48];
+static char fs_cwd[256] = "/";
+static uint8_t fs_raw_buffer[K64_ROOTFS_RAW_MAX];
+static uint8_t fs_range_buffer[K64_ROOTFS_RAW_MAX];
+static uint8_t fs_boot_area[K64_ROOTFS_BOOT_AREA_SECTORS * K64_ROOTFS_BLOCK_SIZE];
+static uint8_t fs_fallback_image[K64_ROOTFS_FALLBACK_BYTES];
+static k64_memdev_t fs_module_memdev;
+static k64_memdev_t fs_fallback_memdev = { fs_fallback_image, sizeof(fs_fallback_image) };
+static k64_block_device_t* fs_module_device = NULL;
+static k64_block_device_t* fs_fallback_device = NULL;
 
-static bool fs_writeback_image(void);
-static bool fs_flush_block_device(void);
-
-static uint64_t fs_next_clock(void) {
-    return fs_clock++;
-}
-
-static uint64_t fs_next_generation(void) {
-    return fs_generation++;
-}
-
-static void fs_copy(char* dst, int dst_size, const char* src) {
-    int i = 0;
-
-    if (!dst || dst_size <= 0) {
+static void fs_copy(char* dst, size_t dst_size, const char* src) {
+    size_t i = 0;
+    if (!dst || dst_size == 0) {
         return;
     }
     if (!src) {
@@ -114,527 +46,145 @@ static void fs_copy(char* dst, int dst_size, const char* src) {
     dst[i] = '\0';
 }
 
-static int fs_len(const char* s) {
-    int n = 0;
-
-    while (s && s[n]) {
-        n++;
-    }
-    return n;
-}
-
-static void fs_append(char* dst, int dst_size, const char* src) {
-    int pos = fs_len(dst);
-    int i = 0;
-
+static void fs_append(char* dst, size_t dst_size, const char* src) {
+    size_t pos = k64_strlen(dst);
+    size_t i = 0;
     while (src && src[i] && pos + 1 < dst_size) {
         dst[pos++] = src[i++];
     }
-    dst[pos] = '\0';
-}
-
-static void fs_reset(void) {
-    for (int i = 0; i < K64_FS_MAX_NODES; ++i) {
-        nodes[i].used = false;
-        nodes[i].is_dir = false;
-        nodes[i].parent = -1;
-        nodes[i].name[0] = '\0';
-        nodes[i].dirty = false;
-        nodes[i].data_offset = 0;
-        nodes[i].data_size = 0;
-        nodes[i].dirty_offset = -1;
-        nodes[i].mode = 0;
-        nodes[i].uid = 0;
-        nodes[i].gid = 0;
-        nodes[i].created_tick = 0;
-        nodes[i].modified_tick = 0;
-        nodes[i].generation = 0;
+    if (dst_size) {
+        dst[pos] = '\0';
     }
-
-    nodes[0].used = true;
-    nodes[0].is_dir = true;
-    nodes[0].parent = 0;
-    nodes[0].name[0] = '\0';
-    nodes[0].dirty = false;
-    nodes[0].data_offset = 0;
-    nodes[0].data_size = 0;
-    nodes[0].dirty_offset = -1;
-    nodes[0].mode = K64FS_MODE_DIR;
-    nodes[0].uid = 0;
-    nodes[0].gid = 0;
-    nodes[0].created_tick = fs_next_clock();
-    nodes[0].modified_tick = nodes[0].created_tick;
-    nodes[0].generation = fs_next_generation();
-    cwd_index = 0;
-    fs_image_size = 0;
-    fs_volume_capacity = K64_FS_IMAGE_MAX;
-    fs_mutable_used = 0;
-    fs_persistent = false;
-    fs_dirty = false;
-    fs_block_device = NULL;
-    fs_block_lba = 0;
-    fs_mount_name[0] = '\0';
 }
 
-static int fs_alloc_node(void) {
-    for (int i = 1; i < K64_FS_MAX_NODES; ++i) {
-        if (!nodes[i].used) {
-            nodes[i].used = true;
-            nodes[i].is_dir = false;
-            nodes[i].parent = 0;
-            nodes[i].name[0] = '\0';
-            nodes[i].dirty = false;
-            nodes[i].data_offset = 0;
-            nodes[i].data_size = 0;
-            nodes[i].dirty_offset = -1;
-            nodes[i].mode = 0;
-            nodes[i].uid = 0;
-            nodes[i].gid = 0;
-            nodes[i].created_tick = 0;
-            nodes[i].modified_tick = 0;
-            nodes[i].generation = 0;
-            return i;
-        }
-    }
-    return -1;
-}
-
-static void fs_init_node_metadata(k64_fs_node_t* node, bool is_dir) {
-    uint64_t now;
-
-    if (!node) {
-        return;
-    }
-    now = fs_next_clock();
-    node->mode = is_dir ? K64FS_MODE_DIR : K64FS_MODE_FILE;
-    node->uid = 0;
-    node->gid = 0;
-    node->created_tick = now;
-    node->modified_tick = now;
-    node->generation = fs_next_generation();
-}
-
-static void fs_mark_node_modified(k64_fs_node_t* node) {
-    if (!node) {
-        return;
-    }
-    node->modified_tick = fs_next_clock();
-    node->generation = fs_next_generation();
-}
-
-static bool fs_valid_leaf_name(const char* name) {
-    int len = 0;
-
-    if (!name || !name[0] || k64_streq(name, ".") || k64_streq(name, "..")) {
+static bool fs_mem_read(void* ctx, uint64_t lba, uint32_t count, void* buffer) {
+    k64_memdev_t* mem = (k64_memdev_t*)ctx;
+    size_t off;
+    size_t bytes;
+    if (!mem || !buffer || count == 0) {
         return false;
     }
-    while (name[len]) {
-        char ch = name[len];
-        if (ch == '/' || ch == '\\' || (unsigned char)ch < 32 || ch == 127) {
-            return false;
-        }
-        len++;
-        if (len >= K64_FS_NAME_MAX) {
-            return false;
-        }
+    off = (size_t)lba * K64_ROOTFS_BLOCK_SIZE;
+    bytes = (size_t)count * K64_ROOTFS_BLOCK_SIZE;
+    if (off > mem->size || bytes > mem->size - off) {
+        return false;
     }
+    memcpy(buffer, mem->data + off, bytes);
     return true;
 }
 
-static int fs_find_child(int parent, const char* name) {
-    for (int i = 1; i < K64_FS_MAX_NODES; ++i) {
-        if (nodes[i].used && nodes[i].parent == parent && k64_streq(nodes[i].name, name)) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-static bool fs_name_has_prefix(const char* value, const char* prefix) {
-    size_t prefix_len;
-
-    if (!value || !prefix) {
+static bool fs_mem_write(void* ctx, uint64_t lba, uint32_t count, const void* buffer) {
+    k64_memdev_t* mem = (k64_memdev_t*)ctx;
+    size_t off;
+    size_t bytes;
+    if (!mem || !buffer || count == 0) {
         return false;
     }
-    prefix_len = k64_strlen(prefix);
-    return k64_strncmp(value, prefix, prefix_len) == 0;
-}
-
-static bool fs_path_has_suffix(const char* path, const char* suffix) {
-    size_t path_len;
-    size_t suffix_len;
-
-    if (!path || !suffix) {
+    off = (size_t)lba * K64_ROOTFS_BLOCK_SIZE;
+    bytes = (size_t)count * K64_ROOTFS_BLOCK_SIZE;
+    if (off > mem->size || bytes > mem->size - off) {
         return false;
     }
-    path_len = k64_strlen(path);
-    suffix_len = k64_strlen(suffix);
-    if (path_len < suffix_len) {
-        return false;
-    }
-    return k64_strcmp(path + path_len - suffix_len, suffix) == 0;
-}
-
-static const uint8_t* fs_node_bytes(const k64_fs_node_t* node) {
-    if (!node || node->is_dir || node->data_size <= 0) {
-        return NULL;
-    }
-    if (node->dirty) {
-        if (node->dirty_offset < 0 || (size_t)(node->dirty_offset + node->data_size) > fs_mutable_used) {
-            return NULL;
-        }
-        return fs_mutable + node->dirty_offset;
-    }
-    if ((size_t)(node->data_offset + node->data_size) > fs_image_size) {
-        return NULL;
-    }
-    return fs_image + node->data_offset;
-}
-
-static bool fs_store_mutable(k64_fs_node_t* node, const uint8_t* data, int size) {
-    size_t offset;
-
-    if (!node || node->is_dir || size < 0) {
-        return false;
-    }
-    if (size == 0) {
-        node->dirty = false;
-        node->dirty_offset = -1;
-        node->data_size = 0;
-        node->data_offset = 0;
-        return true;
-    }
-    if ((size_t)size > K64_FS_MUTABLE_MAX || fs_mutable_used + (size_t)size > K64_FS_MUTABLE_MAX) {
-        return false;
-    }
-
-    offset = fs_mutable_used;
-    for (int i = 0; i < size; ++i) {
-        fs_mutable[offset + (size_t)i] = data ? data[i] : 0;
-    }
-    fs_mutable_used += (size_t)size;
-    node->dirty = true;
-    node->dirty_offset = (int)offset;
-    node->data_size = size;
+    memcpy(mem->data + off, buffer, bytes);
     return true;
 }
 
-static bool fs_dir_empty(int index) {
-    if (index <= 0 || index >= K64_FS_MAX_NODES || !nodes[index].used || !nodes[index].is_dir) {
+static bool fs_path_has_suffix(const char* s, const char* suffix) {
+    size_t slen = k64_strlen(s);
+    size_t tlen = k64_strlen(suffix);
+    if (tlen > slen) {
         return false;
     }
-    for (int i = 1; i < K64_FS_MAX_NODES; ++i) {
-        if (nodes[i].used && nodes[i].parent == index) {
-            return false;
-        }
-    }
-    return true;
+    return k64_strncmp(s + slen - tlen, suffix, tlen) == 0;
 }
 
-static bool fs_is_descendant(int ancestor, int child) {
-    if (ancestor < 0 || child < 0) {
+static bool fs_name_has_prefix(const char* s, const char* prefix) {
+    return s && prefix && k64_strncmp(s, prefix, k64_strlen(prefix)) == 0;
+}
+
+static bool fs_normalize(const char* path, char* out, size_t out_size) {
+    char tmp[256];
+    size_t pos = 0;
+    const char* p;
+
+    if (!out || out_size == 0) {
         return false;
     }
-    while (child != 0 && child != ancestor) {
-        child = nodes[child].parent;
+    if (!path || !path[0]) {
+        path = ".";
     }
-    return child == ancestor;
-}
-
-static void fs_remove_node(int index) {
-    if (index <= 0 || index >= K64_FS_MAX_NODES) {
-        return;
-    }
-    nodes[index].used = false;
-    nodes[index].is_dir = false;
-    nodes[index].parent = -1;
-    nodes[index].name[0] = '\0';
-    nodes[index].dirty = false;
-    nodes[index].data_offset = 0;
-    nodes[index].data_size = 0;
-    nodes[index].dirty_offset = -1;
-}
-
-static bool fs_compact_nodes(void) {
-    k64_fs_node_t* compacted = fs_compact_buffer;
-    int* remap = fs_remap_buffer;
-
-    for (int i = 0; i < K64_FS_MAX_NODES; ++i) {
-        remap[i] = -1;
-        compacted[i].used = false;
-        compacted[i].is_dir = false;
-        compacted[i].parent = -1;
-        compacted[i].name[0] = '\0';
-        compacted[i].dirty = false;
-        compacted[i].data_offset = 0;
-        compacted[i].data_size = 0;
-        compacted[i].dirty_offset = -1;
-        compacted[i].mode = 0;
-        compacted[i].uid = 0;
-        compacted[i].gid = 0;
-        compacted[i].created_tick = 0;
-        compacted[i].modified_tick = 0;
-        compacted[i].generation = 0;
-    }
-
-    remap[0] = 0;
-    compacted[0] = nodes[0];
-
-    {
-        int next = 1;
-        for (int i = 1; i < K64_FS_MAX_NODES; ++i) {
-            if (!nodes[i].used) {
-                continue;
-            }
-            if (next >= K64_FS_MAX_NODES) {
-                return false;
-            }
-            remap[i] = next;
-            compacted[next] = nodes[i];
-            next++;
-        }
-    }
-
-    for (int i = 0; i < K64_FS_MAX_NODES; ++i) {
-        if (!compacted[i].used) {
-            continue;
-        }
-        if (compacted[i].parent < 0 || compacted[i].parent >= K64_FS_MAX_NODES ||
-            remap[compacted[i].parent] < 0) {
-            return false;
-        }
-        compacted[i].parent = remap[compacted[i].parent];
-    }
-
-    if (cwd_index < 0 || cwd_index >= K64_FS_MAX_NODES || remap[cwd_index] < 0) {
-        cwd_index = 0;
+    if (path[0] == '/') {
+        fs_copy(tmp, sizeof(tmp), path);
     } else {
-        cwd_index = remap[cwd_index];
-    }
-
-    for (int i = 0; i < K64_FS_MAX_NODES; ++i) {
-        nodes[i] = compacted[i];
-    }
-    return true;
-}
-
-static bool fs_parse_loaded_image(size_t size) {
-    const k64fs_header_t* hdr = (const k64fs_header_t*)fs_image;
-    const k64fs_entry_t* entries;
-
-    if (size < sizeof(k64fs_header_t)) {
-        K64_LOG_WARN("K64FS: image missing or too small.");
-        return false;
-    }
-    if (hdr->magic0 != K64FS_MAGIC_0 || hdr->magic1 != K64FS_MAGIC_1 || hdr->version != 1) {
-        K64_LOG_WARN("K64FS: invalid header.");
-        return false;
-    }
-    if (hdr->image_size > size || hdr->entries_offset >= hdr->image_size ||
-        hdr->strings_offset >= hdr->image_size || hdr->data_offset > hdr->image_size) {
-        K64_LOG_WARN("K64FS: invalid offsets in header.");
-        return false;
-    }
-    if (hdr->entry_count == 0 || hdr->entry_count > K64_FS_MAX_NODES) {
-        K64_LOG_WARN("K64FS: invalid entry count.");
-        return false;
-    }
-    if (hdr->entries_offset + hdr->entry_count * sizeof(k64fs_entry_t) > hdr->strings_offset) {
-        K64_LOG_WARN("K64FS: entry table overlaps string table.");
-        return false;
-    }
-
-    fs_reset();
-    entries = (const k64fs_entry_t*)(fs_image + hdr->entries_offset);
-
-    for (uint32_t i = 0; i < hdr->entry_count; ++i) {
-        const k64fs_entry_t* entry = &entries[i];
-        const char* name;
-        k64_fs_node_t* node;
-
-        if (hdr->data_offset < hdr->strings_offset ||
-            entry->name_offset >= hdr->data_offset - hdr->strings_offset) {
-            K64_LOG_WARN("K64FS: bad name offset.");
-            return false;
+        fs_copy(tmp, sizeof(tmp), fs_cwd);
+        if (!k64_streq(tmp, "/")) {
+            fs_append(tmp, sizeof(tmp), "/");
         }
-        if (entry->type != K64FS_TYPE_DIR && entry->type != K64FS_TYPE_FILE) {
-            K64_LOG_WARN("K64FS: bad entry type.");
-            return false;
-        }
-        if (i == 0 && entry->parent_index != 0) {
-            K64_LOG_WARN("K64FS: root parent is invalid.");
-            return false;
-        }
-        if (i != 0 && entry->parent_index >= i) {
-            K64_LOG_WARN("K64FS: entry parent ordering is invalid.");
-            return false;
-        }
-        if (i == 0 && entry->type != K64FS_TYPE_DIR) {
-            K64_LOG_WARN("K64FS: root is not a directory.");
-            return false;
-        }
+        fs_append(tmp, sizeof(tmp), path);
+    }
 
-        node = &nodes[i];
-        node->used = true;
-        node->is_dir = entry->type == K64FS_TYPE_DIR;
-        node->parent = (int)entry->parent_index;
-        node->dirty = false;
-        node->dirty_offset = -1;
-        name = (const char*)fs_image + hdr->strings_offset + entry->name_offset;
-        {
-            size_t max_name = hdr->data_offset - hdr->strings_offset - entry->name_offset;
-            bool terminated = false;
-            for (size_t j = 0; j < max_name; ++j) {
-                if (name[j] == '\0') {
-                    terminated = true;
-                    break;
-                }
-            }
-            if (!terminated || (i != 0 && !fs_valid_leaf_name(name))) {
-                K64_LOG_WARN("K64FS: invalid entry name.");
+    out[pos++] = '/';
+    out[pos] = '\0';
+    p = tmp;
+    while (*p) {
+        char token[128];
+        size_t n = 0;
+        while (*p == '/') {
+            p++;
+        }
+        while (*p && *p != '/') {
+            if (n + 1 >= sizeof(token)) {
                 return false;
             }
+            token[n++] = *p++;
         }
-        fs_copy(node->name, K64_FS_NAME_MAX, i == 0 ? "" : name);
-        if (i != 0) {
-            for (uint32_t j = 1; j < i; ++j) {
-                if (nodes[j].used &&
-                    nodes[j].parent == (int)entry->parent_index &&
-                    k64_streq(nodes[j].name, node->name)) {
-                    K64_LOG_WARN("K64FS: duplicate sibling name.");
-                    return false;
-                }
-            }
-        }
-        node->mode = entry->reserved0 ? entry->reserved0 : (node->is_dir ? K64FS_MODE_DIR : K64FS_MODE_FILE);
-        if (!node->is_dir && fs_path_has_suffix(node->name, ".elf") && (node->mode & 0111u) == 0) {
-            node->mode = 0100755u;
-        }
-        node->uid = 0;
-        node->gid = 0;
-        node->created_tick = fs_next_clock();
-        node->modified_tick = entry->reserved1 ? entry->reserved1 : node->created_tick;
-        node->generation = fs_next_generation();
-
-        if (node->is_dir) {
-            node->data_offset = 0;
-            node->data_size = 0;
+        token[n] = '\0';
+        if (n == 0 || k64_streq(token, ".")) {
             continue;
         }
-        if (hdr->data_offset + entry->data_offset + entry->data_size > hdr->image_size) {
-            K64_LOG_WARN("K64FS: file data exceeds image.");
+        if (k64_streq(token, "..")) {
+            if (pos > 1) {
+                pos--;
+                while (pos > 1 && out[pos - 1] != '/') {
+                    pos--;
+                }
+                out[pos] = '\0';
+            }
+            continue;
+        }
+        if (pos > 1) {
+            if (pos + 1 >= out_size) {
+                return false;
+            }
+            out[pos++] = '/';
+        }
+        if (pos + n >= out_size) {
             return false;
         }
-        node->data_offset = (int)(hdr->data_offset + entry->data_offset);
-        node->data_size = (int)entry->data_size;
+        memcpy(out + pos, token, n);
+        pos += n;
+        out[pos] = '\0';
     }
-
-    fs_image_size = hdr->image_size;
-    fs_mutable_used = 0;
-    cwd_index = 0;
     return true;
 }
 
-static bool fs_mount_image(const void* image, size_t size) {
-    const uint8_t* src = (const uint8_t*)image;
-
-    if (!image || size > K64_FS_IMAGE_MAX) {
-        K64_LOG_WARN("K64FS: image missing or too large.");
+static bool fs_mount_device(k64_block_device_t* dev, const char* name, bool persistent) {
+    if (!dev || !k64_xfs_mount(dev, &rootfs)) {
         return false;
     }
-    for (size_t i = 0; i < size; ++i) {
-        fs_image[i] = src[i];
-    }
-    return fs_parse_loaded_image(size);
-}
-
-static bool fs_mount_from_block_device_at(k64_block_device_t* dev, uint64_t base_lba) {
-    k64fs_header_t hdr;
-    uint32_t image_size;
-    uint32_t sectors;
-
-    if (!dev || dev->block_size != K64_FS_BLOCK_SIZE) {
-        return false;
-    }
-    if (!k64_block_read(dev, base_lba, 1, fs_block_buffer)) {
-        K64_LOG_WARN("K64FS: block root probe read failed.");
-        return false;
-    }
-
-    for (size_t i = 0; i < sizeof(hdr); ++i) {
-        ((uint8_t*)&hdr)[i] = fs_block_buffer[i];
-    }
-    if (hdr.magic0 != K64FS_MAGIC_0 || hdr.magic1 != K64FS_MAGIC_1 || hdr.version != 1) {
-        K64_LOG_WARN("K64FS: block root header invalid.");
-        return false;
-    }
-
-    image_size = hdr.image_size;
-    if (image_size < sizeof(k64fs_header_t) || image_size > K64_FS_IMAGE_MAX) {
-        K64_LOG_WARN("K64FS: block root image size invalid.");
-        return false;
-    }
-
-    sectors = (image_size + K64_FS_BLOCK_SIZE - 1u) / K64_FS_BLOCK_SIZE;
-    if (base_lba >= dev->block_count || (uint64_t)sectors > dev->block_count - base_lba) {
-        K64_LOG_WARN("K64FS: block root exceeds device size.");
-        return false;
-    }
-    if (!k64_block_read(dev, base_lba, sectors, fs_image)) {
-        K64_LOG_WARN("K64FS: block root image read failed.");
-        return false;
-    }
-    if (!fs_parse_loaded_image(image_size)) {
-        K64_LOG_WARN("K64FS: block root parse failed.");
-        return false;
-    }
-
-    fs_persistent = true;
-    fs_dirty = false;
-    fs_block_device = dev;
-    fs_block_lba = base_lba;
-    {
-        uint64_t bytes = dev->block_count * (uint64_t)dev->block_size;
-        size_t usable = bytes > (uint64_t)((size_t)-1) ? (size_t)-1 : (size_t)bytes;
-        fs_volume_capacity = usable < K64_FS_IMAGE_MAX ? usable : K64_FS_IMAGE_MAX;
-    }
-    fs_copy(fs_mount_name, sizeof(fs_mount_name), dev->name);
-    K64_LOG_INFO("K64FS: mounted persistent block root.");
+    fs_persistent = persistent;
+    fs_copy(fs_mount_name, sizeof(fs_mount_name), name ? name : dev->name);
+    fs_copy(fs_cwd, sizeof(fs_cwd), "/");
+    K64_LOG_INFO("K64XFS: mounted root filesystem.");
     return true;
-}
-
-static bool fs_mount_from_block_device(k64_block_device_t* dev) {
-    if (fs_mount_from_block_device_at(dev, 0)) {
-        return true;
-    }
-    return fs_mount_from_block_device_at(dev, K64_FS_PARTITION_LBA);
 }
 
 static bool fs_mount_from_blocks(void) {
-    bool saw_device = false;
-
     for (size_t i = 0; i < k64_block_device_count(); ++i) {
         k64_block_device_t* dev = k64_block_device_at(i);
-        if (!dev || !dev->online || !dev->is_partition || dev->block_size != K64_FS_BLOCK_SIZE) {
-            continue;
-        }
-        saw_device = true;
-        if (fs_mount_from_block_device(dev)) {
+        if (dev && dev->online && dev->read && fs_mount_device(dev, dev->name, dev->writable)) {
             return true;
         }
-    }
-    for (size_t i = 0; i < k64_block_device_count(); ++i) {
-        k64_block_device_t* dev = k64_block_device_at(i);
-        if (!dev || !dev->online || dev->is_partition || dev->block_size != K64_FS_BLOCK_SIZE) {
-            continue;
-        }
-        saw_device = true;
-        if (fs_mount_from_block_device(dev)) {
-            return true;
-        }
-    }
-    if (saw_device) {
-        K64_LOG_WARN("K64FS: no persistent block root mounted.");
     }
     return false;
 }
@@ -642,297 +192,68 @@ static bool fs_mount_from_blocks(void) {
 static bool fs_mount_from_multiboot(void) {
     multiboot_info_t* mb;
     multiboot_module_t* mods;
-
     if (k64_mb_magic != 0x2BADB002) {
-        K64_LOG_WARN("K64FS: multiboot magic missing.");
         return false;
     }
     mb = (multiboot_info_t*)(uintptr_t)k64_mb_info;
-    if (!(mb->flags & (1u << 3))) {
-        K64_LOG_WARN("K64FS: no multiboot modules available.");
+    if (!(mb->flags & (1u << 3)) || mb->mods_count == 0) {
         return false;
     }
-
     mods = (multiboot_module_t*)(uintptr_t)mb->mods_addr;
     for (uint32_t i = 0; i < mb->mods_count; ++i) {
-        const multiboot_module_t* mod = &mods[i];
-        const char* path = (const char*)(uintptr_t)mod->string;
-        size_t size = (size_t)((uintptr_t)mod->mod_end - (uintptr_t)mod->mod_start);
-
-        if (path && fs_path_has_suffix(path, ".k64fs")) {
-            K64_LOG_INFO("K64FS: found root image module.");
-            if (fs_mount_image((const void*)(uintptr_t)mod->mod_start, size)) {
-                fs_persistent = false;
-                fs_dirty = false;
-                fs_block_device = NULL;
-                fs_block_lba = 0;
-                fs_volume_capacity = K64_FS_IMAGE_MAX;
-                fs_copy(fs_mount_name, sizeof(fs_mount_name), "multiboot");
-                K64_LOG_INFO("K64FS: mounted root image.");
-                return true;
-            }
-            K64_LOG_WARN("K64FS: root image mount failed.");
+        const char* name = (const char*)(uintptr_t)mods[i].string;
+        size_t size = (size_t)(mods[i].mod_end - mods[i].mod_start);
+        if (!name || !fs_path_has_suffix(name, ".xfs") || size < K64_XFS_BLOCK_SIZE ||
+            (size % K64_ROOTFS_BLOCK_SIZE) != 0) {
+            continue;
+        }
+        fs_module_memdev.data = (uint8_t*)(uintptr_t)mods[i].mod_start;
+        fs_module_memdev.size = size;
+        fs_module_device = k64_block_register_device("rootmod",
+                                                     "multiboot",
+                                                     K64_ROOTFS_BLOCK_SIZE,
+                                                     size / K64_ROOTFS_BLOCK_SIZE,
+                                                     true,
+                                                     &fs_module_memdev,
+                                                     fs_mem_read,
+                                                     fs_mem_write);
+        if (fs_mount_device(fs_module_device, "multiboot:root.xfs", false)) {
+            return true;
         }
     }
-    K64_LOG_WARN("K64FS: no mountable root image found.");
     return false;
 }
 
-static int fs_resolve(const char* path, bool want_parent, char* leaf_out) {
-    char token[K64_FS_NAME_MAX];
-    int token_len = 0;
-    int current = (path && path[0] == '/') ? 0 : cwd_index;
-    const char* p = path;
-
-    if (!fs_running || !path || !*path) {
-        return current;
-    }
-
-    if (*p == '/') {
-        p++;
-    }
-
-    while (1) {
-        if (*p == '/' || *p == '\0') {
-            token[token_len] = '\0';
-            if (token_len > 0) {
-                if (want_parent && *p == '\0') {
-                    if (leaf_out) {
-                        fs_copy(leaf_out, K64_FS_NAME_MAX, token);
-                    }
-                    return current;
-                }
-                if (k64_streq(token, ".")) {
-                } else if (k64_streq(token, "..")) {
-                    current = nodes[current].parent;
-                } else {
-                    current = fs_find_child(current, token);
-                    if (current < 0) {
-                        return -1;
-                    }
-                }
-                token_len = 0;
-            } else if (want_parent && *p == '\0') {
-                if (leaf_out) {
-                    leaf_out[0] = '\0';
-                }
-                return current;
-            }
-            if (*p == '\0') {
-                return current;
-            }
-            p++;
-            continue;
-        }
-        if (token_len + 1 >= K64_FS_NAME_MAX) {
-            return -1;
-        }
-        token[token_len++] = *p;
-        p++;
-    }
-}
-
-static bool fs_build_path(int index, char* out, int out_size) {
-    int chain[K64_FS_MAX_NODES];
-    int count = 0;
-
-    if (!out || out_size <= 0 || index < 0 || !nodes[index].used) {
+static bool fs_mount_fallback(void) {
+    fs_fallback_device = k64_block_register_device("memxfs",
+                                                   "memory",
+                                                   K64_ROOTFS_BLOCK_SIZE,
+                                                   sizeof(fs_fallback_image) / K64_ROOTFS_BLOCK_SIZE,
+                                                   true,
+                                                   &fs_fallback_memdev,
+                                                   fs_mem_read,
+                                                   fs_mem_write);
+    if (!fs_fallback_device || !k64_xfs_format(fs_fallback_device, "memroot") ||
+        !fs_mount_device(fs_fallback_device, "memory:xfs", false)) {
         return false;
     }
-    if (index == 0) {
-        fs_copy(out, out_size, "/");
-        return true;
-    }
-
-    while (index != 0 && count < K64_FS_MAX_NODES) {
-        chain[count++] = index;
-        index = nodes[index].parent;
-    }
-
-    out[0] = '\0';
-    for (int i = count - 1; i >= 0; --i) {
-        fs_append(out, out_size, "/");
-        fs_append(out, out_size, nodes[chain[i]].name);
-    }
-    return true;
-}
-
-static int fs_used_count(void) {
-    int count = 0;
-
-    while (count < K64_FS_MAX_NODES && nodes[count].used) {
-        count++;
-    }
-    for (int i = count; i < K64_FS_MAX_NODES; ++i) {
-        if (nodes[i].used) {
-            return -1;
-        }
-    }
-    return count;
-}
-
-static bool fs_writeback_image(void) {
-    bool was_persistent = fs_persistent;
-    k64_block_device_t* saved_block_device = fs_block_device;
-    uint64_t saved_block_lba = fs_block_lba;
-    char saved_mount_name[32];
-    k64fs_header_t* hdr;
-    k64fs_entry_t* entries;
-    int entry_count;
-    size_t strings_size = 0;
-    size_t data_size = 0;
-    size_t strings_offset;
-    size_t data_offset;
-    size_t total_size;
-    size_t string_cursor;
-    size_t data_cursor;
-    int owner_snapshot_count = 0;
-
-    if (!fs_compact_nodes()) {
-        K64_LOG_WARN("K64FS: failed to compact nodes before writeback.");
-        return false;
-    }
-
-    fs_copy(saved_mount_name, sizeof(saved_mount_name), fs_mount_name);
-
-    entry_count = fs_used_count();
-    if (entry_count <= 0) {
-        return false;
-    }
-
-    for (int i = 0; i < entry_count && owner_snapshot_count < K64_FS_MAX_NODES; ++i) {
-        fs_owner_snapshot[owner_snapshot_count].used = false;
-        if (!nodes[i].used || (nodes[i].uid == 0u && nodes[i].gid == 0u)) {
-            continue;
-        }
-        if (!fs_build_path(i,
-                           fs_owner_snapshot[owner_snapshot_count].path,
-                           (int)sizeof(fs_owner_snapshot[owner_snapshot_count].path))) {
-            continue;
-        }
-        fs_owner_snapshot[owner_snapshot_count].used = true;
-        fs_owner_snapshot[owner_snapshot_count].uid = nodes[i].uid;
-        fs_owner_snapshot[owner_snapshot_count].gid = nodes[i].gid;
-        owner_snapshot_count++;
-    }
-
-    for (int i = 0; i < entry_count; ++i) {
-        strings_size += (size_t)fs_len(nodes[i].name) + 1;
-        if (!nodes[i].is_dir) {
-            data_size += (size_t)nodes[i].data_size;
-        }
-    }
-
-    strings_offset = sizeof(k64fs_header_t) + (size_t)entry_count * sizeof(k64fs_entry_t);
-    data_offset = strings_offset + strings_size;
-    total_size = data_offset + data_size;
-    if (total_size > K64_FS_IMAGE_MAX || total_size > fs_volume_capacity) {
-        K64_LOG_WARN("K64FS: writeback image exceeds limit.");
-        return false;
-    }
-
-    for (size_t i = 0; i < total_size; ++i) {
-        fs_image_scratch[i] = 0;
-    }
-
-    hdr = (k64fs_header_t*)fs_image_scratch;
-    entries = (k64fs_entry_t*)(fs_image_scratch + sizeof(k64fs_header_t));
-    hdr->magic0 = K64FS_MAGIC_0;
-    hdr->magic1 = K64FS_MAGIC_1;
-    hdr->version = 1;
-    hdr->reserved = 0;
-    hdr->entry_count = (uint32_t)entry_count;
-    hdr->entries_offset = (uint32_t)sizeof(k64fs_header_t);
-    hdr->strings_offset = (uint32_t)strings_offset;
-    hdr->data_offset = (uint32_t)data_offset;
-    hdr->image_size = (uint32_t)total_size;
-
-    string_cursor = 0;
-    data_cursor = 0;
-    for (int i = 0; i < entry_count; ++i) {
-        k64_fs_node_t* node = &nodes[i];
-        size_t name_len = (size_t)fs_len(node->name);
-
-        entries[i].parent_index = (uint32_t)node->parent;
-        entries[i].type = node->is_dir ? K64FS_TYPE_DIR : K64FS_TYPE_FILE;
-        entries[i].reserved0 = (uint16_t)(node->mode & 0xFFFFu);
-        entries[i].name_offset = (uint32_t)string_cursor;
-        entries[i].reserved1 = (uint32_t)(node->modified_tick & 0xFFFFFFFFu);
-
-        for (size_t j = 0; j < name_len; ++j) {
-            fs_image_scratch[strings_offset + string_cursor + j] = (uint8_t)node->name[j];
-        }
-        fs_image_scratch[strings_offset + string_cursor + name_len] = 0;
-        string_cursor += name_len + 1;
-
-        if (node->is_dir) {
-            entries[i].data_offset = 0;
-            entries[i].data_size = 0;
-            continue;
-        }
-
-        entries[i].data_offset = (uint32_t)data_cursor;
-        entries[i].data_size = (uint32_t)node->data_size;
-        if (node->data_size > 0) {
-            const uint8_t* src = fs_node_bytes(node);
-            if (!src) {
-                K64_LOG_WARN("K64FS: missing source data during writeback.");
-                return false;
-            }
-            for (int j = 0; j < node->data_size; ++j) {
-                fs_image_scratch[data_offset + data_cursor + (size_t)j] = src[j];
-            }
-            data_cursor += (size_t)node->data_size;
-        }
-    }
-
-    for (size_t i = 0; i < total_size; ++i) {
-        fs_image[i] = fs_image_scratch[i];
-    }
-    if (!fs_parse_loaded_image(total_size)) {
-        return false;
-    }
-    for (int i = 0; i < owner_snapshot_count; ++i) {
-        int idx;
-
-        if (!fs_owner_snapshot[i].used) {
-            continue;
-        }
-        idx = fs_resolve(fs_owner_snapshot[i].path, false, NULL);
-        if (idx >= 0) {
-            nodes[idx].uid = fs_owner_snapshot[i].uid;
-            nodes[idx].gid = fs_owner_snapshot[i].gid;
-        }
-        fs_owner_snapshot[i].used = false;
-    }
-    fs_persistent = was_persistent;
-    fs_block_device = saved_block_device;
-    fs_block_lba = saved_block_lba;
-    fs_copy(fs_mount_name, sizeof(fs_mount_name), saved_mount_name);
-    fs_dirty = true;
-    if (fs_persistent) {
-        return fs_flush_block_device();
-    }
+    (void)k64_fs_mkdir_p("/home/root");
+    (void)k64_fs_mkdir_p("/etc");
+    (void)k64_fs_write_file("/README", "K64 in-memory K64XFS filesystem");
+    (void)k64_fs_write_file("/etc/motd", "welcome to K64");
     return true;
 }
 
 bool k64_fs_driver_start(void) {
     fs_running = true;
-    fs_reset();
-    if (fs_mount_from_blocks()) {
+    fs_persistent = false;
+    fs_mount_name[0] = '\0';
+    fs_copy(fs_cwd, sizeof(fs_cwd), "/");
+    if (fs_mount_from_blocks() || fs_mount_from_multiboot() || fs_mount_fallback()) {
         return true;
     }
-    if (!fs_mount_from_multiboot()) {
-        (void)k64_fs_mkdir("/home");
-        (void)k64_fs_mkdir("/home/root");
-        (void)k64_fs_mkdir("/etc");
-        (void)k64_fs_touch("/README");
-        (void)k64_fs_write_file("/README", "K64 in-memory filesystem");
-        (void)k64_fs_touch("/etc/motd");
-        (void)k64_fs_write_file("/etc/motd", "welcome to K64");
-        fs_copy(fs_mount_name, sizeof(fs_mount_name), "memory");
-    }
-    return true;
+    fs_running = false;
+    return false;
 }
 
 void k64_fs_driver_stop(void) {
@@ -941,583 +262,326 @@ void k64_fs_driver_stop(void) {
 }
 
 bool k64_fs_driver_running(void) {
-    return fs_running;
+    return fs_running && rootfs.mounted;
 }
 
 bool k64_fs_pwd(char* out, int out_size) {
-    return fs_build_path(cwd_index, out, out_size);
+    if (!out || out_size <= 0) {
+        return false;
+    }
+    fs_copy(out, (size_t)out_size, fs_cwd);
+    return true;
 }
 
 bool k64_fs_cd(const char* path) {
-    int idx = fs_resolve(path, false, NULL);
-
-    if (idx < 0 || !nodes[idx].is_dir) {
+    char full[256];
+    k64_fs_stat_t st;
+    if (!fs_normalize(path, full, sizeof(full)) || !k64_xfs_stat(&rootfs, full, &st) || !st.is_dir) {
         return false;
     }
-    cwd_index = idx;
+    fs_copy(fs_cwd, sizeof(fs_cwd), full);
     return true;
 }
 
 bool k64_fs_ls(const char* path, char* out, int out_size) {
-    int idx = path && path[0] ? fs_resolve(path, false, NULL) : cwd_index;
-
-    if (!out || out_size <= 0 || idx < 0 || !nodes[idx].is_dir) {
+    char full[256];
+    if (!fs_normalize(path && path[0] ? path : ".", full, sizeof(full)) ||
+        !k64_xfs_list_dir(&rootfs, full, out, out_size)) {
         return false;
     }
-
-    out[0] = '\0';
-    for (int i = 1; i < K64_FS_MAX_NODES; ++i) {
-        if (nodes[i].used && nodes[i].parent == idx) {
-            fs_append(out, out_size, nodes[i].name);
-            fs_append(out, out_size, nodes[i].is_dir ? "/\n" : "\n");
-        }
-    }
-    if (!out[0]) {
-        fs_copy(out, out_size, ".\n");
+    if (out && out_size > 0 && !out[0]) {
+        fs_copy(out, (size_t)out_size, ".\n");
     }
     return true;
 }
 
 bool k64_fs_iter_dir(const char* path, k64_fs_iter_fn fn, void* ctx) {
-    int idx = path && path[0] ? fs_resolve(path, false, NULL) : cwd_index;
-
-    if (!fn || idx < 0 || !nodes[idx].is_dir) {
+    char listing[4096];
+    char* p = listing;
+    if (!fn || !k64_fs_ls(path, listing, sizeof(listing))) {
         return false;
     }
-
-    for (int i = 1; i < K64_FS_MAX_NODES; ++i) {
-        if (nodes[i].used && nodes[i].parent == idx) {
-            if (!fn(nodes[i].name, nodes[i].is_dir, ctx)) {
-                break;
+    while (*p) {
+        char name[128];
+        size_t n = 0;
+        bool is_dir = false;
+        while (*p && *p != '\n') {
+            if (n + 1 < sizeof(name)) {
+                name[n++] = *p;
             }
+            p++;
+        }
+        if (*p == '\n') {
+            p++;
+        }
+        name[n] = '\0';
+        if (n == 0 || k64_streq(name, ".")) {
+            continue;
+        }
+        if (n > 0 && name[n - 1] == '/') {
+            name[n - 1] = '\0';
+            is_dir = true;
+        }
+        if (!fn(name, is_dir, ctx)) {
+            break;
         }
     }
     return true;
 }
 
 bool k64_fs_mkdir(const char* path) {
-    char leaf[K64_FS_NAME_MAX];
-    int parent = fs_resolve(path, true, leaf);
-    int idx;
-
-    if (parent < 0 || !fs_valid_leaf_name(leaf) || fs_find_child(parent, leaf) >= 0) {
-        return false;
-    }
-    idx = fs_alloc_node();
-    if (idx < 0) {
-        return false;
-    }
-    nodes[idx].is_dir = true;
-    nodes[idx].parent = parent;
-    fs_copy(nodes[idx].name, K64_FS_NAME_MAX, leaf);
-    fs_init_node_metadata(&nodes[idx], true);
-    fs_mark_node_modified(&nodes[parent]);
-    return fs_writeback_image();
+    char full[256];
+    return fs_normalize(path, full, sizeof(full)) && k64_xfs_mkdir(&rootfs, full, 0755u, 0, 0);
 }
 
 bool k64_fs_mkdir_p(const char* path) {
-    char token[K64_FS_NAME_MAX];
-    int token_len = 0;
-    int current = (path && path[0] == '/') ? 0 : cwd_index;
-    const char* p = path;
-
-    if (!fs_running || !path || !*path) {
+    char full[256];
+    char partial[256];
+    const char* p;
+    size_t pos = 1;
+    if (!fs_normalize(path, full, sizeof(full))) {
         return false;
     }
-    if (*p == '/') {
-        p++;
+    if (k64_streq(full, "/")) {
+        return true;
     }
-    while (1) {
-        if (*p == '/' || *p == '\0') {
-            token[token_len] = '\0';
-            if (token_len > 0) {
-                int child;
-                if (k64_streq(token, ".")) {
-                } else if (k64_streq(token, "..")) {
-                    current = nodes[current].parent;
-                } else {
-                    if (!fs_valid_leaf_name(token)) {
-                        return false;
-                    }
-                    child = fs_find_child(current, token);
-                    if (child < 0) {
-                        child = fs_alloc_node();
-                        if (child < 0) {
-                            return false;
-                        }
-                        nodes[child].is_dir = true;
-                        nodes[child].parent = current;
-                        fs_copy(nodes[child].name, K64_FS_NAME_MAX, token);
-                        fs_init_node_metadata(&nodes[child], true);
-                        fs_mark_node_modified(&nodes[current]);
-                    } else if (!nodes[child].is_dir) {
-                        return false;
-                    }
-                    current = child;
-                }
-                token_len = 0;
+    partial[0] = '/';
+    partial[1] = '\0';
+    p = full + 1;
+    while (*p) {
+        while (*p && *p != '/') {
+            if (pos + 1 >= sizeof(partial)) {
+                return false;
             }
-            if (*p == '\0') {
-                return fs_writeback_image();
-            }
+            partial[pos++] = *p++;
+            partial[pos] = '\0';
+        }
+        if (!k64_xfs_stat(&rootfs, partial, &(k64_fs_stat_t){0}) &&
+            !k64_xfs_mkdir(&rootfs, partial, 0755u, 0, 0)) {
+            return false;
+        }
+        while (*p == '/') {
             p++;
-            continue;
         }
-        if (token_len + 1 >= K64_FS_NAME_MAX) {
-            return false;
-        }
-        token[token_len++] = *p++;
-    }
-}
-
-bool k64_fs_touch(const char* path) {
-    char leaf[K64_FS_NAME_MAX];
-    int parent = fs_resolve(path, true, leaf);
-    int idx;
-
-    if (parent < 0 || !fs_valid_leaf_name(leaf)) {
-        return false;
-    }
-    idx = fs_find_child(parent, leaf);
-    if (idx >= 0) {
-        if (nodes[idx].is_dir) {
-            return false;
-        }
-        fs_mark_node_modified(&nodes[idx]);
-        return fs_writeback_image();
-    }
-    idx = fs_alloc_node();
-    if (idx < 0) {
-        return false;
-    }
-    nodes[idx].is_dir = false;
-    nodes[idx].parent = parent;
-    nodes[idx].data_size = 0;
-    fs_copy(nodes[idx].name, K64_FS_NAME_MAX, leaf);
-    fs_init_node_metadata(&nodes[idx], false);
-    fs_mark_node_modified(&nodes[parent]);
-    return fs_writeback_image();
-}
-
-bool k64_fs_write_file(const char* path, const char* text) {
-    char leaf[K64_FS_NAME_MAX];
-    int parent = fs_resolve(path, true, leaf);
-    int idx;
-    int size = fs_len(text ? text : "");
-
-    if (parent < 0 || !fs_valid_leaf_name(leaf)) {
-        return false;
-    }
-    idx = fs_find_child(parent, leaf);
-    if (idx < 0) {
-        if (!k64_fs_touch(path)) {
-            return false;
-        }
-        idx = fs_find_child(parent, leaf);
-    }
-    if (idx < 0 || nodes[idx].is_dir) {
-        return false;
-    }
-    if (!fs_store_mutable(&nodes[idx], (const uint8_t*)(text ? text : ""), size)) {
-        return false;
-    }
-    fs_mark_node_modified(&nodes[idx]);
-    return fs_writeback_image();
-}
-
-bool k64_fs_write_file_raw(const char* path, const uint8_t* data, size_t size) {
-    char leaf[K64_FS_NAME_MAX];
-    int parent = fs_resolve(path, true, leaf);
-    int idx;
-
-    if (parent < 0 || !fs_valid_leaf_name(leaf) || size > 0x7FFFFFFF) {
-        return false;
-    }
-    idx = fs_find_child(parent, leaf);
-    if (idx < 0) {
-        if (!k64_fs_touch(path)) {
-            return false;
-        }
-        idx = fs_find_child(parent, leaf);
-    }
-    if (idx < 0 || nodes[idx].is_dir) {
-        return false;
-    }
-    if (!fs_store_mutable(&nodes[idx], data, (int)size)) {
-        return false;
-    }
-    fs_mark_node_modified(&nodes[idx]);
-    return fs_writeback_image();
-}
-
-bool k64_fs_write_file_range(const char* path, size_t offset, const uint8_t* data, size_t size) {
-    int idx = fs_resolve(path, false, NULL);
-    const uint8_t* current;
-    size_t new_size;
-    size_t old_size;
-
-    if (idx < 0 && offset == 0) {
-        return k64_fs_write_file_raw(path, data, size);
-    }
-    if (idx < 0 || nodes[idx].is_dir || (size > 0 && !data)) {
-        return false;
-    }
-    if (offset > (size_t)0x7FFFFFFF || size > (size_t)0x7FFFFFFF || offset + size < offset) {
-        return false;
-    }
-    old_size = (size_t)nodes[idx].data_size;
-    new_size = old_size > offset + size ? old_size : offset + size;
-    if (new_size > K64_FS_MUTABLE_MAX || new_size > (size_t)0x7FFFFFFF) {
-        return false;
-    }
-    current = fs_node_bytes(&nodes[idx]);
-    for (size_t i = 0; i < new_size; ++i) {
-        fs_append_buffer[i] = 0;
-    }
-    if (current) {
-        size_t copy = old_size < new_size ? old_size : new_size;
-        for (size_t i = 0; i < copy; ++i) {
-            fs_append_buffer[i] = current[i];
+        if (*p) {
+            if (pos + 1 >= sizeof(partial)) {
+                return false;
+            }
+            partial[pos++] = '/';
+            partial[pos] = '\0';
         }
     }
-    for (size_t i = 0; i < size; ++i) {
-        fs_append_buffer[offset + i] = data[i];
-    }
-    if (!fs_store_mutable(&nodes[idx], fs_append_buffer, (int)new_size)) {
-        return false;
-    }
-    fs_mark_node_modified(&nodes[idx]);
-    return fs_writeback_image();
-}
-
-bool k64_fs_append_file(const char* path, const char* text) {
-    char leaf[K64_FS_NAME_MAX];
-    int parent = fs_resolve(path, true, leaf);
-    int idx;
-    const uint8_t* current;
-    int current_size;
-    int extra_size = fs_len(text ? text : "");
-
-    if (parent < 0 || !leaf[0] || extra_size < 0) {
-        return false;
-    }
-    idx = fs_find_child(parent, leaf);
-    if (idx < 0) {
-        return k64_fs_write_file(path, text ? text : "");
-    }
-    if (nodes[idx].is_dir) {
-        return false;
-    }
-    current = fs_node_bytes(&nodes[idx]);
-    current_size = nodes[idx].data_size;
-    if (current_size < 0 || current_size + extra_size > K64_FS_MUTABLE_MAX) {
-        return false;
-    }
-    for (int i = 0; i < current_size; ++i) {
-        fs_append_buffer[i] = current ? current[i] : 0;
-    }
-    for (int i = 0; i < extra_size; ++i) {
-        fs_append_buffer[current_size + i] = (uint8_t)text[i];
-    }
-    if (!fs_store_mutable(&nodes[idx], fs_append_buffer, current_size + extra_size)) {
-        return false;
-    }
-    fs_mark_node_modified(&nodes[idx]);
-    return fs_writeback_image();
-}
-
-bool k64_fs_truncate(const char* path, size_t size) {
-    int idx = fs_resolve(path, false, NULL);
-    const uint8_t* current;
-    size_t old_size;
-
-    if (idx < 0 || nodes[idx].is_dir || size > K64_FS_MUTABLE_MAX || size > (size_t)0x7FFFFFFF) {
-        return false;
-    }
-    current = fs_node_bytes(&nodes[idx]);
-    old_size = (size_t)nodes[idx].data_size;
-    for (size_t i = 0; i < size; ++i) {
-        fs_append_buffer[i] = (current && i < old_size) ? current[i] : 0;
-    }
-    if (!fs_store_mutable(&nodes[idx], fs_append_buffer, (int)size)) {
-        return false;
-    }
-    fs_mark_node_modified(&nodes[idx]);
-    return fs_writeback_image();
-}
-
-bool k64_fs_chmod(const char* path, uint32_t mode) {
-    int idx = fs_resolve(path, false, NULL);
-    uint32_t new_mode;
-
-    if (idx < 0) {
-        return false;
-    }
-    new_mode = (nodes[idx].is_dir ? 0040000u : 0100000u) | (mode & 07777u);
-    if (nodes[idx].mode == new_mode) {
-        return true;
-    }
-    nodes[idx].mode = new_mode;
-    fs_mark_node_modified(&nodes[idx]);
-    return fs_writeback_image();
-}
-
-bool k64_fs_chown(const char* path, uint32_t uid, uint32_t gid) {
-    int idx = fs_resolve(path, false, NULL);
-
-    if (idx < 0) {
-        return false;
-    }
-    if (nodes[idx].uid == uid && nodes[idx].gid == gid) {
-        return true;
-    }
-    nodes[idx].uid = uid;
-    nodes[idx].gid = gid;
     return true;
 }
 
-bool k64_fs_remove(const char* path) {
-    int idx = fs_resolve(path, false, NULL);
-
-    if (idx <= 0 || nodes[idx].is_dir) {
+bool k64_fs_touch(const char* path) {
+    char full[256];
+    if (!fs_normalize(path, full, sizeof(full))) {
         return false;
     }
-    fs_mark_node_modified(&nodes[nodes[idx].parent]);
-    fs_remove_node(idx);
-    return fs_writeback_image();
+    if (k64_xfs_stat(&rootfs, full, &(k64_fs_stat_t){0})) {
+        return true;
+    }
+    return k64_xfs_create(&rootfs, full, 0644u, 0, 0);
+}
+
+bool k64_fs_write_file_raw(const char* path, const uint8_t* data, size_t size) {
+    char full[256];
+    return fs_normalize(path, full, sizeof(full)) &&
+           k64_xfs_write_file(&rootfs, full, data, size, 0, 0);
+}
+
+bool k64_fs_write_file(const char* path, const char* text) {
+    return k64_fs_write_file_raw(path, (const uint8_t*)(text ? text : ""), k64_strlen(text ? text : ""));
+}
+
+bool k64_fs_read_file_range(const char* path, size_t offset, uint8_t* out, size_t size, size_t* read_out) {
+    char full[256];
+    k64_fs_stat_t st;
+    size_t read = 0;
+    if (read_out) {
+        *read_out = 0;
+    }
+    if ((!out && size != 0) || !fs_normalize(path, full, sizeof(full)) ||
+        !k64_xfs_stat(&rootfs, full, &st) || st.is_dir || st.size > sizeof(fs_raw_buffer)) {
+        return false;
+    }
+    if (!k64_xfs_read_file(&rootfs, full, fs_raw_buffer, st.size, &read) || read != st.size) {
+        return false;
+    }
+    if (offset >= read) {
+        return true;
+    }
+    if (size > read - offset) {
+        size = read - offset;
+    }
+    memcpy(out, fs_raw_buffer + offset, size);
+    if (read_out) {
+        *read_out = size;
+    }
+    return true;
+}
+
+bool k64_fs_write_file_range(const char* path, size_t offset, const uint8_t* data, size_t size) {
+    char full[256];
+    k64_fs_stat_t st;
+    size_t read = 0;
+    size_t new_size;
+    if ((!data && size != 0) || !fs_normalize(path, full, sizeof(full))) {
+        return false;
+    }
+    if (!k64_xfs_stat(&rootfs, full, &st)) {
+        return offset == 0 && k64_xfs_write_file(&rootfs, full, data, size, 0, 0);
+    }
+    if (st.is_dir || st.size > sizeof(fs_range_buffer) || offset > sizeof(fs_range_buffer) ||
+        size > sizeof(fs_range_buffer) || offset + size < offset) {
+        return false;
+    }
+    new_size = st.size > offset + size ? st.size : offset + size;
+    if (new_size > sizeof(fs_range_buffer)) {
+        return false;
+    }
+    memset(fs_range_buffer, 0, new_size);
+    if (st.size && (!k64_xfs_read_file(&rootfs, full, fs_range_buffer, st.size, &read) || read != st.size)) {
+        return false;
+    }
+    if (size) {
+        memcpy(fs_range_buffer + offset, data, size);
+    }
+    return k64_xfs_write_file(&rootfs, full, fs_range_buffer, new_size, st.uid, st.gid);
+}
+
+bool k64_fs_append_file(const char* path, const char* text) {
+    k64_fs_stat_t st;
+    char full[256];
+    if (!fs_normalize(path, full, sizeof(full))) {
+        return false;
+    }
+    if (!k64_xfs_stat(&rootfs, full, &st)) {
+        return k64_fs_write_file(path, text ? text : "");
+    }
+    return k64_fs_write_file_range(full, st.size, (const uint8_t*)(text ? text : ""), k64_strlen(text ? text : ""));
+}
+
+bool k64_fs_truncate(const char* path, size_t size) {
+    char full[256];
+    k64_fs_stat_t st;
+    size_t read = 0;
+    if (!fs_normalize(path, full, sizeof(full)) || !k64_xfs_stat(&rootfs, full, &st) ||
+        st.is_dir || size > sizeof(fs_range_buffer) || st.size > sizeof(fs_range_buffer)) {
+        return false;
+    }
+    memset(fs_range_buffer, 0, size);
+    if (st.size && (!k64_xfs_read_file(&rootfs, full, fs_range_buffer, st.size < size ? st.size : size, &read))) {
+        return false;
+    }
+    return k64_xfs_write_file(&rootfs, full, fs_range_buffer, size, st.uid, st.gid);
+}
+
+bool k64_fs_chmod(const char* path, uint32_t mode) {
+    char full[256];
+    return fs_normalize(path, full, sizeof(full)) && k64_xfs_chmod(&rootfs, full, mode);
+}
+
+bool k64_fs_chown(const char* path, uint32_t uid, uint32_t gid) {
+    char full[256];
+    return fs_normalize(path, full, sizeof(full)) && k64_xfs_chown(&rootfs, full, uid, gid);
+}
+
+bool k64_fs_remove(const char* path) {
+    char full[256];
+    return fs_normalize(path, full, sizeof(full)) && k64_xfs_remove(&rootfs, full);
 }
 
 bool k64_fs_rmdir(const char* path) {
-    int idx = fs_resolve(path, false, NULL);
-
-    if (idx <= 0 || !nodes[idx].is_dir || !fs_dir_empty(idx)) {
-        return false;
-    }
-    if (cwd_index == idx) {
-        cwd_index = nodes[idx].parent;
-    }
-    fs_mark_node_modified(&nodes[nodes[idx].parent]);
-    fs_remove_node(idx);
-    return fs_writeback_image();
+    char full[256];
+    return fs_normalize(path, full, sizeof(full)) && k64_xfs_rmdir(&rootfs, full);
 }
 
 bool k64_fs_move(const char* src_path, const char* dst_path) {
-    char leaf[K64_FS_NAME_MAX];
-    int src_idx = fs_resolve(src_path, false, NULL);
-    int dst_parent;
-    int existing;
-
-    if (src_idx <= 0 || !dst_path || !dst_path[0]) {
-        return false;
-    }
-    dst_parent = fs_resolve(dst_path, true, leaf);
-    if (dst_parent < 0 || !fs_valid_leaf_name(leaf)) {
-        return false;
-    }
-    if (nodes[src_idx].is_dir && (dst_parent == src_idx || fs_is_descendant(src_idx, dst_parent))) {
-        return false;
-    }
-    existing = fs_find_child(dst_parent, leaf);
-    if (existing >= 0 && existing != src_idx) {
-        return false;
-    }
-    fs_mark_node_modified(&nodes[nodes[src_idx].parent]);
-    nodes[src_idx].parent = dst_parent;
-    fs_copy(nodes[src_idx].name, K64_FS_NAME_MAX, leaf);
-    fs_mark_node_modified(&nodes[src_idx]);
-    fs_mark_node_modified(&nodes[dst_parent]);
-    return fs_writeback_image();
+    char src[256];
+    char dst[256];
+    return fs_normalize(src_path, src, sizeof(src)) &&
+           fs_normalize(dst_path, dst, sizeof(dst)) &&
+           k64_xfs_rename(&rootfs, src, dst);
 }
 
 bool k64_fs_copy(const char* src_path, const char* dst_path) {
-    int src_idx = fs_resolve(src_path, false, NULL);
-    char leaf[K64_FS_NAME_MAX];
-    int dst_parent;
-    int dst_idx;
-    const uint8_t* bytes;
-
-    if (src_idx <= 0 || nodes[src_idx].is_dir) {
+    k64_fs_stat_t st;
+    char src[256];
+    char dst[256];
+    size_t read = 0;
+    if (!fs_normalize(src_path, src, sizeof(src)) || !fs_normalize(dst_path, dst, sizeof(dst)) ||
+        !k64_xfs_stat(&rootfs, src, &st) || st.is_dir || st.size > sizeof(fs_raw_buffer) ||
+        !k64_xfs_read_file(&rootfs, src, fs_raw_buffer, st.size, &read) || read != st.size) {
         return false;
     }
-    dst_parent = fs_resolve(dst_path, true, leaf);
-    if (dst_parent < 0 || !fs_valid_leaf_name(leaf)) {
-        return false;
-    }
-    dst_idx = fs_find_child(dst_parent, leaf);
-    if (dst_idx < 0 && !k64_fs_touch(dst_path)) {
-        return false;
-    }
-    src_idx = fs_resolve(src_path, false, NULL);
-    if (src_idx <= 0 || nodes[src_idx].is_dir) {
-        return false;
-    }
-    bytes = fs_node_bytes(&nodes[src_idx]);
-    return k64_fs_write_file_raw(dst_path, bytes, (size_t)nodes[src_idx].data_size);
+    return k64_xfs_write_file(&rootfs, dst, fs_raw_buffer, st.size, st.uid, st.gid);
 }
 
 bool k64_fs_cat(const char* path, char* out, int out_size) {
-    int idx = fs_resolve(path, false, NULL);
-    const uint8_t* data;
-    int size;
-
-    if (!out || out_size <= 0 || idx < 0 || nodes[idx].is_dir) {
+    size_t read = 0;
+    if (!out || out_size <= 0) {
         return false;
     }
-
-    data = fs_node_bytes(&nodes[idx]);
-    size = nodes[idx].data_size;
-    if (!data || size <= 0) {
-        out[0] = '\0';
-        return true;
+    if (!k64_fs_read_file_range(path, 0, (uint8_t*)out, (size_t)out_size - 1u, &read)) {
+        return false;
     }
-
-    for (int i = 0; i + 1 < out_size && i < size; ++i) {
-        out[i] = (char)data[i];
-        out[i + 1] = '\0';
-    }
+    out[read] = '\0';
     return true;
 }
 
 bool k64_fs_read_file_raw(const char* path, const uint8_t** data, size_t* size) {
-    int idx = fs_resolve(path, false, NULL);
-    const uint8_t* bytes;
-
-    if (!data || !size || idx < 0 || nodes[idx].is_dir) {
+    char full[256];
+    k64_fs_stat_t st;
+    size_t read = 0;
+    if (!data || !size || !fs_normalize(path, full, sizeof(full)) ||
+        !k64_xfs_stat(&rootfs, full, &st) || st.is_dir || st.size > sizeof(fs_raw_buffer) ||
+        !k64_xfs_read_file(&rootfs, full, fs_raw_buffer, st.size, &read) || read != st.size) {
         return false;
     }
-
-    bytes = fs_node_bytes(&nodes[idx]);
-    if (!bytes && nodes[idx].data_size != 0) {
-        return false;
-    }
-
-    *data = bytes;
-    *size = (size_t)nodes[idx].data_size;
-    return true;
-}
-
-bool k64_fs_read_file_range(const char* path, size_t offset, uint8_t* out, size_t size, size_t* read_out) {
-    int idx = fs_resolve(path, false, NULL);
-    const uint8_t* bytes;
-    size_t available;
-    size_t count;
-
-    if (read_out) {
-        *read_out = 0;
-    }
-    if (!out && size != 0) {
-        return false;
-    }
-    if (idx < 0 || nodes[idx].is_dir) {
-        return false;
-    }
-    bytes = fs_node_bytes(&nodes[idx]);
-    if (!bytes && nodes[idx].data_size != 0) {
-        return false;
-    }
-    available = (size_t)nodes[idx].data_size;
-    if (offset >= available) {
-        return true;
-    }
-    count = size < available - offset ? size : available - offset;
-    for (size_t i = 0; i < count; ++i) {
-        out[i] = bytes[offset + i];
-    }
-    if (read_out) {
-        *read_out = count;
-    }
+    *data = fs_raw_buffer;
+    *size = read;
     return true;
 }
 
 bool k64_fs_stat(const char* path, k64_fs_stat_t* out) {
-    int idx;
-
-    if (!out) {
+    char full[256];
+    if (!out || !fs_normalize(path && path[0] ? path : ".", full, sizeof(full))) {
         return false;
     }
-    out->exists = false;
-    out->is_dir = false;
-    out->size = 0;
-    out->mode = 0;
-    out->uid = 0;
-    out->gid = 0;
-    out->created_tick = 0;
-    out->modified_tick = 0;
-    out->generation = 0;
-    out->path[0] = '\0';
-
-    idx = fs_resolve(path && path[0] ? path : ".", false, NULL);
-    if (idx < 0) {
-        return false;
-    }
-
-    out->exists = true;
-    out->is_dir = nodes[idx].is_dir;
-    out->size = nodes[idx].is_dir ? 0u : (size_t)nodes[idx].data_size;
-    out->mode = nodes[idx].mode;
-    out->uid = nodes[idx].uid;
-    out->gid = nodes[idx].gid;
-    out->created_tick = nodes[idx].created_tick;
-    out->modified_tick = nodes[idx].modified_tick;
-    out->generation = nodes[idx].generation;
-    (void)fs_build_path(idx, out->path, (int)sizeof(out->path));
-    return true;
+    return k64_xfs_stat(&rootfs, full, out);
 }
 
 bool k64_fs_find_boot_kernel(char* out, int out_size) {
-    int boot_idx;
-
-    if (!out || out_size <= 0) {
+    char listing[4096];
+    char* p = listing;
+    if (!out || out_size <= 0 || !k64_xfs_list_dir(&rootfs, "/boot", listing, sizeof(listing))) {
         return false;
     }
-
-    boot_idx = fs_resolve("/boot", false, NULL);
-    if (boot_idx < 0 || !nodes[boot_idx].is_dir) {
-        return false;
-    }
-
-    for (int i = 1; i < K64_FS_MAX_NODES; ++i) {
-        if (!nodes[i].used || nodes[i].parent != boot_idx || nodes[i].is_dir) {
-            continue;
+    while (*p) {
+        char name[128];
+        size_t n = 0;
+        while (*p && *p != '\n') {
+            if (n + 1 < sizeof(name)) {
+                name[n++] = *p;
+            }
+            p++;
         }
-        if (fs_name_has_prefix(nodes[i].name, "k64-kernel-v") && fs_path_has_suffix(nodes[i].name, ".elf")) {
-            fs_copy(out, out_size, nodes[i].name);
+        if (*p == '\n') {
+            p++;
+        }
+        name[n] = '\0';
+        if (fs_name_has_prefix(name, "k64-kernel-v") && fs_path_has_suffix(name, ".elf")) {
+            fs_copy(out, (size_t)out_size, name);
             return true;
         }
     }
-
     return false;
 }
 
-static bool fs_flush_block_device(void) {
-    uint32_t sectors;
-    size_t bytes;
-
-    if (!fs_persistent || !fs_block_device || !fs_dirty) {
-        return true;
-    }
-    bytes = (fs_image_size + K64_FS_BLOCK_SIZE - 1u) / K64_FS_BLOCK_SIZE * K64_FS_BLOCK_SIZE;
-    sectors = (uint32_t)(bytes / K64_FS_BLOCK_SIZE);
-    if (fs_block_lba >= fs_block_device->block_count ||
-        (uint64_t)sectors > fs_block_device->block_count - fs_block_lba ||
-        bytes > K64_FS_IMAGE_MAX) {
-        return false;
-    }
-    if (bytes > fs_image_size) {
-        for (size_t i = fs_image_size; i < bytes; ++i) {
-            fs_image[i] = 0;
-        }
-    }
-    if (!k64_block_write(fs_block_device, fs_block_lba, sectors, fs_image)) {
-        K64_LOG_WARN("K64FS: writeback to block device failed.");
-        return false;
-    }
-    fs_dirty = false;
-    return true;
-}
-
 bool k64_fs_sync(void) {
-    return fs_flush_block_device();
+    return !rootfs.mounted || k64_xfs_sync(&rootfs);
 }
 
 bool k64_fs_is_persistent(void) {
@@ -1528,87 +592,75 @@ bool k64_fs_mount_source(char* out, int out_size) {
     if (!out || out_size <= 0) {
         return false;
     }
-    fs_copy(out, out_size, fs_mount_name[0] ? fs_mount_name : "unknown");
+    fs_copy(out, (size_t)out_size, fs_mount_name[0] ? fs_mount_name : "unknown");
     return true;
 }
 
 bool k64_fs_install_to_block_device(const char* device_name) {
     k64_block_device_t* dev;
+    k64_block_device_t part;
     const uint8_t* boot_area;
     size_t boot_area_size;
-    uint32_t sectors;
 
     if (!device_name || !device_name[0]) {
         return false;
     }
     dev = k64_block_find_device_by_name(device_name);
-    if (!dev || dev->is_partition || !dev->online || !dev->writable || dev->block_size != K64_FS_BLOCK_SIZE) {
-        return false;
-    }
-    if (dev->block_count <= K64_FS_PARTITION_LBA) {
+    if (!dev || dev->is_partition || !dev->online || !dev->writable ||
+        dev->block_size != K64_ROOTFS_BLOCK_SIZE || dev->block_count <= K64_ROOTFS_PARTITION_LBA) {
         return false;
     }
     if (!k64_fs_read_file_raw("/boot/grub/k64-boot-area.bin", &boot_area, &boot_area_size) ||
-        boot_area_size != (size_t)K64_FS_BOOT_AREA_SECTORS * K64_FS_BLOCK_SIZE ||
-        boot_area[510] != 0x55 || boot_area[511] != 0xAA) {
+        boot_area_size != sizeof(fs_boot_area) || boot_area[510] != 0x55 || boot_area[511] != 0xAA) {
         return false;
     }
-    if (!fs_writeback_image()) {
-        return false;
-    }
-    sectors = (uint32_t)((fs_image_size + K64_FS_BLOCK_SIZE - 1u) / K64_FS_BLOCK_SIZE);
-    if (sectors == 0 ||
-        (uint64_t)sectors > dev->block_count - K64_FS_PARTITION_LBA ||
-        (size_t)sectors * K64_FS_BLOCK_SIZE > K64_FS_IMAGE_MAX) {
-        return false;
-    }
-    for (size_t i = 0; i < boot_area_size; ++i) {
-        fs_block_buffer[i] = boot_area[i];
-    }
+    memcpy(fs_boot_area, boot_area, sizeof(fs_boot_area));
     {
-        uint32_t part_sectors = (uint32_t)(dev->block_count - K64_FS_PARTITION_LBA);
-        fs_block_buffer[446] = 0x80;
-        fs_block_buffer[450] = 0x83;
-        fs_block_buffer[454] = (uint8_t)(K64_FS_PARTITION_LBA & 0xFFu);
-        fs_block_buffer[455] = (uint8_t)((K64_FS_PARTITION_LBA >> 8) & 0xFFu);
-        fs_block_buffer[456] = (uint8_t)((K64_FS_PARTITION_LBA >> 16) & 0xFFu);
-        fs_block_buffer[457] = (uint8_t)((K64_FS_PARTITION_LBA >> 24) & 0xFFu);
-        fs_block_buffer[458] = (uint8_t)(part_sectors & 0xFFu);
-        fs_block_buffer[459] = (uint8_t)((part_sectors >> 8) & 0xFFu);
-        fs_block_buffer[460] = (uint8_t)((part_sectors >> 16) & 0xFFu);
-        fs_block_buffer[461] = (uint8_t)((part_sectors >> 24) & 0xFFu);
+        uint32_t part_sectors = (uint32_t)(dev->block_count - K64_ROOTFS_PARTITION_LBA);
+        memset(fs_boot_area + 446, 0, 64);
+        fs_boot_area[446] = 0x80;
+        fs_boot_area[450] = 0x83;
+        fs_boot_area[454] = (uint8_t)(K64_ROOTFS_PARTITION_LBA & 0xFFu);
+        fs_boot_area[455] = (uint8_t)((K64_ROOTFS_PARTITION_LBA >> 8) & 0xFFu);
+        fs_boot_area[456] = (uint8_t)((K64_ROOTFS_PARTITION_LBA >> 16) & 0xFFu);
+        fs_boot_area[457] = (uint8_t)((K64_ROOTFS_PARTITION_LBA >> 24) & 0xFFu);
+        fs_boot_area[458] = (uint8_t)(part_sectors & 0xFFu);
+        fs_boot_area[459] = (uint8_t)((part_sectors >> 8) & 0xFFu);
+        fs_boot_area[460] = (uint8_t)((part_sectors >> 16) & 0xFFu);
+        fs_boot_area[461] = (uint8_t)((part_sectors >> 24) & 0xFFu);
     }
-    if (!k64_block_write(dev, 0, K64_FS_BOOT_AREA_SECTORS, fs_block_buffer)) {
+    if (!k64_block_write(dev, 0, K64_ROOTFS_BOOT_AREA_SECTORS, fs_boot_area)) {
         return false;
     }
-    for (size_t i = 0; i < (size_t)sectors * K64_FS_BLOCK_SIZE; ++i) {
-        fs_image[i] = i < fs_image_size ? fs_image[i] : 0;
+    if (rootfs.mounted && rootfs.dev && rootfs.dev->context == dev->context &&
+        rootfs.dev->start_lba == K64_ROOTFS_PARTITION_LBA) {
+        return k64_xfs_sync(&rootfs);
     }
-    return k64_block_write(dev, K64_FS_PARTITION_LBA, sectors, fs_image);
+    part = *dev;
+    part.start_lba = K64_ROOTFS_PARTITION_LBA;
+    part.block_count = dev->block_count - K64_ROOTFS_PARTITION_LBA;
+    part.is_partition = true;
+    return k64_xfs_format(&part, "K64ROOT");
 }
 
 bool k64_fs_grow_root(void) {
-    uint64_t bytes;
-
-    if (!fs_persistent || !fs_block_device || fs_block_device->block_size == 0) {
-        return false;
-    }
-    bytes = fs_block_device->block_count * (uint64_t)fs_block_device->block_size;
-    {
-        size_t usable = bytes > (uint64_t)((size_t)-1) ? (size_t)-1 : (size_t)bytes;
-        fs_volume_capacity = usable < K64_FS_IMAGE_MAX ? usable : K64_FS_IMAGE_MAX;
-    }
-    return true;
+    return rootfs.mounted && fs_persistent;
 }
 
 size_t k64_fs_used_bytes(void) {
-    return fs_image_size;
+    if (!rootfs.mounted) {
+        return 0;
+    }
+    return (size_t)((rootfs.super.total_blocks - rootfs.super.free_blocks) * K64_XFS_BLOCK_SIZE);
 }
 
 size_t k64_fs_capacity_bytes(void) {
-    return fs_volume_capacity;
+    if (!rootfs.mounted) {
+        return 0;
+    }
+    return (size_t)(rootfs.super.total_blocks * K64_XFS_BLOCK_SIZE);
 }
 
 size_t k64_fs_image_limit_bytes(void) {
-    return K64_FS_IMAGE_MAX;
+    return K64_ROOTFS_RAW_MAX;
 }

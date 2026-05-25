@@ -88,7 +88,7 @@ int main(void) {
     expect_true("mkdir -p nested", k64_fs_mkdir_p("/tmp/a/b/c"));
     expect_true("stat mkdir-p", k64_fs_stat("/tmp/a/b/c", &st));
     expect_true("stat mkdir-p dir", st.exists && st.is_dir);
-    expect_true("reject long name", !k64_fs_touch("/tmp/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"));
+    expect_true("reject long name", !k64_fs_touch("/tmp/abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"));
 
     expect_true("mkdir boot", k64_fs_mkdir("/boot"));
     expect_true("touch kernel elf", k64_fs_touch("/boot/k64-kernel-v9.9.9.elf"));

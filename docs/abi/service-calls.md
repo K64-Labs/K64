@@ -57,4 +57,4 @@ Service handlers receive a caller UID and caller flags. For user callers, K64 de
 - primary and supplemental groups receive runtime GIDs starting at `1000`, with root group `0`
 - `sudo`, `sudo on`, and password-checked `sudo <password>` switch the effective UID to root until `sudo off` or command-scope cleanup
 
-The current filesystem checks are POSIX-like but not fully POSIX. They cover service-backed `fs.*`, `io.open`, `proc.spawn`, ELF execution, and the `fsctl` command surface. K64FS persists mode bits today; UID/GID ownership is runtime metadata and is rebuilt at boot for user homes and account files.
+The current filesystem checks are POSIX-like but not fully POSIX. They cover service-backed `fs.*`, `io.open`, `proc.spawn`, ELF execution, and the `fsctl` command surface. K64XFS persists mode bits today; UID/GID ownership is runtime metadata and is rebuilt at boot for user homes and account files.

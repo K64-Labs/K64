@@ -1,6 +1,6 @@
 # K64XFS
 
-K64XFS is the new block-backed filesystem core introduced in K64 v0.3.23. It is separate from the original image-backed K64FS. K64FS remains the boot/root compatibility filesystem, while K64XFS is the experimental modern filesystem foundation intended to grow into the future K64 root filesystem.
+K64XFS is the block-backed filesystem core introduced in K64 v0.3.23 and promoted to the only standard boot/root filesystem in v0.3.24. The old image-backed filesystem is no longer used by the normal build, boot path, release artifacts, or runtime root driver.
 
 ## Goals
 
@@ -92,7 +92,7 @@ K64XFS persists UID, GID, and mode in inodes. The low-level `k64_xfs_*` API is a
 ## Current Limits
 
 - K64XFS is not the default root filesystem.
-- `/` still boots from K64FS LegacyFS/BootFS.
+- `/` still boots from K64XFS LegacyFS/BootFS.
 - Only direct extents are implemented, capped at eight extents per file.
 - Directories are linear.
 - The checker is read-only and does not repair.

@@ -1,2 +1,2 @@
 K64 root filesystem
-This tree is packed into root.k64fs and mounted by fs.k64m at boot.
+This tree is packed into root.xfs and mounted by fs.k64m as K64XFS at boot.
