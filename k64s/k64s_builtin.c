@@ -18,6 +18,7 @@
 #include "k64_terminal.h"
 #include "k64_user.h"
 #include "k64_version.h"
+#include "k64_xfs.h"
 #include "k64_autoversion.h"
 
 static void svc_print_line(const char* text) {
@@ -1798,6 +1799,350 @@ static void fsctl_stop(k64_service_t* service) {
     (void)service;
 }
 
+static k64_xfs_mount_t xfsctl_mount;
+static bool xfsctl_mounted = false;
+
+static const char* xfsctl_path(const char* path) {
+    if (!path || !path[0]) {
+        return "/";
+    }
+    if (k64_strncmp(path, "/x/", 3) == 0) {
+        return path + 2;
+    }
+    if (k64_streq(path, "/x")) {
+        return "/";
+    }
+    return path;
+}
+
+static bool xfsctl_require_mount(void) {
+    if (xfsctl_mounted && xfsctl_mount.mounted) {
+        return true;
+    }
+    svc_print_line("xfsctl: not mounted");
+    return false;
+}
+
+static bool xfsctl_can_access(const char* path, uint32_t mask) {
+    k64_fs_stat_t st;
+
+    if (!xfsctl_mounted || !k64_xfs_stat(&xfsctl_mount, xfsctl_path(path), &st)) {
+        return false;
+    }
+    return k64_user_can_access(st.uid, st.gid, st.mode, mask);
+}
+
+static bool xfsctl_require_access(const char* path, uint32_t mask) {
+    if (xfsctl_can_access(path, mask)) {
+        return true;
+    }
+    svc_print_line("permission denied");
+    return false;
+}
+
+static bool xfsctl_parent_path(const char* path, char* parent, int parent_size) {
+    int len;
+
+    if (!path || !path[0] || !parent || parent_size <= 0) {
+        return false;
+    }
+    svc_copy(parent, parent_size, path);
+    len = (int)k64_strlen(parent);
+    while (len > 1 && parent[len - 1] == '/') {
+        parent[--len] = '\0';
+    }
+    while (len > 0 && parent[len - 1] != '/') {
+        parent[--len] = '\0';
+    }
+    if (len == 0) {
+        svc_copy(parent, parent_size, "/");
+    } else if (len == 1) {
+        parent[1] = '\0';
+    } else {
+        parent[len - 1] = '\0';
+    }
+    return true;
+}
+
+static bool xfsctl_require_create(const char* path) {
+    char parent[128];
+
+    if (!xfsctl_parent_path(xfsctl_path(path), parent, sizeof(parent))) {
+        svc_print_line("permission denied");
+        return false;
+    }
+    return xfsctl_require_access(parent, K64_ACCESS_WRITE | K64_ACCESS_EXEC);
+}
+
+static void xfsctl_usage(void) {
+    svc_print_line("usage: xfsctl <devices|format|mount|unmount|info|ls|stat|mkdir|write|cat|rm|rmdir|chmod|chown|sync|check>");
+}
+
+static bool xfsctl_command(const char* command, const char* args) {
+    char sub[32];
+    char a[128];
+    (void)command;
+
+    args = svc_next_token(args, sub, sizeof(sub));
+    if (!sub[0] || k64_streq(sub, "help")) {
+        xfsctl_usage();
+        return true;
+    }
+    if (k64_streq(sub, "devices")) {
+        for (size_t i = 0; i < k64_block_device_count(); ++i) {
+            k64_block_device_t* dev = k64_block_device_at(i);
+            if (!dev || !dev->online) {
+                continue;
+            }
+            k64_term_write(dev->name);
+            k64_term_write(" size=");
+            k64_term_write_dec(dev->block_count * (uint64_t)dev->block_size);
+            k64_term_write(dev->writable ? " writable" : " readonly");
+            k64_term_putc('\n');
+        }
+        return true;
+    }
+    if (k64_streq(sub, "format")) {
+        char label[32];
+        char yes[8];
+        k64_block_device_t* dev;
+
+        if (!k64_user_is_root()) {
+            svc_print_line("permission denied");
+            return true;
+        }
+        args = svc_next_token(args, a, sizeof(a));
+        args = svc_next_token(args, label, sizeof(label));
+        args = svc_next_token(args, yes, sizeof(yes));
+        dev = k64_block_find_device_by_name(a);
+        if (!dev || !k64_streq(yes, "yes") || !k64_xfs_format(dev, label)) {
+            svc_print_line("xfsctl: format failed");
+            return true;
+        }
+        svc_print_line("K64XFS format: OK");
+        return true;
+    }
+    if (k64_streq(sub, "mount")) {
+        k64_block_device_t* dev;
+        char mountpoint[16];
+
+        args = svc_next_token(args, a, sizeof(a));
+        args = svc_next_token(args, mountpoint, sizeof(mountpoint));
+        dev = k64_block_find_device_by_name(a);
+        if (!dev || !k64_streq(mountpoint, "/x") || !k64_xfs_mount(dev, &xfsctl_mount)) {
+            svc_print_line("xfsctl: mount failed");
+            return true;
+        }
+        xfsctl_mounted = true;
+        svc_print_line("K64XFS mounted at /x");
+        return true;
+    }
+    if (k64_streq(sub, "unmount")) {
+        if (!xfsctl_require_mount() || !k64_xfs_unmount(&xfsctl_mount)) {
+            svc_print_line("xfsctl: unmount failed");
+            return true;
+        }
+        xfsctl_mounted = false;
+        svc_print_line("K64XFS unmounted");
+        return true;
+    }
+    if (k64_streq(sub, "info")) {
+        if (!xfsctl_require_mount()) {
+            return true;
+        }
+        k64_term_write("K64XFS label=");
+        k64_term_write(xfsctl_mount.super.label);
+        k64_term_write(" blocks=");
+        k64_term_write_dec(xfsctl_mount.super.total_blocks);
+        k64_term_write(" free=");
+        k64_term_write_dec(xfsctl_mount.super.free_blocks);
+        k64_term_putc('\n');
+        return true;
+    }
+    if (k64_streq(sub, "ls")) {
+        char out[512];
+        args = svc_next_token(args, a, sizeof(a));
+        if (!xfsctl_require_mount() ||
+            !xfsctl_require_access(a[0] ? a : "/x", K64_ACCESS_READ | K64_ACCESS_EXEC) ||
+            !k64_xfs_list_dir(&xfsctl_mount, xfsctl_path(a[0] ? a : "/x"), out, sizeof(out))) {
+            svc_print_line("xfsctl: ls failed");
+            return true;
+        }
+        k64_term_write(out);
+        return true;
+    }
+    if (k64_streq(sub, "stat")) {
+        k64_fs_stat_t st;
+        args = svc_next_token(args, a, sizeof(a));
+        if (!xfsctl_require_mount() || !k64_xfs_stat(&xfsctl_mount, xfsctl_path(a), &st)) {
+            svc_print_line("xfsctl: stat failed");
+            return true;
+        }
+        k64_term_write(st.is_dir ? "dir  " : "file ");
+        k64_term_write(a);
+        k64_term_write(" size=");
+        k64_term_write_dec(st.size);
+        k64_term_write(" mode=");
+        k64_term_write_hex(st.mode);
+        k64_term_write(" uid=");
+        k64_term_write_dec(st.uid);
+        k64_term_write(" gid=");
+        k64_term_write_dec(st.gid);
+        k64_term_putc('\n');
+        return true;
+    }
+    if (k64_streq(sub, "mkdir")) {
+        args = svc_next_token(args, a, sizeof(a));
+        if (!xfsctl_require_mount() || !xfsctl_require_create(a) ||
+            !k64_xfs_mkdir(&xfsctl_mount, xfsctl_path(a), 0755u, k64_user_effective_uid(), k64_user_effective_gid())) {
+            svc_print_line("xfsctl: mkdir failed");
+            return true;
+        }
+        return true;
+    }
+    if (k64_streq(sub, "write") || k64_streq(sub, "append")) {
+        char path[128];
+        const char* text;
+        uint8_t combined[512];
+        size_t old_len = 0;
+        size_t text_len;
+
+        args = svc_next_token(args, path, sizeof(path));
+        text = args ? args : "";
+        text_len = k64_strlen(text);
+        if (!xfsctl_require_mount() ||
+            (k64_xfs_stat(&xfsctl_mount, xfsctl_path(path), &(k64_fs_stat_t){0}) &&
+             !xfsctl_require_access(path, K64_ACCESS_WRITE)) ||
+            (!k64_xfs_stat(&xfsctl_mount, xfsctl_path(path), &(k64_fs_stat_t){0}) &&
+             !xfsctl_require_create(path))) {
+            svc_print_line("xfsctl: write failed");
+            return true;
+        }
+        if (k64_streq(sub, "append")) {
+            (void)k64_xfs_read_file(&xfsctl_mount, xfsctl_path(path), combined, sizeof(combined), &old_len);
+        }
+        if (old_len + text_len > sizeof(combined)) {
+            svc_print_line("xfsctl: write failed");
+            return true;
+        }
+        memcpy(combined + old_len, text, text_len);
+        if (!k64_xfs_write_file(&xfsctl_mount,
+                                xfsctl_path(path),
+                                combined,
+                                old_len + text_len,
+                                k64_user_effective_uid(),
+                                k64_user_effective_gid())) {
+            svc_print_line("xfsctl: write failed");
+        }
+        return true;
+    }
+    if (k64_streq(sub, "cat")) {
+        uint8_t out[512];
+        size_t read = 0;
+        args = svc_next_token(args, a, sizeof(a));
+        if (!xfsctl_require_mount() || !xfsctl_require_access(a, K64_ACCESS_READ) ||
+            !k64_xfs_read_file(&xfsctl_mount, xfsctl_path(a), out, sizeof(out) - 1u, &read)) {
+            svc_print_line("xfsctl: cat failed");
+            return true;
+        }
+        out[read] = 0;
+        svc_print_line((const char*)out);
+        return true;
+    }
+    if (k64_streq(sub, "rm")) {
+        args = svc_next_token(args, a, sizeof(a));
+        if (!xfsctl_require_mount() || !xfsctl_require_access(a, K64_ACCESS_WRITE) ||
+            !k64_xfs_remove(&xfsctl_mount, xfsctl_path(a))) {
+            svc_print_line("xfsctl: rm failed");
+        }
+        return true;
+    }
+    if (k64_streq(sub, "rmdir")) {
+        args = svc_next_token(args, a, sizeof(a));
+        if (!xfsctl_require_mount() || !xfsctl_require_access(a, K64_ACCESS_WRITE) ||
+            !k64_xfs_rmdir(&xfsctl_mount, xfsctl_path(a))) {
+            svc_print_line("xfsctl: rmdir failed");
+        }
+        return true;
+    }
+    if (k64_streq(sub, "chmod")) {
+        char mode_text[16];
+        uint32_t mode;
+        if (!k64_user_is_root()) {
+            svc_print_line("permission denied");
+            return true;
+        }
+        args = svc_next_token(args, mode_text, sizeof(mode_text));
+        args = svc_next_token(args, a, sizeof(a));
+        if (!xfsctl_require_mount() || !svc_parse_octal_mode(mode_text, &mode) ||
+            !k64_xfs_chmod(&xfsctl_mount, xfsctl_path(a), mode)) {
+            svc_print_line("xfsctl: chmod failed");
+        }
+        return true;
+    }
+    if (k64_streq(sub, "chown")) {
+        char owner[32];
+        char user[16];
+        char group[16];
+        int split = -1;
+        uint32_t uid;
+        uint32_t gid;
+        if (!k64_user_is_root()) {
+            svc_print_line("permission denied");
+            return true;
+        }
+        args = svc_next_token(args, owner, sizeof(owner));
+        args = svc_next_token(args, a, sizeof(a));
+        for (int i = 0; owner[i]; ++i) {
+            if (owner[i] == ':') {
+                split = i;
+                break;
+            }
+        }
+        if (split < 0) {
+            svc_print_line("xfsctl: chown failed");
+            return true;
+        }
+        owner[split] = '\0';
+        svc_copy(user, sizeof(user), owner);
+        svc_copy(group, sizeof(group), owner + split + 1);
+        if (!xfsctl_require_mount() || !k64_user_name_to_uid(user, &uid) ||
+            !k64_user_group_to_gid(group, &gid) ||
+            !k64_xfs_chown(&xfsctl_mount, xfsctl_path(a), uid, gid)) {
+            svc_print_line("xfsctl: chown failed");
+        }
+        return true;
+    }
+    if (k64_streq(sub, "sync")) {
+        if (!xfsctl_require_mount() || !k64_xfs_sync(&xfsctl_mount)) {
+            svc_print_line("xfsctl: sync failed");
+            return true;
+        }
+        svc_print_line("K64XFS sync: OK");
+        return true;
+    }
+    if (k64_streq(sub, "check")) {
+        k64_xfs_check_report_t report;
+        if (!xfsctl_require_mount() || !k64_xfs_check(&xfsctl_mount, &report)) {
+            svc_print_line("xfsctl: check failed");
+            return true;
+        }
+        svc_print_line(report.message);
+        return true;
+    }
+    xfsctl_usage();
+    return true;
+}
+
+static bool xfsctl_start(k64_service_t* service) {
+    (void)k64_system_register_command(service->name, "xfsctl", xfsctl_command);
+    return true;
+}
+
+static void xfsctl_stop(k64_service_t* service) {
+    (void)service;
+}
+
 static bool init_start(k64_service_t* service) {
     k64_service_result_t result;
 
@@ -1839,6 +2184,13 @@ static bool init_start(k64_service_t* service) {
     result = k64_system_start_service_by_name("fsctl");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
         k64_term_write("init: failed to start fsctl: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
+    result = k64_system_start_service_by_name("xfsctl");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("init: failed to start xfsctl: ");
         k64_term_write(k64_system_result_string(result));
         k64_term_putc('\n');
     }
@@ -2047,6 +2399,18 @@ void k64s_register_builtin_services(void) {
                                 true,
                                 fsctl_start,
                                 fsctl_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("xfsctl",
+                                "k64s/xfsctl.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                xfsctl_start,
+                                xfsctl_stop,
                                 NULL,
                                 NULL);
 

@@ -102,6 +102,10 @@ K64_SRCS = \
   k64_string.c \
   k64_config.c \
   k64_fs.c \
+  k64_xfs_format.c \
+  k64_xfs_cache.c \
+  k64_xfs_journal.c \
+  k64_xfs.c \
   k64_kpm.c \
   k64_power.c \
   k64_reload.c \
@@ -319,7 +323,7 @@ test: k64.iso
 	$(PYTHON) tests/persistence_smoke.py
 
 clean:
-	rm -rf *.o k64_kernel.elf k64-kernel-v*.elf iso build k64.iso .k64_boot.log tests/.shell_cmd_test tests/.string_test tests/.fs_unit_test
+	rm -rf *.o k64_kernel.elf k64-kernel-v*.elf iso build k64.iso .k64_boot.log tests/.shell_cmd_test tests/.string_test tests/.fs_unit_test tests/.xfs_unit_test
 
 .PHONY: all iso run run-headless test clean FORCE
 .NOTPARALLEL: k64.iso $(K64FS_STAGE_STAMP)

@@ -11,8 +11,9 @@ K64 is currently best understood as:
 - a BIOS/GRUB-booted x86_64 kernel
 - a legacy-hardware-oriented runtime using VGA text mode, PIC, PIT, and PS/2 keyboard input
 - a registry-based service/driver environment
-- a boot image that includes a custom root filesystem format, `K64FS`
-- a writable ATA-backed root path in the default QEMU flow
+- a boot image that includes the legacy custom root filesystem format, `K64FS`
+- a writable ATA-backed K64FS LegacyFS/BootFS root path in the default QEMU flow
+- an experimental K64XFS modern block-backed filesystem core with `xfsctl` tooling
 - a first RTL8139/e1000-backed Ethernet path for QEMU and VMware-style VM networking
 - a system where user-facing commands are mostly exposed by services rather than hard-coded into the kernel core
 
@@ -300,6 +301,8 @@ The file descriptor model is early but real. Each active user process has a smal
 v0.3.21 makes the service-call ABI the userland ABI beside the existing service command registry. Services can register named methods such as `kernel.version`, `kernel.uptime`, `fs.stat`, `fs.list_dir`, `fs.write_file`, `fs.move`, `io.open`, `io.read`, `io.write`, `io.pipe`, `proc.getpid`, `proc.info`, `proc.spawn`, `proc.wait`, `proc.exit`, `sched.yield`, `sched.sleep`, and terminal methods. The `service_call` syscall is a thin checked gate: it copies user input into bounded kernel buffers, dispatches through the service registry, and copies bounded responses back through checked user mappings. Ring-3 service hosting is still not complete; handlers are kernel-hosted until K64 has a safe message/registration path for untrusted service processes.
 
 v0.3.22 adds a first POSIX-like multiuser permission core. The active `userctl` session has numeric runtime UID/GID identity, `stat()` reports owner and group IDs, `io.open`, `fs.*` service calls, `proc.spawn`, ELF execution, and `fsctl` operations check owner/group/other read, write, and execute bits, and root/sudo elevation maps to effective UID `0`.
+
+v0.3.23 introduces K64XFS as a separate modern filesystem core. K64FS remains the default boot/root filesystem, while K64XFS can be formatted and mounted explicitly for testing through `xfsctl` at `/x`.
 
 Security boundary:
 
@@ -825,7 +828,7 @@ This is how many user-facing commands are implemented. The shell parses a comman
 
 That model is central to K64 today.
 
-## Filesystem: `K64FS`
+## Filesystems: `K64FS` and `K64XFS`
 
 Files:
 
@@ -834,7 +837,7 @@ Files:
 - `tools/mk_k64fs.py`
 - `grub/k64fs.c`
 
-`K64FS` is the custom filesystem/image format used both by:
+`K64FS` is now best understood as the LegacyFS/BootFS compatibility filesystem. It is the custom filesystem/image format used both by:
 
 - the kernel runtime filesystem driver
 - the GRUB-side filesystem module
@@ -852,6 +855,37 @@ The format is optimized for:
 - compatibility with the GRUB-side reader
 
 It is intentionally not a journaled or crash-safe disk filesystem. K64FS is still a compact image-backed filesystem, not a modern extent/tree allocator, but the kernel side now enforces stricter structure checks and carries enough metadata for real userland tools.
+
+### K64XFS
+
+Files:
+
+- `k64_xfs.c`
+- `k64_xfs.h`
+- `k64_xfs_format.c`
+- `k64_xfs_format.h`
+- `k64_xfs_cache.c`
+- `k64_xfs_cache.h`
+- `k64_xfs_journal.c`
+- `k64_xfs_journal.h`
+
+K64XFS is a new block-backed filesystem introduced in v0.3.23. It is not a patch to K64FS and does not replace the current root filesystem yet.
+
+K64XFS currently provides:
+
+- 4096-byte filesystem blocks over existing K64 block devices
+- a versioned checksummed superblock
+- inode and block bitmaps
+- persisted UID, GID, mode, timestamp, generation, and size metadata
+- direct extents for file data
+- directory files containing directory entries
+- a 64-block cache with dirty flushing
+- mount clean/dirty state
+- a metadata journal skeleton
+- a read-only checker foundation
+- `xfsctl` format, mount, info, list, stat, mkdir, write, append, cat, remove, chmod, chown, sync, and check commands
+
+K64XFS is mounted explicitly for development at `/x`; normal `/` paths still use K64FS. See `docs/fs/k64xfs.md` for the on-disk layout and limitations.
 
 ### On-image layout
 
