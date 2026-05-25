@@ -12,6 +12,7 @@ static int cursor_y = 0;
 static uint8_t current_color = 0;
 static bool mirror_serial = true;
 static bool screen_enabled = true;
+static bool cursor_visible = true;
 
 static inline void outb(uint16_t port, uint8_t value) {
     __asm__ __volatile__("outb %0, %1" : : "a"(value), "Nd"(port));
@@ -90,7 +91,7 @@ static void term_box(int x, int y, int w, int h, uint8_t border, uint8_t fill) {
 }
 
 static void k64_term_sync_cursor(void) {
-    if (!screen_enabled) {
+    if (!screen_enabled || !cursor_visible) {
         return;
     }
     uint16_t pos = (uint16_t)(cursor_y * K64_COLS + cursor_x);
@@ -104,11 +105,25 @@ static void k64_term_enable_cursor(void) {
     if (!screen_enabled) {
         return;
     }
+    cursor_visible = true;
     outb(0x3D4, 0x0A);
     outb(0x3D5, 0x0E);
     outb(0x3D4, 0x0B);
     outb(0x3D5, 0x0F);
     k64_term_sync_cursor();
+}
+
+void k64_term_set_cursor_visible(bool visible) {
+    cursor_visible = visible;
+    if (!screen_enabled) {
+        return;
+    }
+    if (!visible) {
+        outb(0x3D4, 0x0A);
+        outb(0x3D5, 0x20);
+        return;
+    }
+    k64_term_enable_cursor();
 }
 
 static void k64_term_scroll(void) {

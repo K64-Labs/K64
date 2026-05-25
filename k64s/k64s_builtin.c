@@ -1137,6 +1137,10 @@ static void installer_refresh_disks(k64_installer_wizard_t* w) {
         if (!dev || dev->is_partition || !dev->online || !dev->writable) {
             continue;
         }
+        if (k64_streq(dev->name, "rootmod") || k64_streq(dev->source, "multiboot") ||
+            k64_streq(dev->source, "memory")) {
+            continue;
+        }
         installer_copy(w->disks[w->disk_count].name, sizeof(w->disks[w->disk_count].name), dev->name);
         w->disks[w->disk_count].bytes = dev->block_count * (uint64_t)dev->block_size;
         w->disk_count++;
@@ -1159,7 +1163,7 @@ static void installer_draw(const k64_installer_wizard_t* w) {
     installer_fill(bg);
     installer_box(4, 2, 72, 20, border, panel);
     installer_center(3, "K64 Installer", title);
-    installer_text_at(8, 5, "Use arrow keys or Tab. Enter selects. Esc cancels.", muted);
+    installer_text_at(8, 5, "Arrows move. Tab advances. Enter selects. N next. B back. Esc cancels.", muted);
     installer_text_at(9, 7, w->step == 0 ? "[1] Disk" : " 1  Disk", w->step == 0 ? selected : muted);
     installer_text_at(24, 7, w->step == 1 ? "[2] User" : " 2  User", w->step == 1 ? selected : muted);
     installer_text_at(39, 7, w->step == 2 ? "[3] Install" : " 3  Install", w->step == 2 ? selected : muted);
@@ -1177,11 +1181,13 @@ static void installer_draw(const k64_installer_wizard_t* w) {
             installer_text_at(28, 11 + i, size, row_color);
         }
         installer_button(49, 19, "Next", w->focus == 1);
+        installer_text_at(12, 18, "Enter or N continues with the selected disk.", muted);
     } else if (w->step == 1) {
         installer_text_at(10, 9, "Create the first installed-system account:", text);
         installer_field(13, 11, "Username", w->username, false, w->focus == 0);
         installer_field(13, 13, "Password", w->password, true, w->focus == 1);
         installer_text_at(13, 15, w->sudoer ? "[x] Add to sudo group" : "[ ] Add to sudo group", w->focus == 2 ? selected : text);
+        installer_text_at(13, 17, "Tab moves fields. Space toggles sudo.", muted);
         installer_button(13, 19, "Back", w->focus == 3);
         installer_button(49, 19, "Next", w->focus == 4);
     } else {
@@ -1193,6 +1199,7 @@ static void installer_draw(const k64_installer_wizard_t* w) {
         installer_text_at(13, 14, "This overwrites the target disk boot area and root partition.", installer_color(K64_COLOR_RED, K64_COLOR_WHITE));
         installer_text_at(13, 16, w->confirm ? "[x] I understand and want to install" : "[ ] I understand and want to install",
                           w->focus == 0 ? selected : text);
+        installer_text_at(13, 18, "Space checks the box. Enter on Install writes the disk.", muted);
         installer_button(13, 19, "Back", w->focus == 1);
         installer_button(45, 19, "Install", w->focus == 2);
     }
@@ -1268,6 +1275,16 @@ static void installer_focus_next(k64_installer_wizard_t* w, int dir) {
     }
 }
 
+static bool installer_focus_is_last(const k64_installer_wizard_t* w) {
+    if (w->step == 1) {
+        return w->focus == 4;
+    }
+    if (w->step == 2) {
+        return w->focus == 2;
+    }
+    return w->focus == 1;
+}
+
 static void installer_next_step(k64_installer_wizard_t* w) {
     w->message[0] = '\0';
     if (w->step == 0 && w->disk_count == 0) {
@@ -1318,7 +1335,15 @@ static void installer_handle_event(k64_installer_wizard_t* w, const k64_key_even
     if (e->type == K64_KEY_ESCAPE) {
         w->quit = true;
     } else if (e->type == K64_KEY_TAB) {
-        installer_focus_next(w, 1);
+        if (installer_focus_is_last(w)) {
+            if (w->step < 2) {
+                installer_next_step(w);
+            } else {
+                installer_run_install(w);
+            }
+        } else {
+            installer_focus_next(w, 1);
+        }
     } else if (e->type == K64_KEY_UP) {
         if (w->step == 0 && w->focus == 0 && w->disk_index > 0) w->disk_index--; else installer_focus_next(w, -1);
     } else if (e->type == K64_KEY_DOWN) {
@@ -1331,7 +1356,11 @@ static void installer_handle_event(k64_installer_wizard_t* w, const k64_key_even
         if (w->step == 1 && w->focus == 0) installer_backspace(w->username);
         if (w->step == 1 && w->focus == 1) installer_backspace(w->password);
     } else if (e->type == K64_KEY_CHAR) {
-        if (e->ch == ' ' && w->step == 1 && w->focus == 2) w->sudoer = !w->sudoer;
+        if (e->ch == 'n' || e->ch == 'N') installer_next_step(w);
+        else if (e->ch == 'b' || e->ch == 'B') installer_prev_step(w);
+        else if ((e->ch == 'x' || e->ch == 'X') && w->step == 1 && w->focus == 2) w->sudoer = !w->sudoer;
+        else if ((e->ch == 'x' || e->ch == 'X') && w->step == 2 && w->focus == 0) w->confirm = !w->confirm;
+        else if (e->ch == ' ' && w->step == 1 && w->focus == 2) w->sudoer = !w->sudoer;
         else if (e->ch == ' ' && w->step == 2 && w->focus == 0) w->confirm = !w->confirm;
         else if (w->step == 1 && w->focus == 0) installer_append_char(w->username, sizeof(w->username), e->ch);
         else if (w->step == 1 && w->focus == 1) installer_append_char(w->password, sizeof(w->password), e->ch);
@@ -1358,6 +1387,7 @@ static bool installer_wizard_run(void) {
 
     k64_term_set_mirror_serial(false);
     k64_term_screen_start();
+    k64_term_set_cursor_visible(false);
     k64_term_clear();
     k64_serial_write("K64 installer wizard started. Use arrows, tab, enter, and escape.\n");
     while (!wizard.quit) {
@@ -1369,6 +1399,7 @@ static bool installer_wizard_run(void) {
         installer_handle_event(&wizard, &event);
     }
     k64_term_set_mirror_serial(true);
+    k64_term_set_cursor_visible(true);
     k64_term_clear();
     if (wizard.installed) {
         svc_print_line("installer: root filesystem installed");
