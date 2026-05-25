@@ -7,6 +7,7 @@
 #include "k64_pit.h"
 #include "k64_sched.h"
 #include "k64_serial.h"
+#include "k64_system.h"
 #include "k64_terminal.h"
 #include "k64_string.h"
 
@@ -22,6 +23,7 @@
 #define K64_USER_FD_MAX 16
 #define K64_USER_PIPE_MAX 16
 #define K64_USER_PIPE_BUFFER_SIZE 4096
+#define K64_USER_SERVICE_CALL_DEPTH_MAX 4
 
 typedef struct {
     uint32_t width;
@@ -159,6 +161,9 @@ static k64_tss64_t tss64;
 static uint8_t syscall_stack[16384] __attribute__((aligned(16)));
 static uint8_t nested_syscall_stack[16384] __attribute__((aligned(16)));
 static uint8_t syscall_io_buffer[K64_USER_SYSCALL_IO_MAX];
+static uint8_t service_call_in_buffers[K64_USER_SERVICE_CALL_DEPTH_MAX][K64_SERVICE_CALL_PAYLOAD_MAX];
+static uint8_t service_call_out_buffers[K64_USER_SERVICE_CALL_DEPTH_MAX][K64_SERVICE_CALL_PAYLOAD_MAX];
+static int service_call_depth;
 static char syscall_text_buffer[512];
 static uint16_t syscall_cell_buffer[K64_USER_FBBLIT_CELLS_MAX];
 static k64_user_exec_context_t active_ctx;
@@ -175,6 +180,9 @@ typedef struct {
 } k64_user_spawn_ctx_t;
 
 static k64_user_spawn_ctx_t spawn_ctx[K64_USER_SPAWN_MAX];
+
+static int64_t queue_spawn(const char* path, const char* args);
+static int64_t run_reserved_child(uint64_t pid, uint64_t parent_pid);
 
 static void set_tss_descriptor(uint64_t base, uint32_t limit) {
     uint64_t low;
@@ -405,6 +413,95 @@ static void process_fill_info(int index, k64_proc_info_t* out) {
     out->fault_vector = proc->fault_vector;
     out->fault_rip = proc->fault_rip;
     process_copy_path(out->path, proc->path);
+}
+
+static int64_t proc_info_service_call(const k64_service_call_request_t* req) {
+    const k64_service_proc_info_req_t* in;
+    k64_proc_info_t info;
+    int index;
+
+    if (!req || !req->in || req->in_len < sizeof(*in) || !req->out ||
+        req->out_len < sizeof(info)) {
+        return K64_ERR_INVAL;
+    }
+    in = (const k64_service_proc_info_req_t*)req->in;
+    index = process_find_pid(in->pid);
+    if (index < 0) {
+        return K64_ERR_NOENT;
+    }
+    if (req->caller_pid != 0 &&
+        process_table[index].pid != req->caller_pid &&
+        process_table[index].parent_pid != req->caller_pid) {
+        return K64_ERR_ACCESS;
+    }
+    process_fill_info(index, &info);
+    memcpy(req->out, &info, sizeof(info));
+    ((k64_service_call_request_t*)req)->actual_out_len = sizeof(info);
+    return K64_OK;
+}
+
+static int64_t proc_spawn_service_call(const k64_service_call_request_t* req) {
+    const k64_service_proc_spawn_req_t* in;
+    int64_t pid;
+
+    if (!req || !req->in || req->in_len < sizeof(*in) || !req->out ||
+        req->out_len < sizeof(pid)) {
+        return K64_ERR_INVAL;
+    }
+    in = (const k64_service_proc_spawn_req_t*)req->in;
+    if (!in->path[0]) {
+        return K64_ERR_INVAL;
+    }
+    pid = queue_spawn(in->path, in->args);
+    if (pid < 0) {
+        return pid;
+    }
+    memcpy(req->out, &pid, sizeof(pid));
+    ((k64_service_call_request_t*)req)->actual_out_len = sizeof(pid);
+    return K64_OK;
+}
+
+static int64_t proc_wait_service_call(const k64_service_call_request_t* req) {
+    const k64_service_proc_wait_req_t* in;
+    int index;
+    int64_t exit_code;
+
+    if (!req || !req->in || req->in_len < sizeof(*in) || !req->out ||
+        req->out_len < sizeof(exit_code)) {
+        return K64_ERR_INVAL;
+    }
+    in = (const k64_service_proc_wait_req_t*)req->in;
+    if (in->flags != K64_WAIT_BLOCK && in->flags != K64_WAIT_NOHANG) {
+        return K64_ERR_INVAL;
+    }
+    index = process_find_pid(in->pid);
+    if (index < 0) {
+        return K64_ERR_NOENT;
+    }
+    if (process_table[index].parent_pid != req->caller_pid) {
+        return K64_ERR_NOTCHILD;
+    }
+    if (process_table[index].state == K64_USER_PROCESS_RUNNING) {
+        if (in->flags == K64_WAIT_NOHANG) {
+            return K64_ERR_AGAIN;
+        }
+        exit_code = run_reserved_child(process_table[index].pid, req->caller_pid);
+        if (exit_code != K64_OK) {
+            return exit_code;
+        }
+        index = process_find_pid(in->pid);
+        if (index < 0) {
+            return K64_ERR_NOENT;
+        }
+        if (process_table[index].state == K64_USER_PROCESS_RUNNING) {
+            return K64_ERR_AGAIN;
+        }
+    }
+    exit_code = process_table[index].exit_code;
+    memcpy(req->out, &exit_code, sizeof(exit_code));
+    ((k64_service_call_request_t*)req)->actual_out_len = sizeof(exit_code);
+    process_reap(index);
+    return K64_OK;
 }
 
 static bool user_read(uint64_t user_ptr, void* out, size_t size) {
@@ -863,6 +960,68 @@ static int64_t read_key_event_nonblocking(void) {
     return 0;
 }
 
+static int64_t syscall_service_call(uint64_t user_call_ptr) {
+    k64_service_call_user_t user_call;
+    char service[K64_SERVICE_CALL_OWNER_MAX];
+    char method[K64_SERVICE_CALL_NAME_MAX];
+    uint8_t* in_buf;
+    uint8_t* out_buf;
+    size_t actual = 0;
+    int depth;
+    int64_t rc;
+
+    if (!user_call_ptr ||
+        !user_read(user_call_ptr, &user_call, sizeof(user_call))) {
+        return K64_ERR_FAULT;
+    }
+    if (!copy_user_string(user_call.service, service, sizeof(service)) ||
+        !copy_user_string(user_call.method, method, sizeof(method))) {
+        return K64_ERR_FAULT;
+    }
+    if (user_call.request_len > K64_SERVICE_CALL_PAYLOAD_MAX ||
+        user_call.response_len > K64_SERVICE_CALL_PAYLOAD_MAX) {
+        return K64_ERR_OVERFLOW;
+    }
+    if ((user_call.request_len && !user_call.request) ||
+        (user_call.response_len && !user_call.response)) {
+        return K64_ERR_FAULT;
+    }
+    if (service_call_depth < 0 || service_call_depth >= K64_USER_SERVICE_CALL_DEPTH_MAX) {
+        return K64_ERR_BUSY;
+    }
+    depth = service_call_depth++;
+    in_buf = service_call_in_buffers[depth];
+    out_buf = service_call_out_buffers[depth];
+
+    if (user_call.request_len &&
+        !user_read((uint64_t)(uintptr_t)user_call.request, in_buf, (size_t)user_call.request_len)) {
+        service_call_depth--;
+        return K64_ERR_FAULT;
+    }
+    if (user_call.response_len) {
+        memset(out_buf, 0, (size_t)user_call.response_len);
+    }
+
+    rc = k64_system_dispatch_call(service,
+                                  method,
+                                  user_call.request_len ? in_buf : NULL,
+                                  (size_t)user_call.request_len,
+                                  user_call.response_len ? out_buf : NULL,
+                                  (size_t)user_call.response_len,
+                                  &actual,
+                                  current_process_pid(),
+                                  0);
+    if (rc == K64_OK && actual > user_call.response_len) {
+        rc = K64_ERR_OVERFLOW;
+    }
+    if (rc == K64_OK && user_call.response_len && actual &&
+        !user_write((uint64_t)(uintptr_t)user_call.response, out_buf, actual)) {
+        rc = K64_ERR_FAULT;
+    }
+    service_call_depth--;
+    return rc;
+}
+
 int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
     if (!frame || !active_ctx.active) {
         return K64_ERR_INVAL;
@@ -987,6 +1146,7 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             return (int64_t)k64_pit_get_ticks();
         case K64_SYSCALL_WRITEFILE: {
             char path[256];
+            k64_service_fs_write_file_req_t req;
             if (!copy_user_string((const char*)(uintptr_t)frame->rdi, path, sizeof(path))) {
                 return K64_ERR_FAULT;
             }
@@ -994,7 +1154,18 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
                 !user_read(frame->rsi, syscall_io_buffer, (size_t)frame->rdx)) {
                 return K64_ERR_FAULT;
             }
-            return k64_fs_write_file_raw(path, syscall_io_buffer, (size_t)frame->rdx) ? K64_OK : K64_ERR_ACCESS;
+            copy_bounded(req.path, sizeof(req.path), path);
+            req.data = syscall_io_buffer;
+            req.len = (size_t)frame->rdx;
+            return k64_system_dispatch_call("fs",
+                                            "write_file",
+                                            &req,
+                                            sizeof(req),
+                                            NULL,
+                                            0,
+                                            NULL,
+                                            current_process_pid(),
+                                            K64_SERVICE_CALLER_KERNEL);
         }
         case K64_SYSCALL_CLEAR:
             k64_term_clear();
@@ -1048,6 +1219,8 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             char path[256];
             char* out = (char*)(uintptr_t)frame->rsi;
             int out_size = (int)frame->rdx;
+            size_t actual = 0;
+            int64_t rc;
 
             if (!copy_user_string((const char*)(uintptr_t)frame->rdi, path, sizeof(path)) ||
                 !out || out_size <= 0) {
@@ -1059,12 +1232,19 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             for (int i = 0; i < out_size; ++i) {
                 syscall_io_buffer[i] = 0;
             }
-            if (!k64_fs_ls(path, (char*)syscall_io_buffer, out_size)) {
-                return K64_ERR_NOENT;
+            rc = k64_system_dispatch_call("fs",
+                                          "list_dir",
+                                          path,
+                                          k64_strlen(path) + 1,
+                                          syscall_io_buffer,
+                                          (size_t)out_size,
+                                          &actual,
+                                          current_process_pid(),
+                                          K64_SERVICE_CALLER_KERNEL);
+            if (rc != K64_OK) {
+                return rc;
             }
-            return user_write((uint64_t)(uintptr_t)out,
-                              syscall_io_buffer,
-                              k64_strlen((const char*)syscall_io_buffer) + 1) ? K64_OK : K64_ERR_FAULT;
+            return user_write((uint64_t)(uintptr_t)out, syscall_io_buffer, actual) ? K64_OK : K64_ERR_FAULT;
         }
         case K64_SYSCALL_MOVE: {
             char src[256];
@@ -1079,6 +1259,10 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
         case K64_SYSCALL_SPAWN: {
             char path[256];
             char args[K64_USER_SPAWN_ARGS_MAX];
+            k64_service_proc_spawn_req_t req;
+            int64_t pid = K64_ERR_INVAL;
+            size_t actual = 0;
+            int64_t rc;
 
             if (!copy_user_string((const char*)(uintptr_t)frame->rdi, path, sizeof(path))) {
                 return K64_ERR_FAULT;
@@ -1088,63 +1272,70 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             } else {
                 args[0] = '\0';
             }
-            return queue_spawn(path, args);
+            copy_bounded(req.path, sizeof(req.path), path);
+            copy_bounded(req.args, sizeof(req.args), args);
+            rc = k64_system_dispatch_call("proc",
+                                          "spawn",
+                                          &req,
+                                          sizeof(req),
+                                          &pid,
+                                          sizeof(pid),
+                                          &actual,
+                                          current_process_pid(),
+                                          K64_SERVICE_CALLER_KERNEL);
+            return rc == K64_OK && actual >= sizeof(pid) ? pid : rc;
         }
         case K64_SYSCALL_PROCINFO: {
             k64_proc_info_t info;
-            int index = process_find_pid(frame->rdi);
-            uint64_t caller_pid = current_process_pid();
+            k64_service_proc_info_req_t req;
+            size_t actual = 0;
+            int64_t rc;
 
-            if (index < 0 || !frame->rsi) {
-                return index < 0 ? K64_ERR_NOENT : K64_ERR_FAULT;
+            if (!frame->rsi) {
+                return K64_ERR_FAULT;
             }
-            if (caller_pid != 0 &&
-                process_table[index].pid != caller_pid &&
-                process_table[index].parent_pid != caller_pid) {
-                return K64_ERR_ACCESS;
+            req.pid = frame->rdi;
+            rc = k64_system_dispatch_call("proc",
+                                          "info",
+                                          &req,
+                                          sizeof(req),
+                                          &info,
+                                          sizeof(info),
+                                          &actual,
+                                          current_process_pid(),
+                                          K64_SERVICE_CALLER_KERNEL);
+            if (rc != K64_OK) {
+                return rc;
             }
-            process_fill_info(index, &info);
             return user_write(frame->rsi, &info, sizeof(info)) ? K64_OK : K64_ERR_FAULT;
         }
         case K64_SYSCALL_WAITPID: {
-            int index = process_find_pid(frame->rdi);
+            k64_service_proc_wait_req_t req;
             int64_t exit_code;
-            uint64_t caller_pid = current_process_pid();
             uint64_t flags = frame->rdx;
+            size_t actual = 0;
+            int64_t rc;
 
-            if (index < 0) {
-                return K64_ERR_NOENT;
-            }
             if (flags != K64_WAIT_BLOCK && flags != K64_WAIT_NOHANG) {
                 return K64_ERR_INVAL;
             }
-            if (process_table[index].parent_pid != caller_pid) {
-                return K64_ERR_NOTCHILD;
+            req.pid = frame->rdi;
+            req.flags = flags;
+            rc = k64_system_dispatch_call("proc",
+                                          "wait",
+                                          &req,
+                                          sizeof(req),
+                                          &exit_code,
+                                          sizeof(exit_code),
+                                          &actual,
+                                          current_process_pid(),
+                                          K64_SERVICE_CALLER_KERNEL);
+            if (rc != K64_OK) {
+                return rc;
             }
-            if (process_table[index].state == K64_USER_PROCESS_RUNNING) {
-                if (flags == K64_WAIT_NOHANG) {
-                    return K64_ERR_AGAIN;
-                }
-                if (frame->rsi && !user_buffer_range_ok(frame->rsi, sizeof(exit_code))) {
-                    return K64_ERR_FAULT;
-                }
-                exit_code = run_reserved_child(process_table[index].pid, caller_pid);
-                if (exit_code != K64_OK) {
-                    return exit_code;
-                }
-                index = process_find_pid(frame->rdi);
-                if (index < 0) {
-                    return K64_ERR_NOENT;
-                }
-                if (process_table[index].state == K64_USER_PROCESS_RUNNING) {
-                    return K64_ERR_AGAIN;
-                }
-            }
-            exit_code = process_table[index].exit_code;
             if (frame->rsi && !user_write(frame->rsi, &exit_code, sizeof(exit_code))) {
                 return K64_ERR_FAULT;
             }
-            process_reap(index);
             return K64_OK;
         }
         case K64_SYSCALL_PIPE: {
@@ -1202,8 +1393,9 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
         }
         case K64_SYSCALL_STAT: {
             char path[256];
-            k64_fs_stat_t fs_stat;
             k64_stat_t out;
+            size_t actual = 0;
+            int64_t rc;
 
             if (!frame->rdi || !frame->rsi) {
                 return K64_ERR_FAULT;
@@ -1211,18 +1403,22 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             if (!copy_user_string((const char*)(uintptr_t)frame->rdi, path, sizeof(path))) {
                 return K64_ERR_FAULT;
             }
-            if (!k64_fs_stat(path, &fs_stat)) {
-                return K64_ERR_NOENT;
+            rc = k64_system_dispatch_call("fs",
+                                          "stat",
+                                          path,
+                                          k64_strlen(path) + 1,
+                                          &out,
+                                          sizeof(out),
+                                          &actual,
+                                          current_process_pid(),
+                                          K64_SERVICE_CALLER_KERNEL);
+            if (rc != K64_OK) {
+                return rc;
             }
-            out.type = fs_stat.is_dir ? 1u : 2u;
-            out.size = fs_stat.size;
-            out.flags = 0;
-            out.mode = fs_stat.mode;
-            out.created_tick = fs_stat.created_tick;
-            out.modified_tick = fs_stat.modified_tick;
-            out.generation = fs_stat.generation;
             return user_write(frame->rsi, &out, sizeof(out)) ? K64_OK : K64_ERR_FAULT;
         }
+        case K64_SYSCALL_SERVICE_CALL:
+            return syscall_service_call(frame->rdi);
         default:
             return K64_ERR_NOSYS;
     }
@@ -1241,6 +1437,25 @@ void k64_usermode_init(void) {
     k64_idt_set_gate_raw(0x80, k64_syscall_stub, 0xEE);
     ctx_clear();
     K64_LOG_INFO("User mode initialized.");
+}
+
+void k64_usermode_register_service_calls(void) {
+    (void)k64_system_register_call("proc",
+                                   "info",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   proc_info_service_call);
+    (void)k64_system_register_call("proc",
+                                   "spawn",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED |
+                                   K64_SERVICE_CALL_FLAG_CAN_SPAWN,
+                                   proc_spawn_service_call);
+    (void)k64_system_register_call("proc",
+                                   "wait",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   proc_wait_service_call);
 }
 
 int64_t k64_usermode_execute_named(const k64_vm_space_t* space,

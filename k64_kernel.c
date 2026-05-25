@@ -75,6 +75,7 @@ void k64_kernel_main(void) {
     k64_modules_registry_init();
     k64_system_registry_init();
     k64_system_register_core_services();
+    k64_usermode_register_service_calls();
 
     K64_LOG_INFO("Initializing PIT...");
     k64_pit_init(k64_config.pit_hz);

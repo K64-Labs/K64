@@ -268,6 +268,8 @@ static void shell_print_help(void) {
     k64_term_write("  echo <text>      - print text back to the console\n");
     k64_term_write("  layout [us|de]   - show or switch keyboard layout\n");
     k64_term_write("  servicectl <cmd> - manage services\n");
+    k64_term_write("  calls            - list registered service calls\n");
+    k64_term_write("  call svc.method  - invoke a service call for debugging\n");
     k64_term_write("  driverctl <cmd>  - manage drivers\n");
     k64_term_write("  storagectl <cmd> - manage block storage and sync\n");
     k64_term_write("  install          - guide disk installation from the live ISO\n");

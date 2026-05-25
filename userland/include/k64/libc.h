@@ -28,6 +28,7 @@
 #define K64_PROC_STATE_REAPED 5ULL
 #define K64_WAIT_BLOCK 0ULL
 #define K64_WAIT_NOHANG 1ULL
+#define K64_SERVICE_CALL_PAYLOAD_MAX 65536ULL
 
 typedef struct {
     uint64_t pid;
@@ -61,6 +62,16 @@ typedef struct {
     uint64_t modified_tick;
     uint64_t generation;
 } k64_stat_t;
+
+typedef struct {
+    const char* service;
+    const char* method;
+    const void* request;
+    uint64_t request_len;
+    void* response;
+    uint64_t response_len;
+    uint64_t flags;
+} k64_service_call_user_t;
 
 typedef struct {
     uint32_t width;
@@ -109,6 +120,13 @@ int64_t  k64_waitpid(uint64_t pid, int64_t* exit_code);
 int64_t  k64_waitpid_flags(uint64_t pid, int64_t* exit_code, uint64_t flags);
 int64_t  k64_pipe(int fds[2]);
 int64_t  k64_stat(const char* path, k64_stat_t* out);
+int64_t  k64_service_call(const char* service,
+                          const char* method,
+                          const void* request,
+                          uint64_t request_len,
+                          void* response,
+                          uint64_t response_len);
+int64_t  k64_service_call_ex(const k64_service_call_user_t* call);
 uint64_t k64_uptime_ticks(void);
 size_t   k64_strlen(const char* text);
 int      k64_strcmp(const char* a, const char* b);

@@ -25,6 +25,7 @@
 #define K64_SYSCALL_PIPE 22ULL
 #define K64_SYSCALL_WRITEFD 23ULL
 #define K64_SYSCALL_STAT 24ULL
+#define K64_SYSCALL_SERVICE_CALL 25ULL
 
 int64_t k64_syscall3(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t a2) {
     int64_t ret;
@@ -171,6 +172,31 @@ int64_t k64_stat(const char* path, k64_stat_t* out) {
                         (uint64_t)(uintptr_t)path,
                         (uint64_t)(uintptr_t)out,
                         0);
+}
+
+int64_t k64_service_call_ex(const k64_service_call_user_t* call) {
+    return k64_syscall3(K64_SYSCALL_SERVICE_CALL,
+                        (uint64_t)(uintptr_t)call,
+                        0,
+                        0);
+}
+
+int64_t k64_service_call(const char* service,
+                         const char* method,
+                         const void* request,
+                         uint64_t request_len,
+                         void* response,
+                         uint64_t response_len) {
+    k64_service_call_user_t call;
+
+    call.service = service;
+    call.method = method;
+    call.request = request;
+    call.request_len = request_len;
+    call.response = response;
+    call.response_len = response_len;
+    call.flags = 0;
+    return k64_service_call_ex(&call);
 }
 
 uint64_t k64_uptime_ticks(void) {

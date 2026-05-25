@@ -29,6 +29,7 @@
 #define K64_SYSCALL_PIPE 22ULL
 #define K64_SYSCALL_WRITEFD 23ULL
 #define K64_SYSCALL_STAT 24ULL
+#define K64_SYSCALL_SERVICE_CALL 25ULL
 
 #define K64_PROC_STATE_EMPTY 0ULL
 #define K64_PROC_STATE_RUNNING 1ULL
@@ -64,7 +65,18 @@ typedef struct {
     uint64_t generation;
 } k64_stat_t;
 
+typedef struct {
+    const char* service;
+    const char* method;
+    const void* request;
+    uint64_t request_len;
+    void* response;
+    uint64_t response_len;
+    uint64_t flags;
+} k64_service_call_user_t;
+
 void k64_usermode_init(void);
+void k64_usermode_register_service_calls(void);
 int64_t k64_usermode_execute(const k64_vm_space_t* space, uint64_t entry, uint64_t user_stack_top);
 int64_t k64_usermode_execute_named(const k64_vm_space_t* space,
                                    uint64_t entry,

@@ -65,6 +65,7 @@ Normal exits currently transition to `ZOMBIE`; faulted user programs transition 
 | `22` | `pipe` | `out_fds` | `0` or error |
 | `23` | `writefd` | `fd, ptr, len` | bytes written or error |
 | `24` | `stat` | `path, out` | `0` or error |
+| `25` | `service_call` | `call_ptr` | `0` or error |
 
 ## Notes
 
@@ -79,3 +80,21 @@ Normal exits currently transition to `ZOMBIE`; faulted user programs transition 
 - `write_file` is still a whole-file helper and is not the same as POSIX `write`.
 - `stat(path, out)` returns type, size, flags, mode, created tick, modified tick, and generation fields through the userland `k64_stat_t` structure.
 - The ELF loader keeps a small nested execution context stack so a parent `/ex` program can safely run a child during blocking wait without clobbering the parent's loader or syscall-stack state.
+- `service_call(call_ptr)` reads a `k64_service_call_user_t` through checked user memory, copies service and method names, bounds request/response payloads to 65536 bytes, dispatches through the service-call registry, and copies the response back through checked user memory.
+- Selected compatibility syscalls are service-backed internally in v0.3.20: `stat` routes through `fs.stat`, `list_dir` through `fs.list_dir`, `write_file` through `fs.write_file`, `spawn` through `proc.spawn`, `proc_info` through `proc.info`, and `waitpid` through `proc.wait`.
+
+## `k64_service_call_user_t`
+
+```c
+typedef struct {
+    const char* service;
+    const char* method;
+    const void* request;
+    uint64_t request_len;
+    void* response;
+    uint64_t response_len;
+    uint64_t flags;
+} k64_service_call_user_t;
+```
+
+The syscall copies the argument block first, then copies all referenced user buffers into bounded kernel staging buffers before dispatch. Unknown services or methods return `K64_ERR_NOENT`; oversized payloads return `K64_ERR_OVERFLOW`; bad pointers return `K64_ERR_FAULT`; permission failures return `K64_ERR_ACCESS`.
