@@ -24,10 +24,11 @@ trap cleanup EXIT
 
 set +e
 qemu-system-x86_64 \
+  -machine accel=tcg \
+  -boot order=c \
   -drive file=build/root.disk,format=raw,if=ide,index=0 \
-  -display none \
-  -serial stdio \
   -monitor none \
+  -nographic \
   -no-reboot -no-shutdown >"$log" 2>&1 &
 qemu_pid=$!
 set -e
