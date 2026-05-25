@@ -1946,6 +1946,9 @@ int64_t k64_usermode_execute_named_ex(const k64_vm_space_t* space,
     if (process_table[process_index].state == K64_USER_PROCESS_RUNNING) {
         process_finish(process_index, K64_USER_PROCESS_ZOMBIE, active_ctx.result);
     }
+    if (parent_pid == 0 && pid == 0 && path && k64_streq(path, "/ex/servicehost.elf")) {
+        process_reap(process_index);
+    }
 
     return active_ctx.result;
 }

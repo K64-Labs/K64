@@ -42,6 +42,7 @@ static void service_worker_main(void* arg);
 static bool kernel_calls_command(const char* command, const char* args);
 static bool kernel_call_command(const char* command, const char* args);
 static int64_t svc_demo_run_call(const k64_service_call_request_t* req);
+static bool service_verify_ring3_host(k64_service_t* service);
 
 static bool service_runs_unisolated(k64_service_t* service) {
     return service && k64_streq(service->name, "init");
@@ -83,6 +84,14 @@ static void copy_string(char* dst, size_t dst_size, const char* src) {
         i++;
     }
     dst[i] = '\0';
+}
+
+static void build_servicehost_args(char* dst, size_t dst_size, const k64_service_t* service) {
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    dst[0] = '\0';
+    copy_string(dst, dst_size, service && service->name[0] ? service->name : "service");
 }
 
 static bool has_suffix(const char* text, const char* suffix) {
@@ -448,7 +457,11 @@ static bool rootfs_service_start(k64_service_t* service) {
     k64_term_write("[svc] exec ");
     k64_term_write(ctx->entry_path);
     k64_term_write("\n");
-    return k64_elf_execute_user_path(ctx->entry_path);
+    if (!k64_elf_execute_user_path_args(ctx->entry_path, service ? service->name : "")) {
+        return false;
+    }
+    service->ring3_verified = true;
+    return true;
 }
 
 static bool rootfs_k64s_cb(const char* name, bool is_dir, void* ctx) {
@@ -490,18 +503,25 @@ static bool rootfs_k64s_cb(const char* name, bool is_dir, void* ctx) {
 
     slot = &rootfs_ctx[rootfs_ctx_count++];
     copy_string(slot->entry_path, sizeof(slot->entry_path), file->entry_path);
-    if (k64_system_register_service(file->name,
-                                    path,
-                                    (k64_service_class_t)file->class_id,
-                                    (file->flags & K64_SYSTEM_FLAG_ASYNC ? K64_SERVICE_FLAG_ASYNC : 0) |
-                                    (file->flags & K64_SYSTEM_FLAG_AUTOSTART ? K64_SERVICE_FLAG_AUTOSTART : 0),
-                                    file->priority,
-                                    file->poll_interval_ticks,
-                                    true,
-                                    rootfs_service_start,
-                                    default_stop,
-                                    NULL,
-                                    slot)) {
+    {
+        k64_service_t* service =
+            k64_system_register_service(file->name,
+                                        path,
+                                        (k64_service_class_t)file->class_id,
+                                        (file->flags & K64_SYSTEM_FLAG_ASYNC ? K64_SERVICE_FLAG_ASYNC : 0) |
+                                        (file->flags & K64_SYSTEM_FLAG_AUTOSTART ? K64_SERVICE_FLAG_AUTOSTART : 0),
+                                        file->priority,
+                                        file->poll_interval_ticks,
+                                        true,
+                                        rootfs_service_start,
+                                        default_stop,
+                                        NULL,
+                                        slot);
+        if (service) {
+            copy_string(service->entry_path, sizeof(service->entry_path), file->entry_path);
+        }
+    }
+    if (k64_system_find_service_by_name(file->name)) {
         k64_term_write("  Rootfs K64S service registered: ");
         k64_term_write(file->name);
         k64_term_putc('\n');
@@ -568,6 +588,37 @@ static void service_worker_main(void* arg) {
     }
 }
 
+static bool service_verify_ring3_host(k64_service_t* service) {
+    char args[64];
+    const char* entry;
+
+    if (!service) {
+        return false;
+    }
+    if (service->ring3_verified) {
+        return true;
+    }
+    if (service->class_id == K64_SERVICE_CLASS_KERNEL) {
+        service->ring3_verified = true;
+        return true;
+    }
+    entry = service->entry_path[0] ? service->entry_path : "/ex/servicehost.elf";
+    build_servicehost_args(args, sizeof(args), service);
+    k64_term_write("[svc] ring3 host ");
+    k64_term_write(service->name);
+    k64_term_write(" -> ");
+    k64_term_write(entry);
+    k64_term_putc('\n');
+    if (!k64_elf_execute_user_path_args(entry, args)) {
+        k64_term_write("[svc] ring3 host failed ");
+        k64_term_write(service->name);
+        k64_term_putc('\n');
+        return false;
+    }
+    service->ring3_verified = true;
+    return true;
+}
+
 static bool perform_start(k64_service_t* service) {
     if (!service->start) {
         return false;
@@ -579,12 +630,14 @@ static bool perform_start(k64_service_t* service) {
         k64_term_write("\n");
         return false;
     }
-    /*
-     * Service lifecycle hooks are part of the kernel control plane. Running
-     * them directly keeps bootstrap deterministic while command handlers and
-     * async workers still execute inside the service address space.
-     */
+    service->ring3_verified = false;
     if (!service->start(service)) {
+        k64_vmm_release_service_space(&service->vm_space);
+        return false;
+    }
+    if (service->ring3_required && !service_verify_ring3_host(service)) {
+        k64_system_unregister_commands(service->name);
+        k64_system_unregister_calls(service->name);
         k64_vmm_release_service_space(&service->vm_space);
         return false;
     }
@@ -613,6 +666,8 @@ static void perform_stop(k64_service_t* service) {
     service->last_poll_tick = 0;
     k64_system_unregister_commands(service->name);
     k64_system_unregister_calls(service->name);
+    service->ring3_verified = false;
+    service->user_pid = 0;
     k64_vmm_release_service_space(&service->vm_space);
 }
 
@@ -692,7 +747,11 @@ void k64_system_registry_init(void) {
         services[i].last_start_tick = 0;
         services[i].last_poll_tick = 0;
         services[i].managed_pid = 0;
+        services[i].user_pid = 0;
         services[i].controllable = false;
+        services[i].ring3_required = false;
+        services[i].ring3_verified = false;
+        services[i].entry_path[0] = '\0';
         services[i].start = NULL;
         services[i].stop = NULL;
         services[i].poll = NULL;
@@ -742,6 +801,7 @@ k64_service_t* k64_system_register_service(const char* name,
     service = &services[service_count++];
     service->pid = allocate_pid(class_id);
     service->managed_pid = service->pid;
+    service->user_pid = 0;
     copy_string(service->name, sizeof(service->name), name ? name : "unnamed");
     copy_string(service->source, sizeof(service->source), source ? source : "k64s");
     service->class_id = class_id;
@@ -754,6 +814,13 @@ k64_service_t* k64_system_register_service(const char* name,
     service->last_start_tick = 0;
     service->last_poll_tick = 0;
     service->controllable = controllable;
+    service->ring3_required = class_id != K64_SERVICE_CLASS_KERNEL;
+    service->ring3_verified = class_id == K64_SERVICE_CLASS_KERNEL;
+    service->entry_path[0] = '\0';
+    if (service->ring3_required) {
+        copy_string(service->entry_path, sizeof(service->entry_path), "/ex/servicehost.elf");
+        service->flags |= K64_SERVICE_FLAG_RING3_REQUIRED;
+    }
     service->start = start ? start : default_start;
     service->stop = stop ? stop : default_stop;
     service->poll = poll;
@@ -1184,6 +1251,10 @@ bool k64_system_dispatch_command(const char* command, const char* args) {
             if (!owner || owner->state != K64_SERVICE_STATE_RUNNING) {
                 return false;
             }
+            if (owner->class_id != K64_SERVICE_CLASS_KERNEL &&
+                (!owner->ring3_required || !owner->ring3_verified)) {
+                return false;
+            }
             return service_commands[i].handler(command, args);
         }
     }
@@ -1265,6 +1336,10 @@ int64_t k64_system_dispatch_call(const char* service,
         owner = k64_system_find_service_by_name(service_calls[i].owner);
         if (!owner || owner->state != K64_SERVICE_STATE_RUNNING) {
             return K64_ERR_NOENT;
+        }
+        if (owner->class_id != K64_SERVICE_CLASS_KERNEL &&
+            (!owner->ring3_required || !owner->ring3_verified)) {
+            return K64_ERR_ACCESS;
         }
         if ((service_calls[i].flags & K64_SERVICE_CALL_FLAG_KERNEL_ONLY) &&
             !(caller_flags & K64_SERVICE_CALLER_KERNEL)) {

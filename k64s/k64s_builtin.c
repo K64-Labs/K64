@@ -641,7 +641,7 @@ static bool k64cc_command(const char* command, const char* args) {
 static void servicectl_list(bool stopped_only) {
     size_t count = k64_system_service_count();
 
-    k64_term_write("PID   STATE    CLASS   NAME              VM BASE\n");
+    k64_term_write("PID   STATE    CLASS   HOST   NAME              VM BASE\n");
     for (size_t i = 0; i < count; ++i) {
         k64_service_t* service = k64_system_service_at(i);
         if (!service) {
@@ -663,6 +663,14 @@ static void servicectl_list(bool stopped_only) {
             k64_term_write("    ");
         } else {
             k64_term_write("  ");
+        }
+        k64_term_write("  ");
+        if (service->class_id == K64_SERVICE_CLASS_KERNEL) {
+            k64_term_write("ring0 ");
+        } else if (service->ring3_required && service->ring3_verified) {
+            k64_term_write("ring3 ");
+        } else {
+            k64_term_write("blocked");
         }
         k64_term_write("  ");
         k64_term_write(service->name);

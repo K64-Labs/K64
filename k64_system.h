@@ -14,6 +14,7 @@
 #define K64_SERVICE_FLAG_ASYNC      (1u << 0)
 #define K64_SERVICE_FLAG_AUTOSTART  (1u << 1)
 #define K64_SERVICE_FLAG_ESSENTIAL  (1u << 2)
+#define K64_SERVICE_FLAG_RING3_REQUIRED (1u << 3)
 
 #define K64_MAX_SERVICE_CALLS 128
 #define K64_SERVICE_CALL_NAME_MAX 32
@@ -86,7 +87,11 @@ typedef struct k64_service {
     uint64_t             last_start_tick;
     uint64_t             last_poll_tick;
     uint64_t             managed_pid;
+    uint64_t             user_pid;
     bool                 controllable;
+    bool                 ring3_required;
+    bool                 ring3_verified;
+    char                 entry_path[96];
     k64_service_start_fn start;
     k64_service_stop_fn  stop;
     k64_service_poll_fn  poll;
