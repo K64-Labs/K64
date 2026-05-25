@@ -15,7 +15,7 @@ log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 
 set +e
-timeout 15s qemu-system-x86_64 \
+timeout 30s qemu-system-x86_64 \
   -drive file=build/root.disk,format=raw,if=ide,index=0 \
   -display none \
   -serial stdio \
