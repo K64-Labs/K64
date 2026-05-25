@@ -131,6 +131,11 @@ typedef struct {
 } k64_service_fs_write_file_req_t;
 
 typedef struct {
+    uint64_t path_len;
+    uint64_t data_len;
+} k64_service_fs_write_file_user_req_t;
+
+typedef struct {
     uint64_t pid;
 } k64_service_proc_info_req_t;
 
@@ -143,6 +148,47 @@ typedef struct {
     char path[256];
     char args[256];
 } k64_service_proc_spawn_req_t;
+
+typedef struct {
+    int64_t code;
+} k64_service_proc_exit_req_t;
+
+typedef struct {
+    uint64_t ticks;
+} k64_service_sched_sleep_req_t;
+
+typedef struct {
+    int64_t fd;
+    uint64_t len;
+} k64_service_io_write_req_t;
+
+typedef struct {
+    int64_t fd;
+    uint64_t len;
+} k64_service_io_read_req_t;
+
+typedef struct {
+    int64_t result;
+    uint64_t len;
+} k64_service_io_result_t;
+
+typedef struct {
+    int64_t fd;
+} k64_service_io_fd_req_t;
+
+typedef struct {
+    int32_t fds[2];
+} k64_service_io_pipe_resp_t;
+
+typedef struct {
+    int32_t x;
+    int32_t y;
+} k64_service_term_cursor_req_t;
+
+typedef struct {
+    int32_t cols;
+    int32_t rows;
+} k64_service_term_size_resp_t;
 
 void k64_system_registry_init(void);
 void k64_system_register_core_services(void);

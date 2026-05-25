@@ -18,6 +18,16 @@ static int expect_fail(const char* name, int64_t rc) {
     return 0;
 }
 
+static int expect_nosys(const char* name, int64_t rc) {
+    if (rc != K64_ERR_NOSYS) {
+        k64_puts("security-probe: expected NOSYS: ");
+        k64_puts(name);
+        k64_puts("\n");
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     int failures = 0;
     int64_t fd;
@@ -25,31 +35,31 @@ int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
 
-    failures += expect_fail("write bad pointer",
-                            k64_syscall3(K64_SYSCALL_WRITE,
-                                         K64_STDOUT,
-                                         (uint64_t)(uintptr_t)BAD_USER_PTR,
-                                         8));
-    failures += expect_fail("write_file bad buffer",
-                            k64_syscall3(K64_SYSCALL_WRITEFILE,
-                                         (uint64_t)(uintptr_t)"/tmp/secprobe",
-                                         (uint64_t)(uintptr_t)BAD_USER_PTR,
-                                         8));
-    failures += expect_fail("fb_info bad output",
-                            k64_syscall3(K64_SYSCALL_FBINFO,
-                                         (uint64_t)(uintptr_t)BAD_USER_PTR,
-                                         0,
-                                         0));
-    failures += expect_fail("list_dir bad output",
-                            k64_syscall3(K64_SYSCALL_LISTDIR,
-                                         (uint64_t)(uintptr_t)"/",
-                                         (uint64_t)(uintptr_t)BAD_USER_PTR,
-                                         64));
-    failures += expect_fail("proc_info bad output",
-                            k64_syscall3(K64_SYSCALL_PROCINFO,
-                                         0,
-                                         (uint64_t)(uintptr_t)BAD_USER_PTR,
-                                         0));
+    failures += expect_nosys("legacy write",
+                             k64_syscall3(K64_SYSCALL_WRITE,
+                                          K64_STDOUT,
+                                          (uint64_t)(uintptr_t)BAD_USER_PTR,
+                                          8));
+    failures += expect_nosys("legacy write_file",
+                             k64_syscall3(K64_SYSCALL_WRITEFILE,
+                                          (uint64_t)(uintptr_t)"/tmp/secprobe",
+                                          (uint64_t)(uintptr_t)BAD_USER_PTR,
+                                          8));
+    failures += expect_nosys("legacy fb_info",
+                             k64_syscall3(K64_SYSCALL_FBINFO,
+                                          (uint64_t)(uintptr_t)BAD_USER_PTR,
+                                          0,
+                                          0));
+    failures += expect_nosys("legacy list_dir",
+                             k64_syscall3(K64_SYSCALL_LISTDIR,
+                                          (uint64_t)(uintptr_t)"/",
+                                          (uint64_t)(uintptr_t)BAD_USER_PTR,
+                                          64));
+    failures += expect_nosys("legacy proc_info",
+                             k64_syscall3(K64_SYSCALL_PROCINFO,
+                                          0,
+                                          (uint64_t)(uintptr_t)BAD_USER_PTR,
+                                          0));
 
     fd = k64_open("/etc/motd");
     if (fd < 0) {

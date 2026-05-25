@@ -283,34 +283,11 @@ What was added:
 - a small kernel-side user process table for ELF runs
 - `ps` output for user ELF PID, parent PID, state, exit code, runtime ticks, fault metadata, and image path
 
-Current syscall ABI is documented in `docs/abi/syscalls.md`. The active syscall set includes:
+Current syscall ABI is documented in `docs/abi/syscalls.md`. In v0.3.21 the active user/kernel syscall gate is only:
 
-- `0`: `exit(code)`
-- `1`: legacy `write(ptr, len)` plus stdio `write(fd, ptr, len)` for fd `0..2`
-- `2`: `yield()`
-- `3`: `sleep(ticks)`
-- `4`: `open(path)`
-- `5`: `read(fd, buf, len)`
-- `6`: `close(fd)`
-- `7`: `getpid()`
-- `8`: `uptime_ticks()`
-- `9`: `write_file(path, ptr, len)`
-- `10`: `clear_screen()`
-- `11`: `read_key()`
-- `12`: `set_cursor(x, y)`
-- `13`: `term_size()`
-- `14`: `fb_info(ptr)`
-- `15`: `fb_blit(ptr)`
-- `16`: `spawn(path, args)`
-- `17`: `read_key_nonblock()`
-- `18`: `list_dir(path, out, len)`
-- `19`: `move(src, dst)`
-- `20`: `proc_info(pid, out)` where `pid = 0` means the current process
-- `21`: `waitpid(pid, out_exit_code, flags)`
-- `22`: `pipe(out_fds)`
-- `23`: `writefd(fd, ptr, len)` for fd-backed writes beyond stdio
-- `24`: `stat(path, out)`
 - `25`: `service_call(call_ptr)`
+
+The old feature-specific syscall numbers `0..24` are no longer public userland ABI and return `K64_ERR_NOSYS`. The libc function names remain, but they now marshal service-call requests such as `io.write`, `io.open`, `fs.stat`, `proc.wait`, `sched.sleep`, and `term.size`.
 
 This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64FS`, save complete files, use structured key input, move files, list directories, reserve child process identities, query process metadata, collect child exits with wait flags, create anonymous pipes, call service-owned methods, and draw text-mode cell regions. It is not a POSIX-compatible libc and there is no fork/execve ABI, dynamic linker, shared-library loader, socket API, or mature VFS.
 
@@ -320,11 +297,11 @@ The process model now records a stable PID, parent PID, scheduler task ID, state
 
 The file descriptor model is early but real. Each active user process has a small fd table; `0`, `1`, and `2` are stdin/stdout/stderr; `open()` returns fd values `>= 3`; read/close validate descriptors; stdout/stderr writes go through the fd path; `stat()` exposes filesystem metadata to userland; and `pipe()` creates anonymous read/write endpoints backed by fixed kernel ring buffers. File writes are still primarily the whole-file `write_file()` helper.
 
-v0.3.20 adds a service-call ABI beside the existing service command registry. Kernel-side services can register named methods such as `kernel.version`, `kernel.uptime`, `fs.stat`, `fs.list_dir`, `fs.write_file`, `proc.info`, `proc.spawn`, and `proc.wait`. The `service_call` syscall is a thin checked gate: it copies user input into bounded kernel buffers, dispatches through the service registry, and copies bounded responses back through checked user mappings. Existing syscall numbers stay compatible, but `stat`, `list_dir`, `write_file`, `spawn`, `proc_info`, and `waitpid` now route internally through service calls. Ring-3 service registration is not enabled yet; the registry is the foundation for that later migration.
+v0.3.21 makes the service-call ABI the userland ABI beside the existing service command registry. Services can register named methods such as `kernel.version`, `kernel.uptime`, `fs.stat`, `fs.list_dir`, `fs.write_file`, `fs.move`, `io.open`, `io.read`, `io.write`, `io.pipe`, `proc.getpid`, `proc.info`, `proc.spawn`, `proc.wait`, `proc.exit`, `sched.yield`, `sched.sleep`, and terminal methods. The `service_call` syscall is a thin checked gate: it copies user input into bounded kernel buffers, dispatches through the service registry, and copies bounded responses back through checked user mappings. Ring-3 service hosting is still not complete; handlers are kernel-hosted until K64 has a safe message/registration path for untrusted service processes.
 
 Security boundary:
 
-- syscall strings and byte buffers are copied through VMM-checked user-memory helpers instead of being dereferenced as kernel pointers
+- service-call strings and byte buffers are copied through VMM-checked user-memory helpers instead of being dereferenced as kernel pointers
 - kernel-to-user outputs such as `read`, `pipe`, `fb_info`, `proc_info`, and `list_dir` are written back only through checked user mappings
 - large user writes are bounded before the filesystem sees them
 - text framebuffer blits are copied into a bounded kernel staging buffer before drawing
@@ -343,8 +320,8 @@ K64 now has a small native userland build path for C programs. The build system 
 
 The current libc layer is intentionally tiny:
 
-- `_start` calls `main()` and exits through the kernel syscall ABI
-- syscall wrappers for console output, file open/read/write-file, directory listing, file move, key events, cursor control, text cell blitting, process spawning, getpid, pipes, and uptime
+- `_start` calls `main()` and exits through `proc.exit`
+- service-call wrappers for console output, file open/read/write-file, directory listing, file move, key events, cursor control, text cell blitting, process spawning, getpid, pipes, and uptime
 - process wrappers for `proc_info()`, `waitpid()`, and `waitpid_flags()`
 - service-call wrappers for `k64_service_call()` and `k64_service_call_ex()`
 - minimal string, memory, decimal, and hexadecimal print helpers
@@ -411,7 +388,7 @@ The main constants today are:
 - heap size: `0x00100000`
 - stack size: `0x00008000`
 
-So when `servicectl list` shows a “VM BASE”, it now refers to a real isolated service window backed by a private address space. The remaining boundary is that services and ELF-backed drivers still execute in ring 0 and share the low identity-mapped kernel region. Standalone `/ex/*.elf` user programs are the first ring-3 path.
+So when `servicectl list` shows a “VM BASE”, it now refers to a real isolated service window backed by a private address space. The remaining boundary is that most services and ELF-backed drivers still execute in ring 0 and share the low identity-mapped kernel region. v0.3.21 moves the user-facing ABI to service calls, but secure Ring-3 service hosting still needs a message queue, service process registration, and handler dispatch that does not expose kernel function pointers.
 
 ## Driver Model (`.k64m`)
 

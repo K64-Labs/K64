@@ -285,7 +285,7 @@ def main():
             ("cat /etc/keyboard/layout.cfg", "us"),
             ("servicectl list", "PID   STATE"),
             ("calls", "kernel.version"),
-            ("call kernel.version", "0.3.20"),
+        ("call kernel.version", "0.3.21"),
             ("call fs.stat /etc/motd", "file /etc/motd"),
             ("driverctl list", "ID    STATE"),
             ("storagectl list", "size=" if attach_disk else PROMPT_NEEDLE),

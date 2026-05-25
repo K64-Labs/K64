@@ -305,17 +305,63 @@ static int64_t fs_list_dir_call(const k64_service_call_request_t* req) {
 
 static int64_t fs_write_file_call(const k64_service_call_request_t* req) {
     const k64_service_fs_write_file_req_t* write_req;
+    const k64_service_fs_write_file_user_req_t* user_req;
+    const char* packed_path;
+    const uint8_t* packed_data;
 
-    if (!req || !req->in || req->in_len < sizeof(*write_req)) {
+    if (!req || !req->in) {
         return K64_ERR_INVAL;
     }
-    write_req = (const k64_service_fs_write_file_req_t*)req->in;
-    if (!write_req->path[0] || (!write_req->data && write_req->len != 0)) {
+    if (req->caller_flags & K64_SERVICE_CALLER_KERNEL) {
+        if (req->in_len < sizeof(*write_req)) {
+            return K64_ERR_INVAL;
+        }
+        write_req = (const k64_service_fs_write_file_req_t*)req->in;
+        if (!write_req->path[0] || (!write_req->data && write_req->len != 0)) {
+            return K64_ERR_INVAL;
+        }
+        return k64_fs_write_file_raw(write_req->path, write_req->data, write_req->len)
+                   ? K64_OK
+                   : K64_ERR_ACCESS;
+    }
+
+    if (req->in_len < sizeof(*user_req)) {
         return K64_ERR_INVAL;
     }
-    return k64_fs_write_file_raw(write_req->path, write_req->data, write_req->len)
+    user_req = (const k64_service_fs_write_file_user_req_t*)req->in;
+    if (user_req->path_len == 0 || user_req->path_len > 256 ||
+        user_req->data_len > K64_SERVICE_CALL_PAYLOAD_MAX ||
+        sizeof(*user_req) + user_req->path_len + user_req->data_len > req->in_len) {
+        return K64_ERR_INVAL;
+    }
+    packed_path = (const char*)req->in + sizeof(*user_req);
+    if (packed_path[user_req->path_len - 1] != '\0') {
+        return K64_ERR_INVAL;
+    }
+    packed_data = (const uint8_t*)packed_path + user_req->path_len;
+    return k64_fs_write_file_raw(packed_path, packed_data, (size_t)user_req->data_len)
                ? K64_OK
                : K64_ERR_ACCESS;
+}
+
+static int64_t fs_move_call(const k64_service_call_request_t* req) {
+    const char* src;
+    const char* dst;
+    size_t src_len;
+
+    if (!req || !req->in || req->in_len < 4 || req->in_len > 512) {
+        return K64_ERR_INVAL;
+    }
+    src = (const char*)req->in;
+    src_len = k64_strlen(src) + 1;
+    if (src_len <= 1 || src_len >= req->in_len) {
+        return K64_ERR_INVAL;
+    }
+    dst = src + src_len;
+    if (!dst[0] || ((const char*)req->in)[req->in_len - 1] != '\0') {
+        return K64_ERR_INVAL;
+    }
+    return k64_fs_move(src, dst) ? K64_OK : K64_ERR_NOENT;
 }
 
 static void build_rootfs_path(char* dst, size_t dst_size, const char* dir, const char* name) {
@@ -665,6 +711,8 @@ void k64_system_register_core_services(void) {
     k64_service_t* fs_service;
     k64_service_t* proc_service;
     k64_service_t* io_service;
+    k64_service_t* sched_service;
+    k64_service_t* term_service;
 
     kernel_service = k64_system_register_service("kernel",
                                                  "k64/kernel",
@@ -728,6 +776,11 @@ void k64_system_register_core_services(void) {
                                        K64_SERVICE_CALL_FLAG_USER_ALLOWED |
                                        K64_SERVICE_CALL_FLAG_CAN_WRITE_FS,
                                        fs_write_file_call);
+        (void)k64_system_register_call("fs", "move",
+                                       K64_SERVICE_CALL_FLAG_PUBLIC |
+                                       K64_SERVICE_CALL_FLAG_USER_ALLOWED |
+                                       K64_SERVICE_CALL_FLAG_CAN_WRITE_FS,
+                                       fs_move_call);
     }
 
     proc_service = k64_system_register_service("proc",
@@ -762,6 +815,40 @@ void k64_system_register_core_services(void) {
         io_service->state = K64_SERVICE_STATE_RUNNING;
         io_service->start_count = 1;
         io_service->vm_space.present = true;
+    }
+
+    sched_service = k64_system_register_service("sched",
+                                                "k64/sched",
+                                                K64_SERVICE_CLASS_KERNEL,
+                                                K64_SERVICE_FLAG_ESSENTIAL,
+                                                0,
+                                                0,
+                                                false,
+                                                default_start,
+                                                default_stop,
+                                                NULL,
+                                                NULL);
+    if (sched_service) {
+        sched_service->state = K64_SERVICE_STATE_RUNNING;
+        sched_service->start_count = 1;
+        sched_service->vm_space.present = true;
+    }
+
+    term_service = k64_system_register_service("term",
+                                               "k64/term",
+                                               K64_SERVICE_CLASS_KERNEL,
+                                               K64_SERVICE_FLAG_ESSENTIAL,
+                                               0,
+                                               0,
+                                               false,
+                                               default_start,
+                                               default_stop,
+                                               NULL,
+                                               NULL);
+    if (term_service) {
+        term_service->state = K64_SERVICE_STATE_RUNNING;
+        term_service->start_count = 1;
+        term_service->vm_space.present = true;
     }
 
     {

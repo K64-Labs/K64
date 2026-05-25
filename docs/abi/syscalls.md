@@ -40,32 +40,9 @@ Normal exits currently transition to `ZOMBIE`; faulted user programs transition 
 
 | Nr | Name | Arguments | Return |
 | ---: | --- | --- | --- |
-| `0` | `exit` | `code` | does not return to user |
-| `1` | `write` | legacy `ptr,len` or stdio `fd,ptr,len` for fd 0-2 | bytes written or error |
-| `2` | `yield` | none | `0` |
-| `3` | `sleep` | `ticks` | `0` |
-| `4` | `open` | `path` | fd `>= 3` or error |
-| `5` | `read` | `fd, buf, len` | bytes read, `0` EOF, or error |
-| `6` | `close` | `fd` | `0` or error |
-| `7` | `getpid` | none | current PID or error |
-| `8` | `uptime_ticks` | none | PIT ticks |
-| `9` | `write_file` | `path, ptr, len` | `0` or error |
-| `10` | `clear_screen` | none | `0` |
-| `11` | `read_key` | none | packed key event |
-| `12` | `set_cursor` | `x, y` | `0` |
-| `13` | `term_size` | none | packed cols/rows |
-| `14` | `fb_info` | `out` | `0` or error |
-| `15` | `fb_blit` | `request` | cells drawn or error |
-| `16` | `spawn` | `path, args` | child PID or error |
-| `17` | `read_key_nonblock` | none | packed key event or `0` |
-| `18` | `list_dir` | `path, out, len` | `0` or error |
-| `19` | `move` | `src, dst` | `0` or error |
-| `20` | `proc_info` | `pid, out` | `0` or error |
-| `21` | `waitpid` | `pid, out_exit_code, flags` | `0` or error |
-| `22` | `pipe` | `out_fds` | `0` or error |
-| `23` | `writefd` | `fd, ptr, len` | bytes written or error |
-| `24` | `stat` | `path, out` | `0` or error |
-| `25` | `service_call` | `call_ptr` | `0` or error |
+| `25` | `service_call` | `call_ptr` | service return value or error |
+
+v0.3.21 makes `service_call` the only supported user/kernel syscall gate. Former feature-specific syscall numbers `0` through `24` are no longer public ABI and return `K64_ERR_NOSYS` from Ring 3. Userland termination is now `proc.exit` through `service_call`.
 
 ## Notes
 
@@ -81,7 +58,7 @@ Normal exits currently transition to `ZOMBIE`; faulted user programs transition 
 - `stat(path, out)` returns type, size, flags, mode, created tick, modified tick, and generation fields through the userland `k64_stat_t` structure.
 - The ELF loader keeps a small nested execution context stack so a parent `/ex` program can safely run a child during blocking wait without clobbering the parent's loader or syscall-stack state.
 - `service_call(call_ptr)` reads a `k64_service_call_user_t` through checked user memory, copies service and method names, bounds request/response payloads to 65536 bytes, dispatches through the service-call registry, and copies the response back through checked user memory.
-- Selected compatibility syscalls are service-backed internally in v0.3.20: `stat` routes through `fs.stat`, `list_dir` through `fs.list_dir`, `write_file` through `fs.write_file`, `spawn` through `proc.spawn`, `proc_info` through `proc.info`, and `waitpid` through `proc.wait`.
+- The libc wrappers for process, scheduler, FD, pipe, filesystem, terminal, and text-framebuffer operations use service methods rather than old syscall numbers.
 
 ## `k64_service_call_user_t`
 

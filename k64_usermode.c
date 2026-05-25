@@ -960,6 +960,349 @@ static int64_t read_key_event_nonblocking(void) {
     return 0;
 }
 
+static int64_t proc_exit_service_call(const k64_service_call_request_t* req) {
+    const k64_service_proc_exit_req_t* in;
+
+    if (!req || !req->in || req->in_len < sizeof(*in)) {
+        return K64_ERR_INVAL;
+    }
+    in = (const k64_service_proc_exit_req_t*)req->in;
+    active_ctx.result = in->code;
+    active_ctx.active = 0;
+    process_finish(active_ctx.process_index, K64_USER_PROCESS_ZOMBIE, active_ctx.result);
+    return K64_OK;
+}
+
+static int64_t proc_getpid_service_call(const k64_service_call_request_t* req) {
+    int64_t pid;
+
+    if (!req || !req->out || req->out_len < sizeof(pid)) {
+        return K64_ERR_INVAL;
+    }
+    if (active_ctx.process_index < 0 ||
+        active_ctx.process_index >= K64_USER_PROCESS_MAX ||
+        !process_table[active_ctx.process_index].used) {
+        return K64_ERR_NOENT;
+    }
+    pid = (int64_t)process_table[active_ctx.process_index].pid;
+    memcpy(req->out, &pid, sizeof(pid));
+    ((k64_service_call_request_t*)req)->actual_out_len = sizeof(pid);
+    return K64_OK;
+}
+
+static int64_t sched_yield_service_call(const k64_service_call_request_t* req) {
+    (void)req;
+    k64_sched_yield();
+    usermode_yield_once();
+    return K64_OK;
+}
+
+static int64_t sched_sleep_service_call(const k64_service_call_request_t* req) {
+    const k64_service_sched_sleep_req_t* in;
+
+    if (!req || !req->in || req->in_len < sizeof(*in)) {
+        return K64_ERR_INVAL;
+    }
+    in = (const k64_service_sched_sleep_req_t*)req->in;
+    k64_sched_sleep(in->ticks);
+    usermode_park_until_current_ready();
+    return K64_OK;
+}
+
+static int64_t io_write_service_call(const k64_service_call_request_t* req) {
+    const k64_service_io_write_req_t* in;
+    const uint8_t* bytes;
+    k64_user_fd_t* fd;
+    int64_t result;
+    size_t count;
+
+    if (!req || !req->in || req->in_len < sizeof(*in) || !req->out ||
+        req->out_len < sizeof(result)) {
+        return K64_ERR_INVAL;
+    }
+    in = (const k64_service_io_write_req_t*)req->in;
+    if (sizeof(*in) + in->len > req->in_len) {
+        return K64_ERR_INVAL;
+    }
+    bytes = (const uint8_t*)req->in + sizeof(*in);
+    if (in->fd == 1 || in->fd == 2) {
+        write_text((const char*)bytes, (size_t)in->len);
+        result = (int64_t)in->len;
+    } else {
+        fd = get_fd((uint64_t)in->fd);
+        if (!fd) {
+            result = K64_ERR_BADFD;
+        } else if (fd->kind == K64_USER_FD_PIPE_WRITE) {
+            if (fd->pipe_index < 0 || fd->pipe_index >= K64_USER_PIPE_MAX ||
+                !pipe_table[fd->pipe_index].used) {
+                result = K64_ERR_PIPE;
+            } else {
+                k64_user_pipe_t* pipe = &pipe_table[fd->pipe_index];
+                if (pipe->read_refs == 0) {
+                    result = K64_ERR_PIPE;
+                } else if (pipe->size == K64_USER_PIPE_BUFFER_SIZE) {
+                    result = K64_ERR_AGAIN;
+                } else {
+                    count = in->len < (K64_USER_PIPE_BUFFER_SIZE - pipe->size)
+                                ? (size_t)in->len
+                                : (K64_USER_PIPE_BUFFER_SIZE - pipe->size);
+                    for (size_t i = 0; i < count; ++i) {
+                        pipe->data[pipe->write_pos] = bytes[i];
+                        pipe->write_pos = (pipe->write_pos + 1) % K64_USER_PIPE_BUFFER_SIZE;
+                    }
+                    pipe->size += count;
+                    result = (int64_t)count;
+                }
+            }
+        } else {
+            result = K64_ERR_BADFD;
+        }
+    }
+    memcpy(req->out, &result, sizeof(result));
+    ((k64_service_call_request_t*)req)->actual_out_len = sizeof(result);
+    return K64_OK;
+}
+
+static int64_t io_open_service_call(const k64_service_call_request_t* req) {
+    const uint8_t* data = NULL;
+    const char* path;
+    size_t size = 0;
+    int64_t fd;
+
+    if (!req || !req->in || req->in_len == 0 || req->in_len > 256 || !req->out ||
+        req->out_len < sizeof(fd)) {
+        return K64_ERR_INVAL;
+    }
+    path = (const char*)req->in;
+    if (!path[0] || path[req->in_len - 1] != '\0') {
+        return K64_ERR_INVAL;
+    }
+    if (!k64_fs_read_file_raw(path, &data, &size)) {
+        fd = K64_ERR_NOENT;
+    } else {
+        int raw_fd = alloc_fd_file(data, size);
+        fd = raw_fd >= 0 ? raw_fd : K64_ERR_FULL;
+    }
+    memcpy(req->out, &fd, sizeof(fd));
+    ((k64_service_call_request_t*)req)->actual_out_len = sizeof(fd);
+    return K64_OK;
+}
+
+static int64_t io_read_service_call(const k64_service_call_request_t* req) {
+    const k64_service_io_read_req_t* in;
+    uint8_t* out_bytes;
+    k64_user_fd_t* desc;
+    size_t count;
+    size_t remaining;
+
+    if (!req || !req->in || req->in_len < sizeof(*in) || !req->out ||
+        req->out_len == 0) {
+        return K64_ERR_INVAL;
+    }
+    in = (const k64_service_io_read_req_t*)req->in;
+    out_bytes = (uint8_t*)req->out;
+    if (req->out_len < in->len) {
+        return K64_ERR_INVAL;
+    }
+    if (in->fd == 0) {
+        count = in->len ? 1 : 0;
+        if (count) {
+            out_bytes[0] = (uint8_t)read_stdin_char_blocking();
+        }
+        while (count < in->len) {
+            char ch;
+            if (k64_serial_get_char(&ch) || k64_keyboard_get_char(&ch)) {
+                out_bytes[count++] = (uint8_t)ch;
+            } else {
+                break;
+            }
+        }
+        ((k64_service_call_request_t*)req)->actual_out_len = count;
+        return (int64_t)count;
+    } else {
+        desc = get_fd((uint64_t)in->fd);
+        if (!desc) {
+            return K64_ERR_BADFD;
+        } else if (desc->kind == K64_USER_FD_PIPE_READ) {
+            if (desc->pipe_index < 0 || desc->pipe_index >= K64_USER_PIPE_MAX ||
+                !pipe_table[desc->pipe_index].used) {
+                return K64_ERR_PIPE;
+            } else {
+                k64_user_pipe_t* pipe = &pipe_table[desc->pipe_index];
+                if (pipe->size == 0) {
+                    if (pipe->write_refs == 0) {
+                        ((k64_service_call_request_t*)req)->actual_out_len = 0;
+                        return 0;
+                    }
+                    return K64_ERR_AGAIN;
+                }
+                count = in->len < pipe->size ? (size_t)in->len : pipe->size;
+                for (size_t i = 0; i < count; ++i) {
+                    out_bytes[i] = pipe->data[pipe->read_pos];
+                    pipe->read_pos = (pipe->read_pos + 1) % K64_USER_PIPE_BUFFER_SIZE;
+                }
+                pipe->size -= count;
+                ((k64_service_call_request_t*)req)->actual_out_len = count;
+                return (int64_t)count;
+            }
+        } else if (desc->kind == K64_USER_FD_FILE) {
+            remaining = desc->size - desc->offset;
+            count = in->len < remaining ? (size_t)in->len : remaining;
+            memcpy(out_bytes, desc->data + desc->offset, count);
+            desc->offset += count;
+            ((k64_service_call_request_t*)req)->actual_out_len = count;
+            return (int64_t)count;
+        } else {
+            return K64_ERR_BADFD;
+        }
+    }
+    return K64_ERR_BADFD;
+}
+
+static int64_t io_close_service_call(const k64_service_call_request_t* req) {
+    const k64_service_io_fd_req_t* in;
+    k64_user_fd_t* desc;
+
+    if (!req || !req->in || req->in_len < sizeof(*in)) {
+        return K64_ERR_INVAL;
+    }
+    in = (const k64_service_io_fd_req_t*)req->in;
+    if (in->fd < 3) {
+        return K64_ERR_BADFD;
+    }
+    desc = get_fd((uint64_t)in->fd);
+    if (!desc) {
+        return K64_ERR_BADFD;
+    }
+    if (desc->kind == K64_USER_FD_PIPE_READ || desc->kind == K64_USER_FD_PIPE_WRITE) {
+        pipe_drop_ref(desc->pipe_index, desc->kind);
+    }
+    fd_clear(desc);
+    return K64_OK;
+}
+
+static int64_t io_pipe_service_call(const k64_service_call_request_t* req) {
+    k64_service_io_pipe_resp_t resp;
+    int pipe_index;
+    int read_fd;
+    int write_fd;
+
+    if (!req || !req->out || req->out_len < sizeof(resp)) {
+        return K64_ERR_INVAL;
+    }
+    pipe_index = pipe_alloc();
+    if (pipe_index < 0) {
+        return K64_ERR_FULL;
+    }
+    read_fd = alloc_fd_pipe(pipe_index, K64_USER_FD_PIPE_READ);
+    write_fd = alloc_fd_pipe(pipe_index, K64_USER_FD_PIPE_WRITE);
+    if (read_fd < 0 || write_fd < 0) {
+        pipe_table[pipe_index].used = false;
+        return K64_ERR_FULL;
+    }
+    resp.fds[0] = read_fd;
+    resp.fds[1] = write_fd;
+    memcpy(req->out, &resp, sizeof(resp));
+    ((k64_service_call_request_t*)req)->actual_out_len = sizeof(resp);
+    return K64_OK;
+}
+
+static int64_t term_clear_service_call(const k64_service_call_request_t* req) {
+    (void)req;
+    k64_term_clear();
+    return K64_OK;
+}
+
+static int64_t term_read_key_service_call(const k64_service_call_request_t* req) {
+    int64_t key;
+    if (!req || !req->out || req->out_len < sizeof(key)) {
+        return K64_ERR_INVAL;
+    }
+    key = (int64_t)read_key_event_blocking();
+    memcpy(req->out, &key, sizeof(key));
+    ((k64_service_call_request_t*)req)->actual_out_len = sizeof(key);
+    return K64_OK;
+}
+
+static int64_t term_read_key_nonblock_service_call(const k64_service_call_request_t* req) {
+    int64_t key;
+    if (!req || !req->out || req->out_len < sizeof(key)) {
+        return K64_ERR_INVAL;
+    }
+    key = read_key_event_nonblocking();
+    memcpy(req->out, &key, sizeof(key));
+    ((k64_service_call_request_t*)req)->actual_out_len = sizeof(key);
+    return K64_OK;
+}
+
+static int64_t term_cursor_service_call(const k64_service_call_request_t* req) {
+    const k64_service_term_cursor_req_t* in;
+    if (!req || !req->in || req->in_len < sizeof(*in)) {
+        return K64_ERR_INVAL;
+    }
+    in = (const k64_service_term_cursor_req_t*)req->in;
+    k64_term_set_cursor(in->x, in->y);
+    return K64_OK;
+}
+
+static int64_t term_size_service_call(const k64_service_call_request_t* req) {
+    k64_service_term_size_resp_t resp;
+    if (!req || !req->out || req->out_len < sizeof(resp)) {
+        return K64_ERR_INVAL;
+    }
+    resp.cols = k64_term_cols();
+    resp.rows = k64_term_rows();
+    memcpy(req->out, &resp, sizeof(resp));
+    ((k64_service_call_request_t*)req)->actual_out_len = sizeof(resp);
+    return K64_OK;
+}
+
+static int64_t term_fb_info_service_call(const k64_service_call_request_t* req) {
+    k64_user_fb_info_t info;
+
+    if (!req || !req->out || req->out_len < sizeof(info)) {
+        return K64_ERR_INVAL;
+    }
+    info.width = (uint32_t)k64_term_cols();
+    info.height = (uint32_t)k64_term_rows();
+    info.pitch = (uint32_t)k64_term_cols();
+    info.format = 1;
+    info.cell_size = sizeof(uint16_t);
+    info.flags = 1;
+    memcpy(req->out, &info, sizeof(info));
+    ((k64_service_call_request_t*)req)->actual_out_len = sizeof(info);
+    return K64_OK;
+}
+
+static int64_t term_fb_blit_service_call(const k64_service_call_request_t* req) {
+    const k64_user_fb_blit_t* in;
+    const uint16_t* cells;
+    uint64_t max_cells;
+
+    if (!req || !req->in || req->in_len < sizeof(*in)) {
+        return K64_ERR_INVAL;
+    }
+    in = (const k64_user_fb_blit_t*)req->in;
+    if (in->width == 0 || in->height == 0) {
+        return K64_ERR_INVAL;
+    }
+    max_cells = (uint64_t)in->width * (uint64_t)in->height;
+    if (in->width > 512 || in->height > 512 ||
+        max_cells == 0 || max_cells > K64_USER_FBBLIT_CELLS_MAX ||
+        in->count < max_cells ||
+        req->in_len < sizeof(*in) + max_cells * sizeof(uint16_t)) {
+        return K64_ERR_INVAL;
+    }
+    cells = (const uint16_t*)((const uint8_t*)req->in + sizeof(*in));
+    k64_term_blit_cells(in->x,
+                        in->y,
+                        (int)in->width,
+                        (int)in->height,
+                        cells,
+                        (size_t)max_cells);
+    return (int64_t)max_cells;
+}
+
 static int64_t syscall_service_call(uint64_t user_call_ptr) {
     k64_service_call_user_t user_call;
     char service[K64_SERVICE_CALL_OWNER_MAX];
@@ -1011,20 +1354,26 @@ static int64_t syscall_service_call(uint64_t user_call_ptr) {
                                   &actual,
                                   current_process_pid(),
                                   0);
-    if (rc == K64_OK && actual > user_call.response_len) {
+    if (rc >= 0 && actual > user_call.response_len) {
         rc = K64_ERR_OVERFLOW;
     }
-    if (rc == K64_OK && user_call.response_len && actual &&
+    if (rc >= 0 && user_call.response_len && actual &&
         !user_write((uint64_t)(uintptr_t)user_call.response, out_buf, actual)) {
         rc = K64_ERR_FAULT;
     }
     service_call_depth--;
+    if (rc == K64_OK && k64_streq(service, "proc") && k64_streq(method, "exit")) {
+        k64_user_return_asm(&active_ctx, active_ctx.result);
+    }
     return rc;
 }
 
 int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
     if (!frame || !active_ctx.active) {
         return K64_ERR_INVAL;
+    }
+    if (frame->rax != K64_SYSCALL_SERVICE_CALL) {
+        return K64_ERR_NOSYS;
     }
 
     switch (frame->rax) {
@@ -1441,6 +1790,16 @@ void k64_usermode_init(void) {
 
 void k64_usermode_register_service_calls(void) {
     (void)k64_system_register_call("proc",
+                                   "exit",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   proc_exit_service_call);
+    (void)k64_system_register_call("proc",
+                                   "getpid",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   proc_getpid_service_call);
+    (void)k64_system_register_call("proc",
                                    "info",
                                    K64_SERVICE_CALL_FLAG_PUBLIC |
                                    K64_SERVICE_CALL_FLAG_USER_ALLOWED,
@@ -1456,6 +1815,76 @@ void k64_usermode_register_service_calls(void) {
                                    K64_SERVICE_CALL_FLAG_PUBLIC |
                                    K64_SERVICE_CALL_FLAG_USER_ALLOWED,
                                    proc_wait_service_call);
+    (void)k64_system_register_call("sched",
+                                   "yield",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   sched_yield_service_call);
+    (void)k64_system_register_call("sched",
+                                   "sleep",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   sched_sleep_service_call);
+    (void)k64_system_register_call("io",
+                                   "write",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   io_write_service_call);
+    (void)k64_system_register_call("io",
+                                   "open",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   io_open_service_call);
+    (void)k64_system_register_call("io",
+                                   "read",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   io_read_service_call);
+    (void)k64_system_register_call("io",
+                                   "close",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   io_close_service_call);
+    (void)k64_system_register_call("io",
+                                   "pipe",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   io_pipe_service_call);
+    (void)k64_system_register_call("term",
+                                   "clear",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   term_clear_service_call);
+    (void)k64_system_register_call("term",
+                                   "read_key",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   term_read_key_service_call);
+    (void)k64_system_register_call("term",
+                                   "read_key_nonblock",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   term_read_key_nonblock_service_call);
+    (void)k64_system_register_call("term",
+                                   "set_cursor",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   term_cursor_service_call);
+    (void)k64_system_register_call("term",
+                                   "size",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   term_size_service_call);
+    (void)k64_system_register_call("term",
+                                   "fb_info",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   term_fb_info_service_call);
+    (void)k64_system_register_call("term",
+                                   "fb_blit",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   term_fb_blit_service_call);
 }
 
 int64_t k64_usermode_execute_named(const k64_vm_space_t* space,
