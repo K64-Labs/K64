@@ -179,6 +179,36 @@ static bool fs_mount_device(k64_block_device_t* dev, const char* name, bool pers
     return true;
 }
 
+static bool fs_copy_root_to_device(k64_block_device_t* dst) {
+    uint64_t src_lba = 0;
+    uint32_t chunk_blocks = (uint32_t)(sizeof(fs_range_buffer) / K64_ROOTFS_BLOCK_SIZE);
+
+    if (!rootfs.mounted || !rootfs.dev || !dst || !dst->writable ||
+        rootfs.dev->block_size != K64_ROOTFS_BLOCK_SIZE ||
+        dst->block_size != K64_ROOTFS_BLOCK_SIZE ||
+        rootfs.dev->block_count == 0 ||
+        rootfs.dev->block_count > dst->block_count ||
+        chunk_blocks == 0) {
+        return false;
+    }
+
+    if (!k64_xfs_sync(&rootfs)) {
+        return false;
+    }
+
+    while (src_lba < rootfs.dev->block_count) {
+        uint64_t remaining = rootfs.dev->block_count - src_lba;
+        uint32_t count = remaining > chunk_blocks ? chunk_blocks : (uint32_t)remaining;
+
+        if (!k64_block_read(rootfs.dev, src_lba, count, fs_range_buffer) ||
+            !k64_block_write(dst, src_lba, count, fs_range_buffer)) {
+            return false;
+        }
+        src_lba += count;
+    }
+    return true;
+}
+
 static bool fs_mount_from_blocks(void) {
     for (size_t i = 0; i < k64_block_device_count(); ++i) {
         k64_block_device_t* dev = k64_block_device_at(i);
@@ -640,7 +670,7 @@ bool k64_fs_install_to_block_device(const char* device_name) {
     part.start_lba = K64_ROOTFS_PARTITION_LBA;
     part.block_count = dev->block_count - K64_ROOTFS_PARTITION_LBA;
     part.is_partition = true;
-    return k64_xfs_format(&part, "K64ROOT");
+    return fs_copy_root_to_device(&part);
 }
 
 bool k64_fs_grow_root(void) {

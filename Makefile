@@ -214,6 +214,8 @@ $(K64_GRUB_BOOTSTRAP_CFG): $(K64_GRUB_K64XFS_MOD) $(K64_KERNEL_ELF) Makefile
 	echo 'set timeout=5' > $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'set default=0' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'set timeout_style=menu' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo 'set menu_color_normal=light-cyan/black' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo 'set menu_color_highlight=white/blue' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'set gfxpayload=text' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'terminal_input console' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'terminal_output console' >> $(K64_GRUB_BOOTSTRAP_CFG)
@@ -250,6 +252,8 @@ $(K64_GRUB_ISO_CFG): $(K64_KERNEL_ELF) Makefile
 	echo 'set timeout=5' > $(K64_GRUB_ISO_CFG)
 	echo 'set default=0' >> $(K64_GRUB_ISO_CFG)
 	echo 'set timeout_style=menu' >> $(K64_GRUB_ISO_CFG)
+	echo 'set menu_color_normal=light-cyan/black' >> $(K64_GRUB_ISO_CFG)
+	echo 'set menu_color_highlight=white/blue' >> $(K64_GRUB_ISO_CFG)
 	echo 'set gfxpayload=text' >> $(K64_GRUB_ISO_CFG)
 	echo 'terminal_input console' >> $(K64_GRUB_ISO_CFG)
 	echo 'terminal_output console' >> $(K64_GRUB_ISO_CFG)
@@ -328,6 +332,7 @@ test: k64.iso
 	bash tests/check_grub_cfg.sh
 	bash tests/boot_smoke_test.sh
 	bash tests/disk_boot_smoke_test.sh
+	$(PYTHON) tests/install_boot_smoke.py
 	$(PYTHON) tests/shell_smoke.py
 	K64_SMOKE_ATTACH_DISK=0 $(PYTHON) tests/shell_smoke.py
 	K64_SMOKE_NET_DEVICE=e1000 $(PYTHON) tests/shell_smoke.py

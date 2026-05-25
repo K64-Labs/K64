@@ -32,6 +32,8 @@ void k64_term_write(const char* s);
 void k64_term_write_hex(uint64_t v);
 void k64_term_write_dec(uint64_t v);
 void k64_term_draw_boot_screen(void);
+void k64_term_boot_status(const char* label, bool done);
+void k64_term_draw_shell_screen(bool installer_mode);
 void k64_term_set_cursor(int x, int y);
 int  k64_term_get_cursor_x(void);
 int  k64_term_get_cursor_y(void);

@@ -4,6 +4,7 @@
 #include "k64_config.h"
 #include "k64_fs.h"
 #include "k64_hotreload.h"
+#include "k64_keyboard.h"
 #include "k64_kpm.h"
 #include "k64_modules.h"
 #include "k64_net.h"
@@ -12,6 +13,8 @@
 #include "k64_reload.h"
 #include "k64_e1000.h"
 #include "k64_rtl8139.h"
+#include "k64_sched.h"
+#include "k64_serial.h"
 #include "k64_shell.h"
 #include "k64_string.h"
 #include "k64_system.h"
@@ -108,6 +111,7 @@ static void storagectl_usage(void) {
     svc_print_line("       storagectl partitions <device>");
     svc_print_line("       storagectl partition <device> k64 yes");
     svc_print_line("       install");
+    svc_print_line("       install wizard");
     svc_print_line("       install user <name> <password> [sudo]");
     svc_print_line("       install <device> yes");
 }
@@ -957,6 +961,425 @@ static void fsctl_apply_new_owner(const char* path) {
     (void)k64_fs_chown(path, k64_user_effective_uid(), k64_user_effective_gid());
 }
 
+typedef struct {
+    char name[32];
+    uint64_t bytes;
+} k64_installer_disk_t;
+
+typedef struct {
+    int step;
+    int focus;
+    int disk_index;
+    int disk_count;
+    bool sudoer;
+    bool confirm;
+    bool quit;
+    bool installed;
+    char username[32];
+    char password[48];
+    char message[96];
+    k64_installer_disk_t disks[8];
+} k64_installer_wizard_t;
+
+static uint8_t installer_color(k64_color_t fg, k64_color_t bg) {
+    return ((uint8_t)bg << 4) | ((uint8_t)fg & 0x0F);
+}
+
+static int installer_strlen(const char* s) {
+    int n = 0;
+    while (s && s[n]) {
+        n++;
+    }
+    return n;
+}
+
+static void installer_text_at(int x, int y, const char* text, uint8_t color) {
+    int i = 0;
+    while (text && text[i] && x + i < k64_term_cols()) {
+        k64_term_write_cell(x + i, y, text[i], color);
+        i++;
+    }
+}
+
+static void installer_center(int y, const char* text, uint8_t color) {
+    installer_text_at((k64_term_cols() - installer_strlen(text)) / 2, y, text, color);
+}
+
+static void installer_fill(uint8_t color) {
+    for (int y = 0; y < k64_term_rows(); ++y) {
+        for (int x = 0; x < k64_term_cols(); ++x) {
+            k64_term_write_cell(x, y, ' ', color);
+        }
+    }
+}
+
+static void installer_box(int x, int y, int w, int h, uint8_t border, uint8_t fill) {
+    for (int row = 0; row < h; ++row) {
+        for (int col = 0; col < w; ++col) {
+            bool edge = row == 0 || row == h - 1 || col == 0 || col == w - 1;
+            char ch = ' ';
+            uint8_t color = fill;
+            if (edge) {
+                color = border;
+                ch = (row == 0 || row == h - 1) ? '-' : '|';
+                if ((row == 0 || row == h - 1) && (col == 0 || col == w - 1)) {
+                    ch = '+';
+                }
+            }
+            k64_term_write_cell(x + col, y + row, ch, color);
+        }
+    }
+}
+
+static void installer_copy(char* dst, int dst_size, const char* src) {
+    int i = 0;
+    if (!dst || dst_size <= 0) {
+        return;
+    }
+    while (src && src[i] && i + 1 < dst_size) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+static void installer_append_char(char* dst, int dst_size, char ch) {
+    int len = installer_strlen(dst);
+    if (len + 1 >= dst_size || ch < 32 || ch > 126) {
+        return;
+    }
+    dst[len] = ch;
+    dst[len + 1] = '\0';
+}
+
+static void installer_backspace(char* dst) {
+    int len = installer_strlen(dst);
+    if (len > 0) {
+        dst[len - 1] = '\0';
+    }
+}
+
+static void installer_button(int x, int y, const char* label, bool selected) {
+    uint8_t color = selected ? installer_color(K64_COLOR_WHITE, K64_COLOR_GREEN)
+                             : installer_color(K64_COLOR_WHITE, K64_COLOR_BLUE);
+    installer_text_at(x, y, "[ ", color);
+    installer_text_at(x + 2, y, label, color);
+    installer_text_at(x + 2 + installer_strlen(label), y, " ]", color);
+}
+
+static void installer_field(int x, int y, const char* label, const char* value, bool secret, bool selected) {
+    uint8_t label_color = installer_color(K64_COLOR_LIGHT_CYAN, K64_COLOR_BLUE);
+    uint8_t field_color = selected ? installer_color(K64_COLOR_BLACK, K64_COLOR_WHITE)
+                                   : installer_color(K64_COLOR_WHITE, K64_COLOR_BLACK);
+    char masked[48];
+    int len = installer_strlen(value);
+
+    installer_text_at(x, y, label, label_color);
+    for (int i = 0; i < 28; ++i) {
+        k64_term_write_cell(x + 16 + i, y, ' ', field_color);
+    }
+    if (secret) {
+        for (int i = 0; i < len && i + 1 < (int)sizeof(masked); ++i) {
+            masked[i] = '*';
+            masked[i + 1] = '\0';
+        }
+        if (len == 0) {
+            masked[0] = '\0';
+        }
+        installer_text_at(x + 17, y, masked, field_color);
+    } else {
+        installer_text_at(x + 17, y, value ? value : "", field_color);
+    }
+}
+
+static void installer_size_text(uint64_t bytes, char* out, int out_size) {
+    uint64_t whole = bytes;
+    const char* unit = "B";
+    char rev[24];
+    int r = 0;
+    int pos = 0;
+
+    if (bytes >= 1024ULL * 1024ULL * 1024ULL) {
+        whole = bytes / (1024ULL * 1024ULL * 1024ULL);
+        unit = "GiB";
+    } else if (bytes >= 1024ULL * 1024ULL) {
+        whole = bytes / (1024ULL * 1024ULL);
+        unit = "MiB";
+    } else if (bytes >= 1024ULL) {
+        whole = bytes / 1024ULL;
+        unit = "KiB";
+    }
+    if (whole == 0) {
+        rev[r++] = '0';
+    }
+    while (whole && r < (int)sizeof(rev)) {
+        rev[r++] = (char)('0' + (whole % 10));
+        whole /= 10;
+    }
+    while (r > 0 && pos + 1 < out_size) {
+        out[pos++] = rev[--r];
+    }
+    if (pos + 1 < out_size) {
+        out[pos++] = ' ';
+    }
+    for (int i = 0; unit[i] && pos + 1 < out_size; ++i) {
+        out[pos++] = unit[i];
+    }
+    if (out_size > 0) {
+        out[pos] = '\0';
+    }
+}
+
+static void installer_refresh_disks(k64_installer_wizard_t* w) {
+    w->disk_count = 0;
+    for (size_t i = 0; i < k64_block_device_count() && w->disk_count < 8; ++i) {
+        k64_block_device_t* dev = k64_block_device_at(i);
+        if (!dev || dev->is_partition || !dev->online || !dev->writable) {
+            continue;
+        }
+        installer_copy(w->disks[w->disk_count].name, sizeof(w->disks[w->disk_count].name), dev->name);
+        w->disks[w->disk_count].bytes = dev->block_count * (uint64_t)dev->block_size;
+        w->disk_count++;
+    }
+    if (w->disk_index >= w->disk_count) {
+        w->disk_index = w->disk_count > 0 ? w->disk_count - 1 : 0;
+    }
+}
+
+static void installer_draw(const k64_installer_wizard_t* w) {
+    uint8_t bg = installer_color(K64_COLOR_BLUE, K64_COLOR_BLACK);
+    uint8_t panel = installer_color(K64_COLOR_BLACK, K64_COLOR_WHITE);
+    uint8_t border = installer_color(K64_COLOR_WHITE, K64_COLOR_BLUE);
+    uint8_t title = installer_color(K64_COLOR_WHITE, K64_COLOR_BLUE);
+    uint8_t text = installer_color(K64_COLOR_BLACK, K64_COLOR_WHITE);
+    uint8_t muted = installer_color(K64_COLOR_DARK_GREY, K64_COLOR_WHITE);
+    uint8_t selected = installer_color(K64_COLOR_WHITE, K64_COLOR_GREEN);
+    char size[24];
+
+    installer_fill(bg);
+    installer_box(4, 2, 72, 20, border, panel);
+    installer_center(3, "K64 Installer", title);
+    installer_text_at(8, 5, "Use arrow keys or Tab. Enter selects. Esc cancels.", muted);
+    installer_text_at(9, 7, w->step == 0 ? "[1] Disk" : " 1  Disk", w->step == 0 ? selected : muted);
+    installer_text_at(24, 7, w->step == 1 ? "[2] User" : " 2  User", w->step == 1 ? selected : muted);
+    installer_text_at(39, 7, w->step == 2 ? "[3] Install" : " 3  Install", w->step == 2 ? selected : muted);
+
+    if (w->step == 0) {
+        installer_text_at(10, 9, "Choose the disk that will become bootable K64:", text);
+        if (w->disk_count == 0) {
+            installer_text_at(12, 12, "No writable disk was detected.", installer_color(K64_COLOR_RED, K64_COLOR_WHITE));
+        }
+        for (int i = 0; i < w->disk_count; ++i) {
+            uint8_t row_color = (i == w->disk_index && w->focus == 0) ? selected : text;
+            installer_size_text(w->disks[i].bytes, size, sizeof(size));
+            installer_text_at(12, 11 + i, i == w->disk_index ? "(*) " : "( ) ", row_color);
+            installer_text_at(16, 11 + i, w->disks[i].name, row_color);
+            installer_text_at(28, 11 + i, size, row_color);
+        }
+        installer_button(49, 19, "Next", w->focus == 1);
+    } else if (w->step == 1) {
+        installer_text_at(10, 9, "Create the first installed-system account:", text);
+        installer_field(13, 11, "Username", w->username, false, w->focus == 0);
+        installer_field(13, 13, "Password", w->password, true, w->focus == 1);
+        installer_text_at(13, 15, w->sudoer ? "[x] Add to sudo group" : "[ ] Add to sudo group", w->focus == 2 ? selected : text);
+        installer_button(13, 19, "Back", w->focus == 3);
+        installer_button(49, 19, "Next", w->focus == 4);
+    } else {
+        installer_text_at(10, 9, "Ready to write a bootable K64XFS system disk.", text);
+        installer_text_at(13, 11, "Target disk:", muted);
+        installer_text_at(28, 11, w->disk_count ? w->disks[w->disk_index].name : "(none)", text);
+        installer_text_at(13, 12, "New user:", muted);
+        installer_text_at(28, 12, w->username[0] ? w->username : "(skip)", text);
+        installer_text_at(13, 14, "This overwrites the target disk boot area and root partition.", installer_color(K64_COLOR_RED, K64_COLOR_WHITE));
+        installer_text_at(13, 16, w->confirm ? "[x] I understand and want to install" : "[ ] I understand and want to install",
+                          w->focus == 0 ? selected : text);
+        installer_button(13, 19, "Back", w->focus == 1);
+        installer_button(45, 19, "Install", w->focus == 2);
+    }
+    installer_text_at(8, 22, w->message[0] ? w->message : "Scripted installs still work: install <device> yes.",
+                      installer_color(K64_COLOR_LIGHT_CYAN, K64_COLOR_BLACK));
+    k64_term_set_cursor(0, 24);
+}
+
+static bool installer_serial_event(k64_key_event_t* event) {
+    static int esc_state = 0;
+    char c = 0;
+
+    if (!k64_serial_get_char(&c)) {
+        return false;
+    }
+    event->type = K64_KEY_NONE;
+    event->ch = 0;
+    if (esc_state == 0) {
+        if (c == 27) {
+            esc_state = 1;
+            return false;
+        }
+        if (c == '\r' || c == '\n') {
+            event->type = K64_KEY_ENTER;
+            event->ch = '\n';
+        } else if (c == '\b' || c == 127) {
+            event->type = K64_KEY_BACKSPACE;
+            event->ch = '\b';
+        } else if (c == '\t') {
+            event->type = K64_KEY_TAB;
+            event->ch = '\t';
+        } else {
+            event->type = K64_KEY_CHAR;
+            event->ch = c;
+        }
+        return true;
+    }
+    if (esc_state == 1) {
+        if (c == '[') {
+            esc_state = 2;
+            return false;
+        }
+        esc_state = 0;
+        event->type = K64_KEY_ESCAPE;
+        event->ch = 27;
+        return true;
+    }
+    esc_state = 0;
+    switch (c) {
+        case 'A': event->type = K64_KEY_UP; return true;
+        case 'B': event->type = K64_KEY_DOWN; return true;
+        case 'C': event->type = K64_KEY_RIGHT; return true;
+        case 'D': event->type = K64_KEY_LEFT; return true;
+        default: return false;
+    }
+}
+
+static bool installer_poll_event(k64_key_event_t* event) {
+    if (k64_keyboard_get_event(event)) {
+        return true;
+    }
+    return installer_serial_event(event);
+}
+
+static void installer_focus_next(k64_installer_wizard_t* w, int dir) {
+    int max_focus = w->step == 1 ? 4 : (w->step == 2 ? 2 : 1);
+    w->focus += dir;
+    if (w->focus < 0) {
+        w->focus = max_focus;
+    }
+    if (w->focus > max_focus) {
+        w->focus = 0;
+    }
+}
+
+static void installer_next_step(k64_installer_wizard_t* w) {
+    w->message[0] = '\0';
+    if (w->step == 0 && w->disk_count == 0) {
+        installer_copy(w->message, sizeof(w->message), "No writable target disk found.");
+        return;
+    }
+    if (w->step < 2) {
+        w->step++;
+        w->focus = 0;
+    }
+}
+
+static void installer_prev_step(k64_installer_wizard_t* w) {
+    w->message[0] = '\0';
+    if (w->step > 0) {
+        w->step--;
+        w->focus = 0;
+    }
+}
+
+static void installer_run_install(k64_installer_wizard_t* w) {
+    const char* dev_name;
+
+    if (!w->confirm) {
+        installer_copy(w->message, sizeof(w->message), "Check the confirmation box before installing.");
+        return;
+    }
+    if (w->disk_count == 0) {
+        installer_copy(w->message, sizeof(w->message), "No target disk selected.");
+        return;
+    }
+    dev_name = w->disks[w->disk_index].name;
+    if (w->username[0] && w->password[0] && !k64_user_create_account(w->username, w->password, w->sudoer)) {
+        installer_copy(w->message, sizeof(w->message), "User creation failed.");
+        return;
+    }
+    installer_copy(w->message, sizeof(w->message), "Installing K64XFS system. Please wait...");
+    installer_draw(w);
+    if (!k64_fs_install_to_block_device(dev_name)) {
+        installer_copy(w->message, sizeof(w->message), "Install failed. Check target disk and try again.");
+        return;
+    }
+    w->installed = true;
+    installer_copy(w->message, sizeof(w->message), "Install complete. Remove ISO and reboot from disk.");
+}
+
+static void installer_handle_event(k64_installer_wizard_t* w, const k64_key_event_t* e) {
+    if (e->type == K64_KEY_ESCAPE) {
+        w->quit = true;
+    } else if (e->type == K64_KEY_TAB) {
+        installer_focus_next(w, 1);
+    } else if (e->type == K64_KEY_UP) {
+        if (w->step == 0 && w->focus == 0 && w->disk_index > 0) w->disk_index--; else installer_focus_next(w, -1);
+    } else if (e->type == K64_KEY_DOWN) {
+        if (w->step == 0 && w->focus == 0 && w->disk_index + 1 < w->disk_count) w->disk_index++; else installer_focus_next(w, 1);
+    } else if (e->type == K64_KEY_LEFT) {
+        installer_prev_step(w);
+    } else if (e->type == K64_KEY_RIGHT) {
+        installer_next_step(w);
+    } else if (e->type == K64_KEY_BACKSPACE) {
+        if (w->step == 1 && w->focus == 0) installer_backspace(w->username);
+        if (w->step == 1 && w->focus == 1) installer_backspace(w->password);
+    } else if (e->type == K64_KEY_CHAR) {
+        if (e->ch == ' ' && w->step == 1 && w->focus == 2) w->sudoer = !w->sudoer;
+        else if (e->ch == ' ' && w->step == 2 && w->focus == 0) w->confirm = !w->confirm;
+        else if (w->step == 1 && w->focus == 0) installer_append_char(w->username, sizeof(w->username), e->ch);
+        else if (w->step == 1 && w->focus == 1) installer_append_char(w->password, sizeof(w->password), e->ch);
+    } else if (e->type == K64_KEY_ENTER) {
+        if (w->installed) w->quit = true;
+        else if (w->step == 0) installer_next_step(w);
+        else if (w->step == 1 && w->focus == 2) w->sudoer = !w->sudoer;
+        else if (w->step == 1 && w->focus == 3) installer_prev_step(w);
+        else if (w->step == 1) installer_next_step(w);
+        else if (w->step == 2 && w->focus == 0) w->confirm = !w->confirm;
+        else if (w->step == 2 && w->focus == 1) installer_prev_step(w);
+        else if (w->step == 2) installer_run_install(w);
+    }
+}
+
+static bool installer_wizard_run(void) {
+    k64_installer_wizard_t wizard;
+    k64_key_event_t event;
+
+    memset(&wizard, 0, sizeof(wizard));
+    wizard.sudoer = true;
+    installer_copy(wizard.username, sizeof(wizard.username), "user");
+    installer_refresh_disks(&wizard);
+
+    k64_term_set_mirror_serial(false);
+    k64_term_screen_start();
+    k64_term_clear();
+    k64_serial_write("K64 installer wizard started. Use arrows, tab, enter, and escape.\n");
+    while (!wizard.quit) {
+        installer_refresh_disks(&wizard);
+        installer_draw(&wizard);
+        while (!installer_poll_event(&event)) {
+            k64_sched_sleep(1);
+        }
+        installer_handle_event(&wizard, &event);
+    }
+    k64_term_set_mirror_serial(true);
+    k64_term_clear();
+    if (wizard.installed) {
+        svc_print_line("installer: root filesystem installed");
+        svc_print_line("installer: BIOS boot area installed");
+        svc_print_line("installer: remove the ISO and boot from the target disk");
+    } else {
+        svc_print_line("installer: cancelled");
+    }
+    return true;
+}
+
 static bool storagectl_command(const char* command, const char* args) {
     char sub[32];
     char dev_name[32];
@@ -1125,10 +1548,16 @@ static bool storagectl_command(const char* command, const char* args) {
             svc_print_line("");
             svc_print_line("Step 3 - install bootable K64:");
             svc_print_line("  install <device> yes");
+            svc_print_line("");
+            svc_print_line("Interactive mode:");
+            svc_print_line("  install wizard");
             svc_print_line("Example:");
             svc_print_line("  install user lino secret sudo");
             svc_print_line("  install ata0 yes");
             return true;
+        }
+        if (k64_streq(dev_name, "wizard")) {
+            return installer_wizard_run();
         }
         if (k64_streq(dev_name, "user")) {
             char user[32];

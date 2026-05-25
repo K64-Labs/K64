@@ -1079,6 +1079,7 @@ void k64_shell_service_poll(struct k64_service* service, uint64_t now_ticks) {
     }
 
     if (!shell_runtime.banner_printed) {
+        k64_term_draw_shell_screen(k64_config_is_installer_mode());
         k64_term_write("K64 shell started. Type 'help' for commands.\n");
         if (k64_config_is_installer_mode()) {
             k64_term_write("\n");
@@ -1089,7 +1090,7 @@ void k64_shell_service_poll(struct k64_service* service, uint64_t now_ticks) {
             k64_term_write("| 2. Create user: install user <name> <pw> |\n");
             k64_term_write("| 3. Install:     install <device> yes     |\n");
             k64_term_write("+------------------------------------------+\n\n");
-            (void)k64_system_dispatch_command("install", "");
+            (void)k64_system_dispatch_command("install", "wizard");
         } else {
             k64_term_write("Login required. Default account: guest / guest\n");
         }

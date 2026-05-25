@@ -38,9 +38,11 @@ static void k64_selftest(void) {
 void k64_kernel_main(void) {
     k64_term_init();
     k64_term_draw_boot_screen();
+    k64_term_boot_status("terminal ready", true);
 
     k64_config_init();
     k64_log_set_level(k64_config.log_level);
+    k64_term_boot_status("boot configuration loaded", true);
 
     k64_banner();
     if (k64_serial_is_ready()) {
@@ -56,19 +58,23 @@ void k64_kernel_main(void) {
     }
     K64_LOG_INFO("Initializing IDT...");
     k64_idt_init();
+    k64_term_boot_status("interrupt table ready", true);
 
     K64_LOG_INFO("Remapping PIC...");
     k64_pic_remap();
 
     K64_LOG_INFO("Initializing PMM...");
     k64_pmm_init();
+    k64_term_boot_status("physical memory online", true);
 
     K64_LOG_INFO("Initializing VMM...");
     k64_vmm_init();
+    k64_term_boot_status("virtual memory online", true);
 
     K64_LOG_INFO("Initializing scheduler...");
     k64_sched_init();
     k64_usermode_init();
+    k64_term_boot_status("scheduler and usermode ready", true);
 
     k64_block_init();
     k64_net_init();
@@ -79,16 +85,19 @@ void k64_kernel_main(void) {
 
     K64_LOG_INFO("Initializing PIT...");
     k64_pit_init(k64_config.pit_hz);
+    k64_term_boot_status("clock online", true);
 
     K64_LOG_INFO("Scanning driver modules...");
     k64_modules_init();
     k64_modules_bootstrap();
     k64_modules_load_rootfs();
     k64_modules_bootstrap();
+    k64_term_boot_status("drivers and K64XFS mounted", true);
 
     K64_LOG_INFO("Initializing system services...");
     k64_system_init();
     k64_system_bootstrap();
+    k64_term_boot_status("services started", true);
 
     k64_selftest();
 
