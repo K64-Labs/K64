@@ -36,7 +36,7 @@ rm -f "${OBJ}" "${MODULE_IN}" "${MODULE_OUT}"
 
 source /usr/lib/grub/i386-pc/modinfo.sh
 GCC_INCLUDE="$(gcc -print-file-name=include)"
-CPPFLAGS="-DGRUB_MACHINE_PCBIOS=1 -DGRUB_MACHINE=I386_PC -DBOOT_TIME_STATS=0 -DDISK_CACHE_STATS=0 -DGRUB_FILE=\\\"grub/k64xfs.c\\\" -m32 -nostdinc -isystem ${GCC_INCLUDE} -I${GRUB_SRC}/include -I${WORK_DIR}/include -I${WORK_DIR}"
+CPPFLAGS="-DGRUB_MACHINE_PCBIOS=1 -DGRUB_MACHINE=I386_PC -DBOOT_TIME_STATS=0 -DDISK_CACHE_STATS=0 -DGRUB_FILE=\\\"grub/k64xfs.c\\\" -m32 -ffreestanding -fno-builtin -fno-builtin-strlen -fno-builtin-memcpy -fno-builtin-memcmp -fno-builtin-memset -nostdinc -isystem ${GCC_INCLUDE} -I${GRUB_SRC}/include -I${WORK_DIR}/include -I${WORK_DIR}"
 
 eval "${grub_target_cc} ${grub_target_cflags} ${CPPFLAGS} -c -o '${OBJ}' '${SRC}'"
 eval "${grub_target_cc} ${grub_target_ldflags} -nostdlib -Wl,-r -o '${MODULE_IN}' '${OBJ}'"
