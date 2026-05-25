@@ -2,6 +2,7 @@
 #include "k64_shell.h"
 #include "k64_elf.h"
 #include "k64_fs.h"
+#include "k64_config.h"
 #include "k64_keyboard.h"
 #include "k64_log.h"
 #include "k64_modules.h"
@@ -43,6 +44,8 @@ static int shell_history_index = -1;
 static char shell_saved_line[SHELL_MAX_LINE];
 static bool shell_saved_line_valid = false;
 
+static const char* shell_next_token(const char* s, char* token, int token_size);
+
 static bool shell_is_public_service(const char* name) {
     return k64_streq(name, "sysfetch") || k64_streq(name, "uname");
 }
@@ -81,6 +84,14 @@ static void shell_run_public_command(const char* name) {
 static void shell_prompt(void) {
     char cwd[128];
 
+    if (!k64_user_is_logged_in()) {
+        if (k64_config_is_installer_mode()) {
+            k64_term_write("[installer] ");
+        }
+        k64_term_write("login >>> ");
+        return;
+    }
+
     k64_term_write("[");
     k64_term_write(k64_user_effective_name());
     k64_term_write("]@");
@@ -94,6 +105,20 @@ static void shell_prompt(void) {
         k64_term_write("/");
     }
     k64_term_write(" >>> ");
+}
+
+static bool shell_command_allowed_without_login(const char* cmd) {
+    char token[32];
+
+    (void)shell_next_token(cmd, token, sizeof(token));
+    return token[0] == '\0' ||
+           k64_streq(token, "help") ||
+           k64_streq(token, "sysfetch") ||
+           k64_streq(token, "uname") ||
+           k64_streq(token, "login") ||
+           k64_streq(token, "su") ||
+           k64_streq(token, "install") ||
+           k64_streq(token, "storagectl");
 }
 
 static int shell_line_len(const char* s) {
@@ -789,6 +814,11 @@ static void shell_handle_command(const char* cmd) {
     k64_shell_cmd_t shell_cmd = k64_shell_parse_command(cmd, &arg);
     k64_keyboard_layout_t layout;
 
+    if (!k64_user_is_logged_in() && !shell_command_allowed_without_login(cmd)) {
+        k64_term_write("login required. Use: login <user> <password>\n");
+        return;
+    }
+
     switch (shell_cmd) {
         case K64_SHELL_CMD_EMPTY:
             return;
@@ -1050,6 +1080,19 @@ void k64_shell_service_poll(struct k64_service* service, uint64_t now_ticks) {
 
     if (!shell_runtime.banner_printed) {
         k64_term_write("K64 shell started. Type 'help' for commands.\n");
+        if (k64_config_is_installer_mode()) {
+            k64_term_write("\n");
+            k64_term_write("+------------------------------------------+\n");
+            k64_term_write("| K64 text installer                       |\n");
+            k64_term_write("+------------------------------------------+\n");
+            k64_term_write("| 1. Review disks: storagectl list         |\n");
+            k64_term_write("| 2. Create user: install user <name> <pw> |\n");
+            k64_term_write("| 3. Install:     install <device> yes     |\n");
+            k64_term_write("+------------------------------------------+\n\n");
+            (void)k64_system_dispatch_command("install", "");
+        } else {
+            k64_term_write("Login required. Default account: guest / guest\n");
+        }
         shell_editor_render(&shell_runtime.editor);
         shell_runtime.banner_printed = true;
     }

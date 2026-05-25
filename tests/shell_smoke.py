@@ -132,8 +132,8 @@ class Guest:
         else:
             self._start_tcp()
         self.read_until(BOOT_NEEDLE, 25)
-        self.send("\n")
-        self.read_until(PROMPT_NEEDLE, 10)
+        self.send("login guest guest\n")
+        self.read_until("logged in as guest", 10)
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -285,7 +285,7 @@ def main():
             ("cat /etc/keyboard/layout.cfg", "us"),
             ("servicectl list", "PID   STATE"),
             ("calls", "kernel.version"),
-            ("call kernel.version", "0.3.24"),
+            ("call kernel.version", "0.3.25"),
             ("call fs.stat /etc/motd", "file /etc/motd"),
             ("id", "real=guest"),
             ("stat /usr/guest", "uid=1001"),
@@ -308,6 +308,7 @@ def main():
             ("kcurl https://example.com", "kcurl: only plain http://host[:port]/path URLs are supported"),
             ("udp send 10.0.2.2 9 shell-smoke", PROMPT_NEEDLE),
             ("install", "K64 installer"),
+            ("install user smokeuser smokepass sudo", "installer: user created: smokeuser"),
             ("install ata0 yes", "installer: root filesystem installed") if attach_disk else ("install ata0 yes", "installer: failed"),
             ("pwd", "/"),
             ("ls /", "etc/"),

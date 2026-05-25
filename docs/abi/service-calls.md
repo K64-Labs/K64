@@ -17,6 +17,8 @@ Most service handlers are still kernel-hosted in v0.3.21 because K64 does not ye
 
 v0.3.22 adds a first multiuser permission layer on top of those service calls. Filesystem and process-launch calls now consult the effective UID/GID from `userctl` and check owner/group/other mode bits before reading, writing, creating, opening, listing, moving, or executing paths.
 
+v0.3.25 adds a login gate to the shell and an installer-mode boot flow, but it does not change the fundamental service-hosting boundary: service calls are still the stable ABI, while most handlers remain kernel-hosted until K64 has a safe Ring-3 message/registration path.
+
 ## Security Rules
 
 Userland cannot pass function pointers or kernel addresses. The `service_call` syscall copies the user argument block, copies service and method strings through checked user memory, rejects payloads larger than 65536 bytes, copies request bytes into a kernel staging buffer, dispatches the service call, then copies the bounded response back through checked user memory.

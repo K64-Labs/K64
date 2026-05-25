@@ -138,13 +138,13 @@ The ISO-root GRUB config is generated into `build/grub-bootstrap.cfg` and instal
 
 Its job is to:
 
-- load GRUB modules `configfile` and `K64XFS`
+- load the GRUB `k64xfs` module
 - remember the ISO root as `k64_iso_root`
-- try `(hd0)/boot/grub/grub.cfg` first
-- if a disk root is present, hand off to that config
-- otherwise boot the kernel from the ISO and pass `/K64XFS/root.xfs` directly as a Multiboot module
+- offer `Try K64 live`
+- offer `Install K64`
+- boot the kernel from the ISO and pass `root.xfs` directly as a Multiboot module
 
-So the ISO config is a direct live-boot shim. It always boots the kernel from the ISO and passes the CD copy of `root.xfs` as a Multiboot module. If a writable K64 disk is attached, the kernel mounts that disk as the persistent root after startup.
+The live entry passes `boot_mode=live`. The installer entry passes `boot_mode=installer`, which opens K64's text installer guide after boot. If a writable K64 disk is attached, the kernel mounts that disk as the persistent root after startup.
 
 ### Step 2: Rootfs GRUB config
 
@@ -209,20 +209,22 @@ Files:
 - `k64_config.c`
 - `k64_config.h`
 
-K64 currently parses two boot-time configuration keys from the GRUB Multiboot command line:
+K64 currently parses three boot-time configuration keys from the GRUB Multiboot command line:
 
 - `pit_hz`
 - `log_level`
+- `boot_mode`
 
 Defaults:
 
 - `pit_hz = 1000`
 - `log_level = debug`
+- `boot_mode = live`
 
 Example:
 
 ```text
-multiboot /boot/k64-kernel-v<version>.elf pit_hz=500 log_level=info
+multiboot /boot/k64-kernel-v<version>.elf pit_hz=500 log_level=info boot_mode=live
 ```
 
 ### Interrupts and legacy platform support
@@ -537,7 +539,9 @@ K64XFS now distinguishes the mounted volume size from the packed in-memory image
 
 `storagectl partition <device> k64 yes` writes a simple K64 MBR layout: one active Linux-type partition starting at LBA 2048 and using the rest of the disk. This is intentionally confirmation-gated because it overwrites the target disk's partition table.
 
-When booted from the ISO, `install` is the live installer entry point. It lists writable target disks and can write the GRUB BIOS boot area plus the current K64 root filesystem to a whole disk such as `ata0` after explicit confirmation. The installer patches the installed MBR partition size to match the actual target disk, so the target disk can be larger than the default development image.
+When booted from the ISO, the `Install K64` GRUB entry opens installer mode. The `install` command presents a compact text UI-style guide, lists writable target disks, and can write the GRUB BIOS boot area plus the current K64XFS root filesystem to a whole disk such as `ata0` after explicit confirmation. `install user <name> <password> [sudo]` creates a login account before installation, and `install <device> yes` performs the disk write. The installer patches the installed MBR partition size to match the actual target disk, so the target disk can be larger than the default development image.
+
+The shell now starts behind a login gate. Live systems keep `guest / guest` for smoke tests and quick evaluation; installed systems should create their own account during installation.
 
 ### Network devices and `netctl`
 

@@ -108,6 +108,7 @@ static void storagectl_usage(void) {
     svc_print_line("       storagectl partitions <device>");
     svc_print_line("       storagectl partition <device> k64 yes");
     svc_print_line("       install");
+    svc_print_line("       install user <name> <password> [sudo]");
     svc_print_line("       install <device> yes");
 }
 
@@ -1094,9 +1095,14 @@ static bool storagectl_command(const char* command, const char* args) {
         args = svc_next_token(args, dev_name, sizeof(dev_name));
         args = svc_next_token(args, confirm, sizeof(confirm));
         if (!dev_name[0]) {
-            svc_print_line("K64 installer");
-            svc_print_line("This writes the current K64 root filesystem to a writable disk.");
-            svc_print_line("Available target disks:");
+            svc_print_line("+------------------------------------------------+");
+            svc_print_line("| K64 installer                                  |");
+            svc_print_line("+------------------------------------------------+");
+            svc_print_line("| This installer writes a K64XFS system disk.    |");
+            svc_print_line("| It can also create a local login account.      |");
+            svc_print_line("+------------------------------------------------+");
+            svc_print_line("");
+            svc_print_line("Step 1 - choose a target disk:");
             for (size_t i = 0; i < k64_block_device_count(); ++i) {
                 k64_block_device_t* dev = k64_block_device_at(i);
                 if (!dev || dev->is_partition || !dev->online || !dev->writable) {
@@ -1113,8 +1119,39 @@ static bool storagectl_command(const char* command, const char* args) {
                 k64_term_write_dec(dev->block_size);
                 k64_term_putc('\n');
             }
-            svc_print_line("To install, run: install <device> yes");
-            svc_print_line("Example: install ata0 yes");
+            svc_print_line("");
+            svc_print_line("Step 2 - create your user:");
+            svc_print_line("  install user <name> <password> [sudo]");
+            svc_print_line("");
+            svc_print_line("Step 3 - install bootable K64:");
+            svc_print_line("  install <device> yes");
+            svc_print_line("Example:");
+            svc_print_line("  install user lino secret sudo");
+            svc_print_line("  install ata0 yes");
+            return true;
+        }
+        if (k64_streq(dev_name, "user")) {
+            char user[32];
+            char pass[48];
+            char role[16];
+            bool sudoer;
+
+            svc_copy(user, sizeof(user), confirm);
+            args = svc_next_token(args, pass, sizeof(pass));
+            args = svc_next_token(args, role, sizeof(role));
+            if (!user[0] || !pass[0]) {
+                svc_print_line("usage: install user <name> <password> [sudo]");
+                return true;
+            }
+            sudoer = role[0] == '\0' || k64_streq(role, "sudo");
+            if (!k64_user_create_account(user, pass, sudoer)) {
+                svc_print_line("installer: user creation failed");
+                return true;
+            }
+            k64_term_write("installer: user created: ");
+            k64_term_write(user);
+            k64_term_write(sudoer ? " (sudo)\n" : "\n");
+            svc_print_line("installer: you can log in after boot with that account");
             return true;
         }
         if (!k64_streq(confirm, "yes")) {

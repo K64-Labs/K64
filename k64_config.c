@@ -79,6 +79,14 @@ static void parse_cmdline(const char* cmdline) {
         } else if (k64_streq(key, "log_level")) {
             k64_config.log_level = parse_loglevel(val);
             K64_LOG_INFO("Config: log_level set from cmdline.");
+        } else if (k64_streq(key, "boot_mode")) {
+            size_t i = 0;
+            while (val[i] && i + 1 < sizeof(k64_config.boot_mode)) {
+                k64_config.boot_mode[i] = val[i];
+                i++;
+            }
+            k64_config.boot_mode[i] = '\0';
+            K64_LOG_INFO("Config: boot_mode set from cmdline.");
         } else {
             k64_term_write("Unknown config key: ");
             k64_term_write(key);
@@ -90,6 +98,11 @@ static void parse_cmdline(const char* cmdline) {
 void k64_config_init(void) {
     k64_config.pit_hz          = 1000;
     k64_config.log_level       = K64_LOGLEVEL_DEBUG;
+    k64_config.boot_mode[0]    = 'l';
+    k64_config.boot_mode[1]    = 'i';
+    k64_config.boot_mode[2]    = 'v';
+    k64_config.boot_mode[3]    = 'e';
+    k64_config.boot_mode[4]    = '\0';
 
     if (k64_mb_magic != 0x2BADB002) {
         K64_LOG_WARN("Config: invalid Multiboot magic, using defaults.");
@@ -120,4 +133,13 @@ void k64_config_init(void) {
     }
     k64_term_putc('\n');
 
+    k64_term_write("  boot_mode = ");
+    k64_term_write(k64_config.boot_mode);
+    k64_term_putc('\n');
+
+}
+
+bool k64_config_is_installer_mode(void) {
+    return k64_streq(k64_config.boot_mode, "installer") ||
+           k64_streq(k64_config.boot_mode, "install");
 }

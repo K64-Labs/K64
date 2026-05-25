@@ -101,7 +101,6 @@ class Guest:
         else:
             self._start_tcp()
         self.read_until(BOOT_NEEDLE, 25)
-        self.send("\n")
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -168,6 +167,10 @@ class Guest:
         else:
             self.sock.sendall(data)
 
+    def login_guest(self):
+        self.send("login guest guest\n")
+        self.read_until("logged in as guest", 10)
+
 
 def main():
     if shutil.which(QEMU_BASE_CMD[0]) is None:
@@ -178,11 +181,13 @@ def main():
         return 0
 
     with Guest() as guest:
+        guest.login_guest()
         guest.send(f"write {PERSIST_PATH} {PERSIST_TEXT}\n")
         guest.send("sync\n")
         guest.read_until("sync complete", 15)
 
     with Guest() as guest:
+        guest.login_guest()
         guest.send(f"cat {PERSIST_PATH}\n")
         captured = guest.read_until(PERSIST_TEXT, 15)
         if PERSIST_TEXT not in captured:

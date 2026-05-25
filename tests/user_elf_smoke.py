@@ -88,8 +88,9 @@ def wait_for_tcp(port, timeout):
 
 def run_smoke(read_until, send_line):
     boot = read_until("K64 shell started. Type 'help' for commands.", 25)
-    send_line("\n")
     combined = boot
+    send_line("login guest guest\n")
+    combined += read_until("logged in as guest", 10)
     requested = os.environ.get("K64_SMOKE_ELFS", "hello,catmotd,procinfo,args,libctest")
     elfs = [name.strip() for name in requested.split(",") if name.strip()]
 

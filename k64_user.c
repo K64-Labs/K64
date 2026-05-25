@@ -444,7 +444,7 @@ static void user_seed_defaults(void) {
     (void)user_add_account("guest", "guest", false, true, "guest", false);
     user_ensure_primary_groups();
     user_sync_role_groups();
-    user_state.current_index = user_find("guest");
+    user_state.current_index = -1;
     user_state.sudo_active = false;
 }
 
@@ -1209,12 +1209,7 @@ bool k64_user_service_start(k64_service_t* service) {
         user_ensure_layout();
     }
 
-    if (user_state.current_index < 0) {
-        user_state.current_index = user_find("guest");
-        if (user_state.current_index < 0 && user_state.count > 0) {
-            user_state.current_index = 0;
-        }
-    }
+    user_state.current_index = -1;
     user_state.sudo_active = false;
 
     user_state.ready = true;
@@ -1251,6 +1246,12 @@ bool k64_user_is_root(void) {
     return user_state.accounts[user_state.current_index].is_root || user_state.sudo_active;
 }
 
+bool k64_user_is_logged_in(void) {
+    return user_state.ready &&
+           user_state.current_index >= 0 &&
+           user_state.current_index < user_state.count;
+}
+
 bool k64_user_can_sudo(void) {
     if (!user_state.ready || user_state.current_index < 0 || user_state.current_index >= user_state.count) {
         return false;
@@ -1276,6 +1277,32 @@ void k64_user_end_sudo_scope(void) {
     if (!user_state.accounts[user_state.current_index].is_root) {
         user_state.sudo_active = false;
     }
+}
+
+bool k64_user_create_account(const char* name, const char* password, bool sudoer) {
+    char primary_group[K64_GROUP_NAME_MAX];
+    int idx;
+
+    if (!user_state.ready || !name || !name[0] || !password || !password[0]) {
+        return false;
+    }
+    user_copy(primary_group, sizeof(primary_group), name);
+    if (!user_add_account(name, password, false, sudoer, primary_group, false)) {
+        return false;
+    }
+    user_ensure_primary_groups();
+    user_sync_role_groups();
+    idx = user_find(name);
+    if (idx >= 0) {
+        char path[64];
+        int group_idx = group_find(user_state.accounts[idx].primary_group);
+        user_home_path(name, path, sizeof(path));
+        (void)k64_fs_chown(path,
+                           1000u + (uint32_t)idx,
+                           group_idx >= 0 ? 1000u + (uint32_t)group_idx : 1000u);
+        (void)k64_fs_chmod(path, 0700u);
+    }
+    return user_save_state();
 }
 
 bool k64_user_can_manage_service(const k64_service_t* service) {

@@ -211,9 +211,9 @@ $(K64_BOOT_AREA): $(K64_GRUB_K64XFS_MOD) tools/mk_k64_boot_area.py Makefile
 
 $(K64_GRUB_BOOTSTRAP_CFG): $(K64_GRUB_K64XFS_MOD) $(K64_KERNEL_ELF) Makefile
 	mkdir -p build
-	echo 'set timeout=0' > $(K64_GRUB_BOOTSTRAP_CFG)
+	echo 'set timeout=5' > $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'set default=0' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo 'set timeout_style=hidden' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo 'set timeout_style=menu' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'set gfxpayload=text' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'terminal_input console' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'terminal_output console' >> $(K64_GRUB_BOOTSTRAP_CFG)
@@ -221,9 +221,16 @@ $(K64_GRUB_BOOTSTRAP_CFG): $(K64_GRUB_K64XFS_MOD) $(K64_KERNEL_ELF) Makefile
 	echo 'insmod k64xfs' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'set k64_iso_root=$$root' >> $(K64_GRUB_BOOTSTRAP_CFG)
 	echo 'set root=$${k64_iso_root}' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo 'multiboot /boot/$(K64_KERNEL_ELF) pit_hz=1000 log_level=debug' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo 'module /root.xfs /root.xfs' >> $(K64_GRUB_BOOTSTRAP_CFG)
-	echo 'boot' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo '' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo 'menuentry "Try K64 live" {' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo '  multiboot /boot/$(K64_KERNEL_ELF) pit_hz=1000 log_level=debug boot_mode=live' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo '  module /root.xfs /root.xfs' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo '}' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo '' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo 'menuentry "Install K64" {' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo '  multiboot /boot/$(K64_KERNEL_ELF) pit_hz=1000 log_level=debug boot_mode=installer' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo '  module /root.xfs /root.xfs' >> $(K64_GRUB_BOOTSTRAP_CFG)
+	echo '}' >> $(K64_GRUB_BOOTSTRAP_CFG)
 
 $(K64_GRUB_ROOT_CFG): $(K64_KERNEL_ELF) Makefile
 	mkdir -p build
@@ -240,15 +247,20 @@ $(K64_GRUB_ROOT_CFG): $(K64_KERNEL_ELF) Makefile
 
 $(K64_GRUB_ISO_CFG): $(K64_KERNEL_ELF) Makefile
 	mkdir -p build
-	echo 'set timeout=0' > $(K64_GRUB_ISO_CFG)
+	echo 'set timeout=5' > $(K64_GRUB_ISO_CFG)
 	echo 'set default=0' >> $(K64_GRUB_ISO_CFG)
-	echo 'set timeout_style=hidden' >> $(K64_GRUB_ISO_CFG)
+	echo 'set timeout_style=menu' >> $(K64_GRUB_ISO_CFG)
 	echo 'set gfxpayload=text' >> $(K64_GRUB_ISO_CFG)
 	echo 'terminal_input console' >> $(K64_GRUB_ISO_CFG)
 	echo 'terminal_output console' >> $(K64_GRUB_ISO_CFG)
 	echo '' >> $(K64_GRUB_ISO_CFG)
-	echo 'menuentry "K64 Kernel" {' >> $(K64_GRUB_ISO_CFG)
-	echo '  multiboot /boot/$(K64_KERNEL_ELF) pit_hz=1000 log_level=debug' >> $(K64_GRUB_ISO_CFG)
+	echo 'menuentry "Try K64 live" {' >> $(K64_GRUB_ISO_CFG)
+	echo '  multiboot /boot/$(K64_KERNEL_ELF) pit_hz=1000 log_level=debug boot_mode=live' >> $(K64_GRUB_ISO_CFG)
+	echo '  module /root.xfs /root.xfs' >> $(K64_GRUB_ISO_CFG)
+	echo '}' >> $(K64_GRUB_ISO_CFG)
+	echo '' >> $(K64_GRUB_ISO_CFG)
+	echo 'menuentry "Install K64" {' >> $(K64_GRUB_ISO_CFG)
+	echo '  multiboot /boot/$(K64_KERNEL_ELF) pit_hz=1000 log_level=debug boot_mode=installer' >> $(K64_GRUB_ISO_CFG)
 	echo '  module /root.xfs /root.xfs' >> $(K64_GRUB_ISO_CFG)
 	echo '}' >> $(K64_GRUB_ISO_CFG)
 
