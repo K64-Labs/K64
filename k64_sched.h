@@ -32,6 +32,8 @@ k64_task_t* k64_task_create_arg(void (*entry)(void*), void* arg, int priority, u
 uint64_t    k64_sched_handle_timer(uint64_t old_rsp);
 void        k64_sched_yield(void);
 void        k64_sched_sleep(uint64_t ticks);
+void        k64_sched_block_current(void);
+void        k64_sched_wake_task(k64_task_t* task);
 void        k64_task_stop(k64_task_t* task);
 k64_task_t* k64_sched_current_task(void);
 void        k64_sched_dump_stats(void);

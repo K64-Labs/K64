@@ -293,6 +293,23 @@ void k64_sched_sleep(uint64_t ticks) {
     current_task->remaining_ticks = 0;
 }
 
+void k64_sched_block_current(void) {
+    if (!current_task || current_task->id == 0) {
+        return;
+    }
+    current_task->sleep_until_tick = 0;
+    current_task->state = K64_TASK_STATE_BLOCKED;
+    current_task->remaining_ticks = 0;
+}
+
+void k64_sched_wake_task(k64_task_t* task) {
+    if (!task || task->state != K64_TASK_STATE_BLOCKED) {
+        return;
+    }
+    task->sleep_until_tick = 0;
+    task->state = K64_TASK_STATE_READY;
+}
+
 void k64_task_stop(k64_task_t* task) {
     if (!task || task->id == 0) {
         return;

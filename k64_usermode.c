@@ -1,4 +1,5 @@
 #include "k64_usermode.h"
+#include "k64_elf.h"
 #include "k64_fs.h"
 #include "k64_idt.h"
 #include "k64_keyboard.h"
@@ -88,6 +89,7 @@ typedef struct {
     uint64_t kernel_cr3;
     int64_t  result;
     uint64_t active;
+    bool     scheduler_unlocked;
     int      process_index;
     const k64_vm_space_t* space;
     k64_user_fd_t fallback_fds[K64_USER_FD_MAX];
@@ -108,6 +110,8 @@ typedef struct {
     uint64_t fault_rip;
     char     path[K64_USER_PROCESS_PATH_MAX];
     k64_user_fd_t fds[K64_USER_FD_MAX];
+    k64_task_t* wait_task;
+    uint64_t wait_target_pid;
 } k64_user_process_t;
 
 typedef struct {
@@ -153,6 +157,7 @@ extern void k64_syscall_stub(void);
 
 static k64_tss64_t tss64;
 static uint8_t syscall_stack[16384] __attribute__((aligned(16)));
+static uint8_t nested_syscall_stack[16384] __attribute__((aligned(16)));
 static uint8_t syscall_io_buffer[K64_USER_SYSCALL_IO_MAX];
 static char syscall_text_buffer[512];
 static uint16_t syscall_cell_buffer[K64_USER_FBBLIT_CELLS_MAX];
@@ -199,6 +204,7 @@ static void ctx_clear(void) {
     active_ctx.kernel_cr3 = 0;
     active_ctx.result = K64_ERR_INVAL;
     active_ctx.active = 0;
+    active_ctx.scheduler_unlocked = false;
     active_ctx.process_index = -1;
     active_ctx.space = NULL;
     for (size_t i = 0; i < K64_USER_FD_MAX; ++i) {
@@ -277,6 +283,8 @@ static int process_alloc(const char* path,
     process_table[free_slot].end_tick = 0;
     process_table[free_slot].fault_vector = 0;
     process_table[free_slot].fault_rip = 0;
+    process_table[free_slot].wait_task = NULL;
+    process_table[free_slot].wait_target_pid = 0;
     process_copy_path(process_table[free_slot].path, path);
     for (size_t i = 0; i < K64_USER_FD_MAX; ++i) {
         process_table[free_slot].fds[i].used = false;
@@ -323,6 +331,15 @@ static void process_finish(int index, k64_user_process_state_t state, int64_t ex
     process_table[index].state = state;
     process_table[index].exit_code = exit_code;
     process_table[index].end_tick = k64_pit_get_ticks();
+    for (int i = 0; i < K64_USER_PROCESS_MAX; ++i) {
+        if (process_table[i].used &&
+            process_table[i].wait_task &&
+            process_table[i].wait_target_pid == process_table[index].pid) {
+            k64_sched_wake_task(process_table[i].wait_task);
+            process_table[i].wait_task = NULL;
+            process_table[i].wait_target_pid = 0;
+        }
+    }
 }
 
 static void process_reap(int index) {
@@ -335,6 +352,8 @@ static void process_reap(int index) {
     }
     process_table[index].state = K64_USER_PROCESS_REAPED;
     process_table[index].task_id = 0;
+    process_table[index].wait_task = NULL;
+    process_table[index].wait_target_pid = 0;
     process_table[index].used = false;
 }
 
@@ -466,6 +485,30 @@ static bool copy_user_string(const char* user_ptr, char* out, size_t out_size) {
     }
     out[out_size - 1] = '\0';
     return false;
+}
+
+static void usermode_park_until_current_ready(void) {
+    k64_task_t* task = k64_sched_current_task();
+    k64_user_exec_context_t saved_ctx = active_ctx;
+
+    if (!task || task->id == 0) {
+        return;
+    }
+    active_ctx.scheduler_unlocked = true;
+    while (task->state == K64_TASK_STATE_BLOCKED) {
+        __asm__ volatile("sti; hlt; cli");
+    }
+    active_ctx = saved_ctx;
+    active_ctx.scheduler_unlocked = false;
+}
+
+static void usermode_yield_once(void) {
+    k64_user_exec_context_t saved_ctx = active_ctx;
+
+    active_ctx.scheduler_unlocked = true;
+    __asm__ volatile("sti; hlt; cli");
+    active_ctx = saved_ctx;
+    active_ctx.scheduler_unlocked = false;
 }
 
 static k64_user_fd_t* current_fds(void) {
@@ -661,6 +704,68 @@ static int64_t queue_spawn(const char* path, const char* args) {
     return K64_ERR_FULL;
 }
 
+static k64_user_spawn_ctx_t* find_spawn_ctx(uint64_t pid) {
+    for (int i = 0; i < K64_USER_SPAWN_MAX; ++i) {
+        if (spawn_ctx[i].used && spawn_ctx[i].pid == pid) {
+            return &spawn_ctx[i];
+        }
+    }
+    return NULL;
+}
+
+static void clear_spawn_ctx(uint64_t pid) {
+    k64_user_spawn_ctx_t* ctx = find_spawn_ctx(pid);
+
+    if (ctx) {
+        ctx->used = false;
+        ctx->pid = 0;
+        ctx->parent_pid = 0;
+        ctx->path[0] = '\0';
+        ctx->args[0] = '\0';
+    }
+}
+
+static int64_t run_reserved_child(uint64_t pid, uint64_t parent_pid) {
+    k64_user_spawn_ctx_t* ctx = find_spawn_ctx(pid);
+    k64_user_exec_context_t saved_ctx;
+    char path[256];
+    char args[K64_USER_SPAWN_ARGS_MAX];
+    uint64_t saved_rsp0;
+    bool ok;
+    int index;
+
+    if (!ctx || ctx->parent_pid != parent_pid) {
+        return K64_ERR_AGAIN;
+    }
+
+    copy_bounded(path, sizeof(path), ctx->path);
+    copy_bounded(args, sizeof(args), ctx->args);
+    saved_ctx = active_ctx;
+    saved_rsp0 = tss64.rsp0;
+    tss64.rsp0 = (uint64_t)(uintptr_t)(nested_syscall_stack + sizeof(nested_syscall_stack));
+
+    ok = k64_elf_spawn_user_path_args_ex(path, args, parent_pid, pid);
+
+    tss64.rsp0 = saved_rsp0;
+    active_ctx = saved_ctx;
+    active_ctx.scheduler_unlocked = false;
+
+    index = process_find_pid(pid);
+    if (index < 0) {
+        clear_spawn_ctx(pid);
+        return K64_ERR_NOENT;
+    }
+    if (!ok && process_table[index].state == K64_USER_PROCESS_RUNNING) {
+        process_finish(index, K64_USER_PROCESS_FAULTED, K64_ERR_NOENT);
+    }
+    if (process_table[index].state == K64_USER_PROCESS_RUNNING) {
+        return K64_ERR_AGAIN;
+    }
+
+    clear_spawn_ctx(pid);
+    return K64_OK;
+}
+
 static char read_stdin_char_blocking(void) {
     char ch;
 
@@ -777,9 +882,11 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
             return write_user_text(frame->rdi, (size_t)frame->rsi);
         case K64_SYSCALL_YIELD:
             k64_sched_yield();
+            usermode_yield_once();
             return K64_OK;
         case K64_SYSCALL_SLEEP:
             k64_sched_sleep(frame->rdi);
+            usermode_park_until_current_ready();
             return K64_OK;
         case K64_SYSCALL_OPEN: {
             char path[256];
@@ -1015,7 +1122,23 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
                 return K64_ERR_NOTCHILD;
             }
             if (process_table[index].state == K64_USER_PROCESS_RUNNING) {
-                return K64_ERR_AGAIN;
+                if (flags == K64_WAIT_NOHANG) {
+                    return K64_ERR_AGAIN;
+                }
+                if (frame->rsi && !user_buffer_range_ok(frame->rsi, sizeof(exit_code))) {
+                    return K64_ERR_FAULT;
+                }
+                exit_code = run_reserved_child(process_table[index].pid, caller_pid);
+                if (exit_code != K64_OK) {
+                    return exit_code;
+                }
+                index = process_find_pid(frame->rdi);
+                if (index < 0) {
+                    return K64_ERR_NOENT;
+                }
+                if (process_table[index].state == K64_USER_PROCESS_RUNNING) {
+                    return K64_ERR_AGAIN;
+                }
             }
             exit_code = process_table[index].exit_code;
             if (frame->rsi && !user_write(frame->rsi, &exit_code, sizeof(exit_code))) {
@@ -1163,7 +1286,7 @@ int64_t k64_usermode_execute(const k64_vm_space_t* space, uint64_t entry, uint64
 }
 
 bool k64_usermode_is_active(void) {
-    return active_ctx.active != 0;
+    return active_ctx.active != 0 && !active_ctx.scheduler_unlocked;
 }
 
 void k64_usermode_dump_processes(void) {

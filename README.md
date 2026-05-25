@@ -311,9 +311,11 @@ Current syscall ABI is documented in `docs/abi/syscalls.md`. The active syscall 
 - `23`: `writefd(fd, ptr, len)` for fd-backed writes beyond stdio
 - `24`: `stat(path, out)`
 
-This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64FS`, save complete files, use structured key input, move files, list directories, reserve child process identities, query process metadata, use early wait flags, create anonymous pipes, and draw text-mode cell regions. It is not a POSIX-compatible libc and there is no fork/execve ABI, dynamic linker, shared-library loader, socket API, or mature VFS.
+This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64FS`, save complete files, use structured key input, move files, list directories, reserve child process identities, query process metadata, collect child exits with wait flags, create anonymous pipes, and draw text-mode cell regions. It is not a POSIX-compatible libc and there is no fork/execve ABI, dynamic linker, shared-library loader, socket API, or mature VFS.
 
-The process model now records a stable PID, parent PID, scheduler task ID, state, exit code, start/end ticks, runtime ticks, fault vector, fault RIP, and image path for each K64-native ELF run. Normal exits become `ZOMBIE` records and remain visible until a parent reaps them. `waitpid()` enforces direct parent-child ownership and supports `K64_WAIT_NOHANG`; `K64_WAIT_BLOCK` is accepted but currently returns `K64_ERR_AGAIN` for running children rather than burning CPU in a kernel loop. `spawn()` reserves a stable child PID and parent relationship, but spawned ring-3 child execution is not yet scheduled concurrently because K64 still has one active user context at a time.
+The process model now records a stable PID, parent PID, scheduler task ID, state, exit code, start/end ticks, runtime ticks, fault vector, fault RIP, and image path for each K64-native ELF run. Normal exits become `ZOMBIE` records and remain visible until a parent reaps them. `waitpid()` enforces direct parent-child ownership, `K64_WAIT_NOHANG` reports `K64_ERR_AGAIN` for a still-running child, and `K64_WAIT_BLOCK` runs a reserved child user context to completion through a cooperative wait-driven path before writing the exit code and reaping the child. This is a concrete step beyond reserved-only child identity, but it is not full timer-preemptive user process scheduling yet.
+
+`spawn()` still returns a child PID immediately and records parent/child ownership. In v0.3.19, blocking `waitpid()` is the point where the child is entered and collected. The ELF loader now has a small nested execution context stack and the wait path uses a temporary syscall stack for the child, so nested parent/child ring-3 execution does not clobber the parent's loader state or syscall frame. Full background user tasks, per-user-task kernel stacks, and timer-preemptive ring-3 context switching remain future work.
 
 The file descriptor model is early but real. Each active user process has a small fd table; `0`, `1`, and `2` are stdin/stdout/stderr; `open()` returns fd values `>= 3`; read/close validate descriptors; stdout/stderr writes go through the fd path; `stat()` exposes filesystem metadata to userland; and `pipe()` creates anonymous read/write endpoints backed by fixed kernel ring buffers. File writes are still primarily the whole-file `write_file()` helper.
 
@@ -342,7 +344,7 @@ The current libc layer is intentionally tiny:
 - syscall wrappers for console output, file open/read/write-file, directory listing, file move, key events, cursor control, text cell blitting, process spawning, getpid, pipes, and uptime
 - process wrappers for `proc_info()`, `waitpid()`, and `waitpid_flags()`
 - minimal string, memory, decimal, and hexadecimal print helpers
-- ring-3 smoke programs that validate libc helpers, read-only file I/O, process metadata, wait semantics, fd behavior, pipe behavior, and checked syscall memory failures
+- ring-3 smoke programs that validate libc helpers, read-only file I/O, process metadata, blocking child collection, faulted-child waits, fd behavior, pipe behavior, and checked syscall memory failures
 
 This is not a full C library yet. It is the first stable nongraphical ABI surface for growing a real K64 userland without writing every program in assembly.
 

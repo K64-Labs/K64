@@ -123,12 +123,33 @@ def run_smoke(read_until, send_line):
         if "libctest: OK" not in combined:
             raise RuntimeError(f"user libc self-test output missing\nCaptured:\n{combined}")
 
+    if "spawnreal" in elfs:
+        send_line("elfrun /ex/spawnreal.elf\n")
+        combined += read_until("ELF: exit code 0", 20)
+        if "spawnreal: OK" not in combined:
+            raise RuntimeError(f"user spawnreal output missing\nCaptured:\n{combined}")
+
+    if "waitblock" in elfs:
+        send_line("elfrun /ex/waitblock.elf\n")
+        combined += read_until("ELF: exit code 0", 20)
+        if "waitblock: OK" not in combined:
+            raise RuntimeError(f"user waitblock output missing\nCaptured:\n{combined}")
+
+    if "faultwait" in elfs:
+        send_line("elfrun /ex/faultwait.elf\n")
+        combined += read_until("ELF: exit code 0", 20)
+        if "faultwait: OK" not in combined:
+            raise RuntimeError(f"user faultwait output missing\nCaptured:\n{combined}")
+
     send_line("ps\n")
     combined += read_until("PID   STATE", 10)
-    expected_proc = "/ex/libctest.elf" if "libctest" in elfs else (
-        "/ex/args.elf" if "args" in elfs else (
-            "/ex/procinfo.elf" if "procinfo" in elfs else (
-                "/ex/hello.elf" if "hello" in elfs else "/ex/catmotd.elf")))
+    expected_proc = "/ex/faultwait.elf" if "faultwait" in elfs else (
+        "/ex/waitblock.elf" if "waitblock" in elfs else (
+            "/ex/spawnreal.elf" if "spawnreal" in elfs else (
+                "/ex/libctest.elf" if "libctest" in elfs else (
+                    "/ex/args.elf" if "args" in elfs else (
+                        "/ex/procinfo.elf" if "procinfo" in elfs else (
+                            "/ex/hello.elf" if "hello" in elfs else "/ex/catmotd.elf"))))))
     combined += read_until(expected_proc, 10)
     if "ZOMBIE" not in combined:
         raise RuntimeError(f"user process table missing zombie process\nCaptured:\n{combined}")

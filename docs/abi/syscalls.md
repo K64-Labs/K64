@@ -72,9 +72,10 @@ Normal exits currently transition to `ZOMBIE`; faulted user programs transition 
 - Userland `proc_info` is limited to the current process and direct children.
 - `waitpid` enforces direct parent-child ownership.
 - `K64_WAIT_NOHANG` returns `K64_ERR_AGAIN` while the child remains running.
-- `K64_WAIT_BLOCK` is accepted, but the current single-active-user-context runtime does not yet run a child user context while the parent is blocked; running children therefore also return `K64_ERR_AGAIN` in this release rather than spinning in the kernel.
-- `spawn()` reserves a stable child PID and parent relationship. Background execution of spawned ring-3 children is intentionally held back until the scheduler can safely switch independent user contexts.
+- `K64_WAIT_BLOCK` now runs a reserved child user context to completion through a cooperative wait-driven path, writes the child exit code, and reaps the child. This avoids kernel busy-polling, but it is not full timer-preemptive user scheduling yet.
+- `spawn()` reserves a stable child PID and parent relationship immediately. The child starts when the parent collects it with blocking `waitpid`; fully background ring-3 child scheduling remains future work.
 - File descriptors are per active user process. `0`, `1`, and `2` are stdin, stdout, and stderr; `open()` returns `>= 3`.
 - Anonymous pipes use fixed kernel buffers. Empty pipes with an open write end return `K64_ERR_AGAIN`; empty pipes with no write end return `0`.
 - `write_file` is still a whole-file helper and is not the same as POSIX `write`.
 - `stat(path, out)` returns type, size, flags, mode, created tick, modified tick, and generation fields through the userland `k64_stat_t` structure.
+- The ELF loader keeps a small nested execution context stack so a parent `/ex` program can safely run a child during blocking wait without clobbering the parent's loader or syscall-stack state.

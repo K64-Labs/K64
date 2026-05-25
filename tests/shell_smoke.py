@@ -335,6 +335,11 @@ def main():
             ("elfrun /ex/proctree.elf", "proctree: OK"),
             ("elfrun /ex/fdtest.elf", "fdtest: OK"),
             ("elfrun /ex/pipetest.elf", "pipetest: OK"),
+            ("elfrun /ex/spawnreal.elf", "spawnreal: OK"),
+            ("elfrun /ex/waitblock.elf", "waitblock: OK"),
+            ("elfrun /ex/spawnrace.elf", "spawnrace: OK"),
+            ("elfrun /ex/multitask.elf", "multitask: OK"),
+            ("elfrun /ex/faultwait.elf", "faultwait: OK"),
             ("elfrun /ex/manyproc.elf", "manyproc: OK"),
             ("unknown-smoke-command", "Unknown command: unknown-smoke-command"),
             ]

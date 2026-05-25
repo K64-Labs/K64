@@ -58,8 +58,15 @@ typedef struct {
     char* argv[K64_ELF_ARG_MAX];
 } k64_elf_args_t;
 
-static k64_vm_space_t elf_app_space;
-static k64_elf_args_t elf_args;
+#define K64_ELF_CONTEXT_MAX 4
+
+typedef struct {
+    k64_vm_space_t space;
+    k64_elf_args_t args;
+} k64_elf_context_t;
+
+static k64_elf_context_t elf_contexts[K64_ELF_CONTEXT_MAX];
+static int elf_context_depth;
 
 static uint64_t elf_align_up(uint64_t value, uint64_t align) {
     return (value + align - 1ULL) & ~(align - 1ULL);
@@ -198,6 +205,7 @@ static bool elf_execute_impl_ex(const char* path,
     uint64_t max_vaddr = 0;
     static uint64_t next_ephemeral_pid = K64_ELF_PID_BASE;
     uint64_t app_pid;
+    k64_elf_context_t* ctx;
     int rc;
 
     if (!path || !path[0]) {
@@ -277,8 +285,15 @@ static bool elf_execute_impl_ex(const char* path,
     }
 
     app_pid = elf_pid_for_entry(next_ephemeral_pid++, ehdr->e_entry);
-    if ((user_mode ? !k64_vmm_alloc_user_space(app_pid, &elf_app_space)
-                   : !k64_vmm_alloc_service_space(app_pid, &elf_app_space))) {
+    if (elf_context_depth < 0 || elf_context_depth >= K64_ELF_CONTEXT_MAX) {
+        K64_LOG_WARN("ELF: nested execution limit reached.");
+        return false;
+    }
+    ctx = &elf_contexts[elf_context_depth++];
+
+    if ((user_mode ? !k64_vmm_alloc_user_space(app_pid, &ctx->space)
+                   : !k64_vmm_alloc_service_space(app_pid, &ctx->space))) {
+        elf_context_depth--;
         K64_LOG_WARN("ELF: allocation failed.");
         return false;
     }
@@ -289,18 +304,19 @@ static bool elf_execute_impl_ex(const char* path,
         if (ph->p_type != K64_PT_LOAD || ph->p_memsz == 0) {
             continue;
         }
-        if (!(user_mode ? k64_vmm_map_user_range(&elf_app_space,
+        if (!(user_mode ? k64_vmm_map_user_range(&ctx->space,
                                                  ph->p_vaddr,
                                                  file_data + ph->p_offset,
                                                  (size_t)ph->p_filesz,
                                                  (size_t)ph->p_memsz)
-                        : k64_vmm_map_private_range(&elf_app_space,
+                        : k64_vmm_map_private_range(&ctx->space,
                                                     ph->p_vaddr,
                                                     file_data + ph->p_offset,
                                                     (size_t)ph->p_filesz,
                                                     (size_t)ph->p_memsz))) {
             K64_LOG_WARN("ELF: segment mapping failed.");
-            k64_vmm_release_service_space(&elf_app_space);
+            k64_vmm_release_service_space(&ctx->space);
+            elf_context_depth--;
             return false;
         }
     }
@@ -308,32 +324,35 @@ static bool elf_execute_impl_ex(const char* path,
     k64_term_write("ELF: executing ");
     k64_term_write(path);
     k64_term_putc('\n');
-    if (user_mode && !k64_vmm_is_mapped(&elf_app_space, ehdr->e_entry, true)) {
+    if (user_mode && !k64_vmm_is_mapped(&ctx->space, ehdr->e_entry, true)) {
         k64_term_write("ELF: entry page is not mapped\n");
-        k64_vmm_release_service_space(&elf_app_space);
+        k64_vmm_release_service_space(&ctx->space);
+        elf_context_depth--;
         return false;
     }
     if (user_mode) {
-        uint64_t user_stack_top = elf_app_space.stack_base + elf_app_space.stack_size - 16ULL;
-        elf_parse_args(&elf_args, path, args_text);
-        if (!elf_write_initial_stack(&elf_app_space, user_stack_top, &elf_args, &user_stack_top)) {
+        uint64_t user_stack_top = ctx->space.stack_base + ctx->space.stack_size - 16ULL;
+        elf_parse_args(&ctx->args, path, args_text);
+        if (!elf_write_initial_stack(&ctx->space, user_stack_top, &ctx->args, &user_stack_top)) {
             k64_term_write("ELF: failed to prepare process arguments\n");
-            k64_vmm_release_service_space(&elf_app_space);
+            k64_vmm_release_service_space(&ctx->space);
+            elf_context_depth--;
             return false;
         }
-        rc = (int)k64_usermode_execute_named_ex(&elf_app_space,
+        rc = (int)k64_usermode_execute_named_ex(&ctx->space,
                                                 ehdr->e_entry,
                                                 user_stack_top,
                                                 path,
                                                 parent_pid,
                                                 pid);
     } else {
-        rc = (int)k64_vmm_call_isolated(&elf_app_space, ehdr->e_entry, 0, 0, 0);
+        rc = (int)k64_vmm_call_isolated(&ctx->space, ehdr->e_entry, 0, 0, 0);
     }
     k64_term_write("ELF: exit code ");
     k64_term_write_dec((uint64_t)(uint32_t)rc);
     k64_term_putc('\n');
-    k64_vmm_release_service_space(&elf_app_space);
+    k64_vmm_release_service_space(&ctx->space);
+    elf_context_depth--;
     return true;
 }
 
