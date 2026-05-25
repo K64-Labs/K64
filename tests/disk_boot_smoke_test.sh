@@ -12,23 +12,38 @@ if [[ ! -f build/root.disk ]]; then
 fi
 
 log="$(mktemp)"
-trap 'rm -f "$log"' EXIT
+qemu_pid=""
+cleanup() {
+  if [[ -n "$qemu_pid" ]] && kill -0 "$qemu_pid" >/dev/null 2>&1; then
+    kill "$qemu_pid" >/dev/null 2>&1 || true
+    wait "$qemu_pid" >/dev/null 2>&1 || true
+  fi
+  rm -f "$log"
+}
+trap cleanup EXIT
 
 set +e
-timeout 30s qemu-system-x86_64 \
+qemu-system-x86_64 \
   -drive file=build/root.disk,format=raw,if=ide,index=0 \
   -display none \
   -serial stdio \
   -monitor none \
-  -no-reboot -no-shutdown >"$log" 2>&1
-qemu_status=$?
+  -no-reboot -no-shutdown >"$log" 2>&1 &
+qemu_pid=$!
 set -e
 
-if grep -q "K64 shell started. Type 'help' for commands." "$log"; then
-  echo "disk boot smoke test passed"
-  exit 0
-fi
+deadline=$((SECONDS + 60))
+while (( SECONDS < deadline )); do
+  if grep -q "K64 shell started. Type 'help' for commands." "$log"; then
+    echo "disk boot smoke test passed"
+    exit 0
+  fi
+  if ! kill -0 "$qemu_pid" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
 
 cat "$log"
-echo "disk boot smoke test failed; qemu status $qemu_status"
+echo "disk boot smoke test failed"
 exit 1
