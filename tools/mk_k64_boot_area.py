@@ -77,9 +77,6 @@ def main():
         early_cfg = tmp_path / "early.cfg"
         core_img = tmp_path / "core.img"
         early_cfg.write_text(
-            "serial --unit=0 --speed=9600\n"
-            "terminal_input serial console\n"
-            "terminal_output serial console\n"
             "set root=(hd0,msdos1)\n"
             "set prefix=(hd0,msdos1)/boot/grub\n"
             f"multiboot /boot/{args.kernel} pit_hz=1000 log_level=debug\n"
@@ -96,7 +93,6 @@ def main():
             "biosdisk",
             "part_msdos",
             "k64xfs",
-            "serial",
             "normal",
             "multiboot",
         ])
