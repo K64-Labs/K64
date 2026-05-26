@@ -197,6 +197,7 @@ typedef struct {
 
 void k64_system_registry_init(void);
 void k64_system_register_core_services(void);
+void k64_system_verify_ring3_services(void);
 void k64_system_init(void);
 void k64_system_bootstrap(void);
 void k64_system_poll_async(void);

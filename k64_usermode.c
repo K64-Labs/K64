@@ -1397,6 +1397,12 @@ int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
     if (!frame || !active_ctx.active) {
         return K64_ERR_INVAL;
     }
+    if (frame->rax == K64_SYSCALL_EXIT) {
+        active_ctx.result = (int64_t)frame->rdi;
+        active_ctx.active = 0;
+        process_finish(active_ctx.process_index, K64_USER_PROCESS_ZOMBIE, active_ctx.result);
+        k64_user_return_asm(&active_ctx, active_ctx.result);
+    }
     if (frame->rax != K64_SYSCALL_SERVICE_CALL) {
         return K64_ERR_NOSYS;
     }

@@ -300,7 +300,7 @@ The process model now records a stable PID, parent PID, scheduler task ID, state
 
 The file descriptor model is early but real. Each active user process has a small fd table; `0`, `1`, and `2` are stdin/stdout/stderr; `open()` returns fd values `>= 3`; read/close validate descriptors; stdout/stderr writes go through the fd path; `stat()` exposes filesystem metadata to userland; and `pipe()` creates anonymous read/write endpoints backed by fixed kernel ring buffers. File writes are still primarily the whole-file `write_file()` helper.
 
-v0.3.21 makes the service-call ABI the userland ABI beside the existing service command registry. Services can register named methods such as `kernel.version`, `kernel.uptime`, `fs.stat`, `fs.list_dir`, `fs.write_file`, `fs.move`, `io.open`, `io.read`, `io.write`, `io.pipe`, `proc.getpid`, `proc.info`, `proc.spawn`, `proc.wait`, `proc.exit`, `sched.yield`, `sched.sleep`, and terminal methods. The `service_call` syscall is a thin checked gate: it copies user input into bounded kernel buffers, dispatches through the service registry, and copies bounded responses back through checked user mappings. v0.3.28 adds an enforced Ring-3 startup gate for non-kernel services: they must have a Ring-3 entry image and pass verification before their commands or calls can dispatch.
+v0.3.21 makes the service-call ABI the userland ABI beside the existing service command registry. Services can register named methods such as `kernel.version`, `kernel.uptime`, `fs.stat`, `fs.list_dir`, `fs.write_file`, `fs.move`, `io.open`, `io.read`, `io.write`, `io.pipe`, `proc.getpid`, `proc.info`, `proc.spawn`, `proc.wait`, `proc.exit`, `sched.yield`, `sched.sleep`, and terminal methods. The `service_call` syscall is a thin checked gate: it copies user input into bounded kernel buffers, dispatches through the service registry, and copies bounded responses back through checked user mappings. v0.3.29 tightens the enforced Ring-3 startup gate so only the literal `kernel` service remains Ring 0; `fs`, `proc`, `io`, `sched`, `term`, `svc`, and all system/root/user services must pass Ring-3 verification before their commands or calls can dispatch.
 
 v0.3.22 adds a first POSIX-like multiuser permission core. The active `userctl` session has numeric runtime UID/GID identity, `stat()` reports owner and group IDs, `io.open`, `fs.*` service calls, `proc.spawn`, ELF execution, and `fsctl` operations check owner/group/other read, write, and execute bits, and root/sudo elevation maps to effective UID `0`.
 
@@ -395,7 +395,7 @@ The main constants today are:
 - heap size: `0x00100000`
 - stack size: `0x00008000`
 
-So when `servicectl list` shows a “VM BASE”, it now refers to a real isolated service window backed by a private address space. v0.3.28 also shows a `HOST` column: kernel mechanisms report `ring0`, verified non-kernel services report `ring3`, and services that have not passed the Ring-3 gate report `blocked`. Full persistent Ring-3 service hosting still needs a message queue and handler dispatch path that does not depend on kernel function pointers, but silent startup of a non-kernel service without a Ring-3 image is now rejected.
+So when `servicectl list` shows a “VM BASE”, it now refers to a real isolated service window backed by a private address space. The `HOST` column reports `ring0`, `ring3`, or `blocked`; after v0.3.29, `ring0` should appear only for the `kernel` service. Full persistent Ring-3 service hosting still needs a message queue and handler dispatch path that does not depend on kernel function pointers, but silent startup of a service without a Ring-3 image is now rejected.
 
 ## Driver Model (`.k64m`)
 
@@ -1782,7 +1782,7 @@ These are the main technical limits of the repository as it exists today.
 
 ### 1. Virtual memory isolation is strongest for `/ex` user programs
 
-Standalone `/ex` user programs enter ring 3, use checked syscall copies for user pointers, and fault back into the kernel on invalid memory access. Non-kernel services now have a mandatory Ring-3 startup gate before their owned command and call surfaces can dispatch. ELF-backed drivers are still kernel-side hardware mechanisms, and K64 still needs a persistent Ring-3 service message loop before every service handler can leave the kernel-mediated compatibility path.
+Standalone `/ex` user programs enter ring 3, use checked syscall copies for user pointers, and fault back into the kernel on invalid memory access. Services now have a mandatory Ring-3 startup gate before their owned command and call surfaces can dispatch, with `kernel` as the only Ring-0 service identity. ELF-backed drivers are still low-level hardware mechanisms behind the kernel boundary, and K64 still needs a persistent Ring-3 service message loop before every service handler can leave the kernel-mediated compatibility path.
 
 ### 2. Persistent storage is intentionally simple
 

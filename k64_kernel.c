@@ -93,6 +93,7 @@ void k64_kernel_main(void) {
     k64_modules_load_rootfs();
     k64_modules_bootstrap();
     k64_term_boot_status("drivers and K64XFS mounted", true);
+    k64_system_verify_ring3_services();
 
     K64_LOG_INFO("Initializing system services...");
     k64_system_init();

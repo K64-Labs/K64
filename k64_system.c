@@ -44,6 +44,11 @@ static bool kernel_call_command(const char* command, const char* args);
 static int64_t svc_demo_run_call(const k64_service_call_request_t* req);
 static bool service_verify_ring3_host(k64_service_t* service);
 
+static bool service_is_ring0_kernel(const k64_service_t* service) {
+    return service && service->class_id == K64_SERVICE_CLASS_KERNEL &&
+           k64_streq(service->name, "kernel");
+}
+
 static bool service_runs_unisolated(k64_service_t* service) {
     return service && k64_streq(service->name, "init");
 }
@@ -598,7 +603,7 @@ static bool service_verify_ring3_host(k64_service_t* service) {
     if (service->ring3_verified) {
         return true;
     }
-    if (service->class_id == K64_SERVICE_CLASS_KERNEL) {
+    if (service_is_ring0_kernel(service)) {
         service->ring3_verified = true;
         return true;
     }
@@ -797,6 +802,9 @@ k64_service_t* k64_system_register_service(const char* name,
     if (service_count >= K64_MAX_SERVICES) {
         return NULL;
     }
+    if (class_id == K64_SERVICE_CLASS_KERNEL && !k64_streq(name, "kernel")) {
+        class_id = K64_SERVICE_CLASS_SYSTEM;
+    }
 
     service = &services[service_count++];
     service->pid = allocate_pid(class_id);
@@ -814,8 +822,8 @@ k64_service_t* k64_system_register_service(const char* name,
     service->last_start_tick = 0;
     service->last_poll_tick = 0;
     service->controllable = controllable;
-    service->ring3_required = class_id != K64_SERVICE_CLASS_KERNEL;
-    service->ring3_verified = class_id == K64_SERVICE_CLASS_KERNEL;
+    service->ring3_required = !service_is_ring0_kernel(service);
+    service->ring3_verified = service_is_ring0_kernel(service);
     service->entry_path[0] = '\0';
     if (service->ring3_required) {
         copy_string(service->entry_path, sizeof(service->entry_path), "/ex/servicehost.elf");
@@ -875,7 +883,7 @@ void k64_system_register_core_services(void) {
 
     fs_service = k64_system_register_service("fs",
                                              "k64/fs",
-                                             K64_SERVICE_CLASS_KERNEL,
+                                             K64_SERVICE_CLASS_SYSTEM,
                                              K64_SERVICE_FLAG_ESSENTIAL,
                                              0,
                                              0,
@@ -910,7 +918,7 @@ void k64_system_register_core_services(void) {
 
     proc_service = k64_system_register_service("proc",
                                                "k64/proc",
-                                               K64_SERVICE_CLASS_KERNEL,
+                                               K64_SERVICE_CLASS_SYSTEM,
                                                K64_SERVICE_FLAG_ESSENTIAL,
                                                0,
                                                0,
@@ -927,7 +935,7 @@ void k64_system_register_core_services(void) {
 
     io_service = k64_system_register_service("io",
                                              "k64/io",
-                                             K64_SERVICE_CLASS_KERNEL,
+                                             K64_SERVICE_CLASS_SYSTEM,
                                              K64_SERVICE_FLAG_ESSENTIAL,
                                              0,
                                              0,
@@ -944,7 +952,7 @@ void k64_system_register_core_services(void) {
 
     sched_service = k64_system_register_service("sched",
                                                 "k64/sched",
-                                                K64_SERVICE_CLASS_KERNEL,
+                                                K64_SERVICE_CLASS_SYSTEM,
                                                 K64_SERVICE_FLAG_ESSENTIAL,
                                                 0,
                                                 0,
@@ -961,7 +969,7 @@ void k64_system_register_core_services(void) {
 
     term_service = k64_system_register_service("term",
                                                "k64/term",
-                                               K64_SERVICE_CLASS_KERNEL,
+                                               K64_SERVICE_CLASS_SYSTEM,
                                                K64_SERVICE_FLAG_ESSENTIAL,
                                                0,
                                                0,
@@ -979,7 +987,7 @@ void k64_system_register_core_services(void) {
     {
         k64_service_t* svc_service = k64_system_register_service("svc",
                                                                  "k64/svc",
-                                                                 K64_SERVICE_CLASS_KERNEL,
+                                                                 K64_SERVICE_CLASS_SYSTEM,
                                                                  K64_SERVICE_FLAG_ESSENTIAL,
                                                                  0,
                                                                  0,
@@ -997,6 +1005,25 @@ void k64_system_register_core_services(void) {
                                            K64_SERVICE_CALL_FLAG_KERNEL_ONLY |
                                            K64_SERVICE_CALL_FLAG_CAN_SPAWN,
                                            svc_demo_run_call);
+        }
+    }
+}
+
+void k64_system_verify_ring3_services(void) {
+    for (size_t i = 0; i < service_count; ++i) {
+        k64_service_t* service = &services[i];
+
+        if (service->state != K64_SERVICE_STATE_RUNNING || !service->ring3_required ||
+            service->ring3_verified) {
+            continue;
+        }
+        if (!service_verify_ring3_host(service)) {
+            k64_term_write("[svc] disabling unverified service ");
+            k64_term_write(service->name);
+            k64_term_putc('\n');
+            service->state = K64_SERVICE_STATE_STOPPED;
+            k64_system_unregister_commands(service->name);
+            k64_system_unregister_calls(service->name);
         }
     }
 }

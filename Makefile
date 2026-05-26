@@ -177,7 +177,7 @@ $(EX_BUILD_DIR)/%.o: ex/%.S
 
 $(EX_BUILD_DIR)/%.elf: $(EX_BUILD_DIR)/%.o
 	mkdir -p $(EX_BUILD_DIR)
-	$(LD) -nostdlib -static -e _start -Ttext 0x40100000 -o $@ $<
+	$(LD) -nostdlib -static -e _start $(USER_IMAGE_BASE_FLAG) -Ttext 0x40100000 -o $@ $<
 
 build/userland/%.o: userland/lib/%.S
 	mkdir -p build/userland

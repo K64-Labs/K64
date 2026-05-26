@@ -52,14 +52,14 @@ Feature-specific syscall numbers `0` through `24` are no longer supported from R
 
 ## Ring-3 service gate
 
-Kernel mechanisms such as `kernel`, `fs`, `proc`, `io`, `sched`, and `term` remain kernel-class services. Every other service is required to pass a Ring-3 startup gate before dispatch:
+As of v0.3.29, only the literal `kernel` service may be registered as a Ring-0 kernel-class service. Core owners such as `fs`, `proc`, `io`, `sched`, `term`, and `svc` are service facades and must pass the Ring-3 startup gate before dispatch:
 
 - the service has `K64_SERVICE_FLAG_RING3_REQUIRED`
 - the registry records a Ring-3 entry path
-- startup enters the Ring-3 image, currently `/ex/servicehost.elf` for built-in services
+- startup enters the Ring-3 image, currently `/ex/servicehost.elf` for built-in and core service facades
 - dispatch refuses the owner until `ring3_verified` is true
 
-This is the compatibility bridge toward persistent Ring-3 service servers. K64 still needs an async service message queue before all command handlers can be removed from kernel-mediated code.
+This is the compatibility bridge toward persistent Ring-3 service servers. K64 still needs an async service message queue before all command handlers can be removed from kernel-mediated code, but `servicectl list` should now report `ring0` only for `kernel`.
 
 ## Permission Model
 
