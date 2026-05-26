@@ -351,6 +351,7 @@ def main():
             ("elfrun /ex/fsservicetest.elf", "fsservicetest: OK"),
             ("elfrun /ex/procservicetest.elf", "procservicetest: OK"),
             ("elfrun /ex/badcall.elf", "badcall: OK"),
+            ("elfrun /ex/servicefuzz.elf", "servicefuzz: OK"),
             ("elfrun /ex/manyproc.elf", "manyproc: OK"),
             ("unknown-smoke-command", "Unknown command: unknown-smoke-command"),
             ]

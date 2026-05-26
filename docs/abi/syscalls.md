@@ -40,9 +40,10 @@ Normal exits currently transition to `ZOMBIE`; faulted user programs transition 
 
 | Nr | Name | Arguments | Return |
 | ---: | --- | --- | --- |
+| `0` | `emergency_exit` | `code` | does not return |
 | `25` | `service_call` | `call_ptr` | service return value or error |
 
-v0.3.21 makes `service_call` the only supported user/kernel syscall gate. Former feature-specific syscall numbers `0` through `24` are no longer public ABI and return `K64_ERR_NOSYS` from Ring 3. Userland termination is now `proc.exit` through `service_call`.
+`service_call` is the supported user/kernel ABI. Syscall `0` is kept as a tiny emergency exit path for early service-host bootstrap and fault-containment paths that cannot safely depend on `proc.exit` yet. Former feature-specific syscall numbers `1` through `24` are closed and return `K64_ERR_NOSYS` from Ring 3. Normal userland termination should use `proc.exit` through `service_call`.
 
 ## Notes
 
@@ -59,7 +60,7 @@ v0.3.21 makes `service_call` the only supported user/kernel syscall gate. Former
 - Filesystem service calls enforce the current effective user against owner/group/other mode bits for read, write, execute, create, open, and ELF execution paths. Root bypasses these checks.
 - UID/GID ownership is runtime metadata in this release. Mode bits persist in current K64XFS images, but UID/GID fields are re-derived during boot from the user database and service policy until the on-image format grows dedicated ownership fields.
 - The ELF loader keeps a small nested execution context stack so a parent `/ex` program can safely run a child during blocking wait without clobbering the parent's loader or syscall-stack state.
-- `service_call(call_ptr)` reads a `k64_service_call_user_t` through checked user memory, copies service and method names, bounds request/response payloads to 65536 bytes, dispatches through the service-call registry, and copies the response back through checked user memory.
+- `service_call(call_ptr)` reads a `k64_service_call_user_t` through checked user memory, copies service and method names, requires NUL termination within the service/method limits, rejects empty or malformed names, bounds request/response payloads to 65536 bytes, dispatches through the service-call registry, and copies the response back through checked user memory.
 - The libc wrappers for process, scheduler, FD, pipe, filesystem, terminal, and text-framebuffer operations use service methods rather than old syscall numbers.
 
 ## `k64_service_call_user_t`

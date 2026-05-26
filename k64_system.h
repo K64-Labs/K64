@@ -73,6 +73,11 @@ typedef void (*k64_service_poll_fn)(struct k64_service* service, uint64_t now_ti
 typedef bool (*k64_service_command_fn)(const char* command, const char* args);
 typedef int64_t (*k64_service_call_fn)(const struct k64_service_call_request* req);
 
+typedef enum {
+    K64_SERVICE_CALL_BACKEND_KERNEL = 0,
+    K64_SERVICE_CALL_BACKEND_RING3_MESSAGE = 1,
+} k64_service_call_backend_t;
+
 typedef struct k64_service {
     uint64_t             pid;
     char                 name[32];
@@ -125,6 +130,7 @@ typedef struct k64_service_call {
     char owner[K64_SERVICE_CALL_OWNER_MAX];
     char name[K64_SERVICE_CALL_NAME_MAX];
     uint32_t flags;
+    k64_service_call_backend_t backend;
     k64_service_call_fn handler;
     bool active;
 } k64_service_call_t;
@@ -213,6 +219,11 @@ bool k64_system_register_call(const char* owner,
                               const char* name,
                               uint32_t flags,
                               k64_service_call_fn handler);
+bool k64_system_register_call_backend(const char* owner,
+                                      const char* name,
+                                      uint32_t flags,
+                                      k64_service_call_backend_t backend,
+                                      k64_service_call_fn handler);
 void k64_system_unregister_calls(const char* owner);
 int64_t k64_system_dispatch_call(const char* service,
                                  const char* method,

@@ -9,11 +9,14 @@ A service call has:
 - an owner service name, such as `kernel`, `fs`, or `proc`
 - a method name, such as `version`, `stat`, or `info`
 - flags describing who may call it and whether it may write files, use networking, or spawn helpers
-- a handler currently registered by the kernel service host
+- a backend type: `kernel` for current kernel-mediated handlers or `ring3-msg` for future message-driven Ring-3 service servers
+- a handler for kernel-hosted calls, or a service queue for Ring-3-message calls once persistent service IPC is enabled
 
-Calls are dispatchable only while their owner service is running. The v0.3.21 user/kernel gate is only `service_call`; legacy feature-specific syscall numbers return `K64_ERR_NOSYS`.
+Calls are dispatchable only while their owner service is running. The user/kernel gate is `service_call`; closed feature-specific syscall numbers return `K64_ERR_NOSYS`.
 
 Most service handlers started as kernel-hosted in v0.3.21 because K64 did not yet have message queues, resumable service processes, or a safe Ring-3 service registration ABI. v0.3.28 adds a Ring-3 service gate: non-kernel services must have a Ring-3 entry image and pass startup verification before their owned commands or service calls can dispatch.
+
+v0.3.30 adds explicit backend metadata to each registered service call. The dispatcher still supports kernel-hosted calls for compatibility, but the registry can now represent Ring-3-message-backed calls without changing the userland ABI. Ring-3-message dispatch returns a bounded service error until the persistent service queue work lands.
 
 v0.3.22 adds a first multiuser permission layer on top of those service calls. Filesystem and process-launch calls now consult the effective UID/GID from `userctl` and check owner/group/other mode bits before reading, writing, creating, opening, listing, moving, or executing paths.
 
@@ -23,13 +26,15 @@ v0.3.25 adds a login gate to the shell and an installer-mode boot flow. v0.3.28 
 
 Userland cannot pass function pointers or kernel addresses. The `service_call` syscall copies the user argument block, copies service and method strings through checked user memory, rejects payloads larger than 65536 bytes, copies request bytes into a kernel staging buffer, dispatches the service call, then copies the bounded response back through checked user memory.
 
+Service and method names must be non-empty, NUL-terminated within their fixed limits, and contain only ASCII letters, digits, `_`, `-`, or `.`. Bad pointers return `K64_ERR_FAULT`; malformed names return `K64_ERR_INVAL`.
+
 Common errors:
 
 - `K64_ERR_FAULT`: bad user pointer
 - `K64_ERR_NOENT`: unknown service or method, or owner service is not running
 - `K64_ERR_ACCESS`: caller is not allowed
 - `K64_ERR_OVERFLOW`: request or response exceeds the payload limit
-- `K64_ERR_BUSY`: service-call nesting limit reached
+- `K64_ERR_BUSY`: service-call nesting limit reached or a Ring-3-message backend is registered but the message queue is not available yet
 
 ## Current Calls
 
@@ -46,9 +51,9 @@ Common errors:
 - `sched.yield`, `sched.sleep`: cooperative scheduling operations
 - `term.clear`, `term.read_key`, `term.read_key_nonblock`, `term.set_cursor`, `term.size`, `term.fb_info`, `term.fb_blit`: terminal and text framebuffer operations
 
-## Legacy Syscalls
+## Closed Feature Syscalls
 
-Feature-specific syscall numbers `0` through `24` are no longer supported from Ring 3 and return `K64_ERR_NOSYS`. The libc shim keeps the old C function names, but those wrappers marshal service-call requests instead of issuing the old syscall numbers. The raw `k64_syscall3()` helper remains only for low-level tests of the syscall gate.
+Feature-specific syscall numbers `1` through `24` are not supported from Ring 3 and return `K64_ERR_NOSYS`. Syscall `0` remains a minimal emergency exit exception while early service-host bootstrap still needs a termination path that does not depend on `proc.exit`. The libc shim keeps the old C function names, but those wrappers marshal service-call requests instead of issuing the old syscall numbers. The raw `k64_syscall3()` helper remains only for low-level tests of the syscall gate.
 
 ## Ring-3 service gate
 

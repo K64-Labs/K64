@@ -775,6 +775,7 @@ void k64_system_registry_init(void) {
         service_calls[i].name[0] = '\0';
         service_calls[i].owner[0] = '\0';
         service_calls[i].flags = 0;
+        service_calls[i].backend = K64_SERVICE_CALL_BACKEND_KERNEL;
         service_calls[i].handler = NULL;
         service_calls[i].active = false;
     }
@@ -1292,9 +1293,23 @@ bool k64_system_register_call(const char* owner,
                               const char* name,
                               uint32_t flags,
                               k64_service_call_fn handler) {
+    return k64_system_register_call_backend(owner,
+                                            name,
+                                            flags,
+                                            K64_SERVICE_CALL_BACKEND_KERNEL,
+                                            handler);
+}
+
+bool k64_system_register_call_backend(const char* owner,
+                                      const char* name,
+                                      uint32_t flags,
+                                      k64_service_call_backend_t backend,
+                                      k64_service_call_fn handler) {
     if (!name_valid(owner, K64_SERVICE_CALL_OWNER_MAX) ||
         !name_valid(name, K64_SERVICE_CALL_NAME_MAX) ||
-        !handler) {
+        (backend == K64_SERVICE_CALL_BACKEND_KERNEL && !handler) ||
+        (backend != K64_SERVICE_CALL_BACKEND_KERNEL &&
+         backend != K64_SERVICE_CALL_BACKEND_RING3_MESSAGE)) {
         return false;
     }
     for (size_t i = 0; i < K64_MAX_SERVICE_CALLS; ++i) {
@@ -1309,6 +1324,7 @@ bool k64_system_register_call(const char* owner,
             copy_string(service_calls[i].owner, sizeof(service_calls[i].owner), owner);
             copy_string(service_calls[i].name, sizeof(service_calls[i].name), name);
             service_calls[i].flags = flags;
+            service_calls[i].backend = backend;
             service_calls[i].handler = handler;
             service_calls[i].active = true;
             return true;
@@ -1324,6 +1340,7 @@ void k64_system_unregister_calls(const char* owner) {
             service_calls[i].owner[0] = '\0';
             service_calls[i].name[0] = '\0';
             service_calls[i].flags = 0;
+            service_calls[i].backend = K64_SERVICE_CALL_BACKEND_KERNEL;
             service_calls[i].handler = NULL;
         }
     }
@@ -1352,7 +1369,7 @@ int64_t k64_system_dispatch_call(const char* service,
         k64_service_call_request_t req;
         int64_t rc;
 
-        if (!service_calls[i].active || !service_calls[i].handler) {
+        if (!service_calls[i].active) {
             continue;
         }
         if (!k64_streq(service_calls[i].owner, service) ||
@@ -1393,6 +1410,12 @@ int64_t k64_system_dispatch_call(const char* service,
         req.out_len = out_len;
         req.actual_out_len = 0;
         req.flags = service_calls[i].flags;
+        if (service_calls[i].backend == K64_SERVICE_CALL_BACKEND_RING3_MESSAGE) {
+            return K64_ERR_BUSY;
+        }
+        if (!service_calls[i].handler) {
+            return K64_ERR_NOENT;
+        }
         rc = service_calls[i].handler(&req);
         if (actual_out_len) {
             *actual_out_len = req.actual_out_len;
@@ -1414,7 +1437,7 @@ bool k64_system_call_exists(const char* service, const char* method) {
 }
 
 void k64_system_dump_calls(void) {
-    k64_term_write("SERVICE.METHOD                 OWNER     FLAGS\n");
+    k64_term_write("SERVICE.METHOD                 OWNER     BACKEND       FLAGS\n");
     for (size_t i = 0; i < K64_MAX_SERVICE_CALLS; ++i) {
         k64_service_t* owner;
 
@@ -1428,6 +1451,9 @@ void k64_system_dump_calls(void) {
         k64_term_write("  ");
         k64_term_write(service_calls[i].owner);
         k64_term_write("  ");
+        k64_term_write(service_calls[i].backend == K64_SERVICE_CALL_BACKEND_RING3_MESSAGE
+                       ? "ring3-msg "
+                       : "kernel ");
         print_call_flags(service_calls[i].flags);
         k64_term_write(owner && owner->state == K64_SERVICE_STATE_RUNNING ? "running" : "stopped");
         k64_term_putc('\n');
