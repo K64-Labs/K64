@@ -16,10 +16,11 @@ K64 is currently best understood as:
 - an experimental K64XFS modern block-backed filesystem core with `xfsctl` tooling
 - a first RTL8139/e1000-backed Ethernet path for QEMU and VMware-style VM networking
 - a system where user-facing commands are mostly exposed by services rather than hard-coded into the kernel core
+- a cooperative asynchronous userland step where spawned `/ex` children can run from yield/sleep and shell/service poll points before a parent waits
 
 It is not yet:
 
-- a fully isolated multi-process OS with complete POSIX userland, libc, and process management
+- a fully timer-preemptive multi-process OS with complete POSIX userland, libc, and process management
 - a production-ready hot-reloadable kernel
 - a modern UEFI/USB-first OS
 

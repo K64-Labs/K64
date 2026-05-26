@@ -77,7 +77,7 @@ A `ring3-msg` service call does not invoke a kernel handler for the method. The 
 - `svc.recv <service>` through the service-call ABI, which returns a `k64_service_recv_resp_t`
 - `svc.reply`, which supplies a request ID, status, and bounded response payload
 
-The current implementation is synchronous because user processes are still cooperative and wait-driven. It proves the ABI, copy boundaries, caller metadata, and service-host authorization model, but it is not yet a fully persistent asynchronous server loop. The next scheduler step must let service processes stay blocked on queues instead of being entered for each request.
+The current implementation is synchronous at the service-call return boundary, but v0.3.32 removes the strict wait-driven child execution path. `proc.spawn` now reserves a child immediately and queued children can run from cooperative scheduler points such as `sched.yield`, `sched.sleep`, and the shell/service poll loop before a parent calls `proc.wait`. This is still not full timer-preemptive user scheduling, but spawned work is no longer tied only to `waitpid`.
 
 ## Permission Model
 

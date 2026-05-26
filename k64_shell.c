@@ -1106,6 +1106,8 @@ void k64_shell_service_poll(struct k64_service* service, uint64_t now_ticks) {
         shell_runtime.banner_printed = true;
     }
 
+    k64_usermode_poll_background();
+
     for (int i = 0; i < SHELL_EVENTS_PER_POLL; ++i) {
         if (!shell_poll_event(&event)) {
             break;

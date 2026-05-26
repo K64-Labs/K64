@@ -95,6 +95,7 @@ uint64_t k64_usermode_next_pid(void);
 uint64_t k64_usermode_current_pid(void);
 bool k64_usermode_current_path(char* out, size_t out_size);
 bool k64_usermode_is_active(void);
+void k64_usermode_poll_background(void);
 void k64_usermode_dump_processes(void);
 void k64_usermode_handle_fault(uint64_t vec,
                                uint64_t err,

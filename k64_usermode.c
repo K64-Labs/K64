@@ -181,6 +181,7 @@ static k64_user_spawn_ctx_t spawn_ctx[K64_USER_SPAWN_MAX];
 
 static int64_t queue_spawn(const char* path, const char* args);
 static int64_t run_reserved_child(uint64_t pid, uint64_t parent_pid);
+static bool run_ready_child_for_parent(uint64_t parent_pid);
 
 static void set_tss_descriptor(uint64_t base, uint32_t limit) {
     uint64_t low;
@@ -836,6 +837,23 @@ static int64_t run_reserved_child(uint64_t pid, uint64_t parent_pid) {
     return K64_OK;
 }
 
+static bool run_ready_child_for_parent(uint64_t parent_pid) {
+    for (int i = 0; i < K64_USER_SPAWN_MAX; ++i) {
+        if (spawn_ctx[i].used && (parent_pid == 0 || spawn_ctx[i].parent_pid == parent_pid)) {
+            (void)run_reserved_child(spawn_ctx[i].pid, spawn_ctx[i].parent_pid);
+            return true;
+        }
+    }
+    return false;
+}
+
+void k64_usermode_poll_background(void) {
+    if (active_ctx.active) {
+        return;
+    }
+    (void)run_ready_child_for_parent(0);
+}
+
 bool k64_usermode_execute_nested_path_args(const char* path, const char* args) {
     k64_user_exec_context_t saved_ctx;
     uint64_t saved_rsp0;
@@ -983,6 +1001,7 @@ static int64_t proc_getpid_service_call(const k64_service_call_request_t* req) {
 
 static int64_t sched_yield_service_call(const k64_service_call_request_t* req) {
     (void)req;
+    (void)run_ready_child_for_parent(current_process_pid());
     k64_sched_yield();
     usermode_yield_once();
     return K64_OK;
@@ -995,6 +1014,7 @@ static int64_t sched_sleep_service_call(const k64_service_call_request_t* req) {
         return K64_ERR_INVAL;
     }
     in = (const k64_service_sched_sleep_req_t*)req->in;
+    (void)run_ready_child_for_parent(current_process_pid());
     k64_sched_sleep(in->ticks);
     usermode_park_until_current_ready();
     return K64_OK;
