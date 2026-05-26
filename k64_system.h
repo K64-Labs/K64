@@ -32,6 +32,8 @@
 #define K64_SERVICE_CALLER_KERNEL (1ULL << 0)
 #define K64_SERVICE_CALLER_ROOT   (1ULL << 1)
 
+#define K64_SERVICE_MSG_DATA_MAX 65400
+
 typedef enum {
     K64_SERVICE_CLASS_KERNEL = 0,
     K64_SERVICE_CLASS_SYSTEM = 1,
@@ -200,6 +202,29 @@ typedef struct {
     int32_t cols;
     int32_t rows;
 } k64_service_term_size_resp_t;
+
+typedef struct {
+    uint64_t request_id;
+    uint64_t caller_pid;
+    uint64_t caller_uid;
+    uint64_t request_len;
+    uint64_t response_capacity;
+    uint64_t flags;
+    char service[K64_SERVICE_CALL_OWNER_MAX];
+    char method[K64_SERVICE_CALL_NAME_MAX];
+} k64_service_msg_header_t;
+
+typedef struct {
+    k64_service_msg_header_t header;
+    uint8_t data[K64_SERVICE_MSG_DATA_MAX];
+} k64_service_recv_resp_t;
+
+typedef struct {
+    uint64_t request_id;
+    int64_t status;
+    uint64_t response_len;
+    uint8_t data[K64_SERVICE_MSG_DATA_MAX];
+} k64_service_reply_req_t;
 
 void k64_system_registry_init(void);
 void k64_system_register_core_services(void);

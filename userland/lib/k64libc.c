@@ -366,6 +366,43 @@ int64_t k64_service_call(const char* service,
     return k64_service_call_ex(&call);
 }
 
+int64_t k64_service_recv(const char* service, k64_service_recv_resp_t* out) {
+    if (!service || !out) {
+        return K64_ERR_INVAL;
+    }
+    return k64_service_call("svc",
+                            "recv",
+                            service,
+                            k64_strlen(service) + 1,
+                            out,
+                            sizeof(*out));
+}
+
+int64_t k64_service_reply(uint64_t request_id,
+                          int64_t status,
+                          const void* response,
+                          uint64_t response_len) {
+    static k64_service_reply_req_t reply;
+
+    if (response_len > K64_SERVICE_MSG_DATA_MAX ||
+        (response_len && !response)) {
+        return response_len > K64_SERVICE_MSG_DATA_MAX ? K64_ERR_OVERFLOW : K64_ERR_INVAL;
+    }
+    reply.request_id = request_id;
+    reply.status = status;
+    reply.response_len = response_len;
+    if (response_len) {
+        k64_memcpy(reply.data, response, (size_t)response_len);
+    }
+    return k64_service_call("svc",
+                            "reply",
+                            &reply,
+                            sizeof(reply.request_id) + sizeof(reply.status) +
+                                sizeof(reply.response_len) + response_len,
+                            NULL,
+                            0);
+}
+
 uint64_t k64_uptime_ticks(void) {
     uint64_t ticks = 0;
     int64_t rc = k64_service_call("kernel", "uptime", NULL, 0, &ticks, sizeof(ticks));

@@ -285,8 +285,10 @@ def main():
             ("cat /etc/keyboard/layout.cfg", "us"),
             ("servicectl list", "PID   STATE"),
             ("calls", "kernel.version"),
+            ("calls", "demo.echo"),
             ("call kernel.version", "0.3."),
             ("call fs.stat /etc/motd", "file /etc/motd"),
+            ("call demo.echo hello", "hello"),
             ("id", "real=guest"),
             ("stat /usr/guest", "uid=1001"),
             ("xfsctl devices", "size=" if attach_disk else PROMPT_NEEDLE),
@@ -352,6 +354,7 @@ def main():
             ("elfrun /ex/procservicetest.elf", "procservicetest: OK"),
             ("elfrun /ex/badcall.elf", "badcall: OK"),
             ("elfrun /ex/servicefuzz.elf", "servicefuzz: OK"),
+            ("elfrun /ex/demosvctest.elf", "demosvctest: OK"),
             ("elfrun /ex/manyproc.elf", "manyproc: OK"),
             ("unknown-smoke-command", "Unknown command: unknown-smoke-command"),
             ]

@@ -384,6 +384,32 @@ static uint64_t current_process_pid(void) {
     return process_table[active_ctx.process_index].pid;
 }
 
+uint64_t k64_usermode_current_pid(void) {
+    return current_process_pid();
+}
+
+bool k64_usermode_current_path(char* out, size_t out_size) {
+    const char* src;
+    size_t i = 0;
+
+    if (!out || out_size == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (active_ctx.process_index < 0 ||
+        active_ctx.process_index >= K64_USER_PROCESS_MAX ||
+        !process_table[active_ctx.process_index].used) {
+        return false;
+    }
+    src = process_table[active_ctx.process_index].path;
+    while (src[i] && i + 1 < out_size) {
+        out[i] = src[i];
+        i++;
+    }
+    out[i] = '\0';
+    return true;
+}
+
 static void process_fill_info(int index, k64_proc_info_t* out) {
     const k64_user_process_t* proc;
     uint64_t now;
@@ -808,6 +834,24 @@ static int64_t run_reserved_child(uint64_t pid, uint64_t parent_pid) {
 
     clear_spawn_ctx(pid);
     return K64_OK;
+}
+
+bool k64_usermode_execute_nested_path_args(const char* path, const char* args) {
+    k64_user_exec_context_t saved_ctx;
+    uint64_t saved_rsp0;
+    bool ok;
+
+    if (!path || !path[0]) {
+        return false;
+    }
+    saved_ctx = active_ctx;
+    saved_rsp0 = tss64.rsp0;
+    tss64.rsp0 = (uint64_t)(uintptr_t)(nested_syscall_stack + sizeof(nested_syscall_stack));
+    ok = k64_elf_spawn_user_path_args_ex(path, args ? args : "", 0, 0);
+    tss64.rsp0 = saved_rsp0;
+    active_ctx = saved_ctx;
+    active_ctx.scheduler_unlocked = false;
+    return ok;
 }
 
 static char read_stdin_char_blocking(void) {
@@ -1494,7 +1538,8 @@ int64_t k64_usermode_execute_named_ex(const k64_vm_space_t* space,
     if (process_table[process_index].state == K64_USER_PROCESS_RUNNING) {
         process_finish(process_index, K64_USER_PROCESS_ZOMBIE, active_ctx.result);
     }
-    if (parent_pid == 0 && pid == 0 && path && k64_streq(path, "/ex/servicehost.elf")) {
+    if (parent_pid == 0 && pid == 0 && path &&
+        (k64_streq(path, "/ex/servicehost.elf") || k64_streq(path, "/ex/demosvc.elf"))) {
         process_reap(process_index);
     }
 

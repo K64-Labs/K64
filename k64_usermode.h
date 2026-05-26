@@ -90,7 +90,10 @@ int64_t k64_usermode_execute_named_ex(const k64_vm_space_t* space,
                                       const char* path,
                                       uint64_t parent_pid,
                                       uint64_t pid);
+bool k64_usermode_execute_nested_path_args(const char* path, const char* args);
 uint64_t k64_usermode_next_pid(void);
+uint64_t k64_usermode_current_pid(void);
+bool k64_usermode_current_path(char* out, size_t out_size);
 bool k64_usermode_is_active(void);
 void k64_usermode_dump_processes(void);
 void k64_usermode_handle_fault(uint64_t vec,

@@ -14,6 +14,7 @@
 
 #define K64_MAX_SERVICES 32
 #define K64_MAX_SERVICE_COMMANDS 96
+#define K64_MAX_SERVICE_MESSAGES 8
 #define K64_SYSTEM_PID_BASE 1000
 #define K64_ROOT_PID_BASE   2000
 #define K64_USER_PID_BASE   3000
@@ -25,6 +26,33 @@ void k64s_register_builtin_services(void);
 static k64_service_t services[K64_MAX_SERVICES];
 static k64_service_command_t service_commands[K64_MAX_SERVICE_COMMANDS];
 static k64_service_call_t service_calls[K64_MAX_SERVICE_CALLS];
+
+typedef enum {
+    K64_SERVICE_MSG_EMPTY = 0,
+    K64_SERVICE_MSG_PENDING,
+    K64_SERVICE_MSG_ACTIVE,
+    K64_SERVICE_MSG_DONE,
+} k64_service_msg_state_t;
+
+typedef struct {
+    k64_service_msg_state_t state;
+    uint64_t request_id;
+    uint64_t caller_pid;
+    uint64_t caller_uid;
+    uint64_t caller_flags;
+    uint64_t service_pid;
+    char service[K64_SERVICE_CALL_OWNER_MAX];
+    char method[K64_SERVICE_CALL_NAME_MAX];
+    uint8_t request[K64_SERVICE_MSG_DATA_MAX];
+    size_t request_len;
+    uint8_t response[K64_SERVICE_MSG_DATA_MAX];
+    size_t response_len;
+    size_t response_capacity;
+    int64_t status;
+} k64_service_msg_t;
+
+static k64_service_msg_t service_msgs[K64_MAX_SERVICE_MESSAGES];
+static uint64_t next_service_request_id = 1;
 static size_t service_count = 0;
 static uint64_t next_system_pid = K64_SYSTEM_PID_BASE;
 static uint64_t next_root_pid = K64_ROOT_PID_BASE;
@@ -42,6 +70,8 @@ static void service_worker_main(void* arg);
 static bool kernel_calls_command(const char* command, const char* args);
 static bool kernel_call_command(const char* command, const char* args);
 static int64_t svc_demo_run_call(const k64_service_call_request_t* req);
+static int64_t svc_recv_call(const k64_service_call_request_t* req);
+static int64_t svc_reply_call(const k64_service_call_request_t* req);
 static bool service_verify_ring3_host(k64_service_t* service);
 
 static bool service_is_ring0_kernel(const k64_service_t* service) {
@@ -245,6 +275,124 @@ static void copy_response(k64_service_call_request_t* req, const void* data, siz
     }
     count = len < req->out_len ? len : req->out_len;
     memcpy(req->out, data, count);
+}
+
+static bool current_process_is_service_host(const k64_service_t* service) {
+    char path[96];
+
+    if (!service || !service->entry_path[0] ||
+        !k64_usermode_current_path(path, sizeof(path))) {
+        return false;
+    }
+    return k64_streq(path, service->entry_path);
+}
+
+static k64_service_msg_t* service_msg_alloc(void) {
+    for (size_t i = 0; i < K64_MAX_SERVICE_MESSAGES; ++i) {
+        if (service_msgs[i].state == K64_SERVICE_MSG_EMPTY) {
+            service_msgs[i].state = K64_SERVICE_MSG_PENDING;
+            service_msgs[i].request_id = next_service_request_id++;
+            if (next_service_request_id == 0) {
+                next_service_request_id = 1;
+            }
+            service_msgs[i].caller_pid = 0;
+            service_msgs[i].caller_uid = 0;
+            service_msgs[i].caller_flags = 0;
+            service_msgs[i].service_pid = 0;
+            service_msgs[i].service[0] = '\0';
+            service_msgs[i].method[0] = '\0';
+            service_msgs[i].request_len = 0;
+            service_msgs[i].response_len = 0;
+            service_msgs[i].response_capacity = 0;
+            service_msgs[i].status = K64_ERR_BUSY;
+            return &service_msgs[i];
+        }
+    }
+    return NULL;
+}
+
+static void service_msg_clear(k64_service_msg_t* msg) {
+    if (!msg) {
+        return;
+    }
+    msg->state = K64_SERVICE_MSG_EMPTY;
+    msg->request_id = 0;
+    msg->caller_pid = 0;
+    msg->caller_uid = 0;
+    msg->caller_flags = 0;
+    msg->service_pid = 0;
+    msg->service[0] = '\0';
+    msg->method[0] = '\0';
+    msg->request_len = 0;
+    msg->response_len = 0;
+    msg->response_capacity = 0;
+    msg->status = K64_ERR_BUSY;
+}
+
+static k64_service_msg_t* service_msg_find(uint64_t request_id) {
+    if (request_id == 0) {
+        return NULL;
+    }
+    for (size_t i = 0; i < K64_MAX_SERVICE_MESSAGES; ++i) {
+        if (service_msgs[i].state != K64_SERVICE_MSG_EMPTY &&
+            service_msgs[i].request_id == request_id) {
+            return &service_msgs[i];
+        }
+    }
+    return NULL;
+}
+
+static int64_t dispatch_ring3_message_call(k64_service_t* owner,
+                                           const k64_service_call_t* call,
+                                           const void* in,
+                                           size_t in_len,
+                                           void* out,
+                                           size_t out_len,
+                                           size_t* actual_out_len,
+                                           uint64_t caller_pid,
+                                           uint64_t caller_flags) {
+    k64_service_msg_t* msg;
+    bool ran;
+    int64_t status;
+
+    if (!owner || !call || in_len > K64_SERVICE_MSG_DATA_MAX) {
+        return K64_ERR_INVAL;
+    }
+    if (!owner->entry_path[0]) {
+        return K64_ERR_NOENT;
+    }
+    msg = service_msg_alloc();
+    if (!msg) {
+        return K64_ERR_BUSY;
+    }
+    msg->caller_pid = caller_pid;
+    msg->caller_uid = (caller_flags & K64_SERVICE_CALLER_KERNEL) ? 0 : k64_user_effective_uid();
+    msg->caller_flags = caller_flags;
+    msg->response_capacity = out_len < K64_SERVICE_MSG_DATA_MAX ? out_len : K64_SERVICE_MSG_DATA_MAX;
+    copy_string(msg->service, sizeof(msg->service), call->owner);
+    copy_string(msg->method, sizeof(msg->method), call->name);
+    if (in_len && in) {
+        memcpy(msg->request, in, in_len);
+    }
+    msg->request_len = in_len;
+
+    ran = k64_usermode_execute_nested_path_args(owner->entry_path, owner->name);
+    if (!ran || msg->state != K64_SERVICE_MSG_DONE) {
+        service_msg_clear(msg);
+        return K64_ERR_BUSY;
+    }
+
+    status = msg->status;
+    if (actual_out_len) {
+        *actual_out_len = msg->response_len;
+    }
+    if (status >= 0 && msg->response_len > out_len) {
+        status = K64_ERR_OVERFLOW;
+    } else if (status >= 0 && msg->response_len && out) {
+        memcpy(out, msg->response, msg->response_len);
+    }
+    service_msg_clear(msg);
+    return status;
 }
 
 static bool fs_call_can_access_path(const char* path, uint32_t mask) {
@@ -779,11 +927,15 @@ void k64_system_registry_init(void) {
         service_calls[i].handler = NULL;
         service_calls[i].active = false;
     }
+    for (size_t i = 0; i < K64_MAX_SERVICE_MESSAGES; ++i) {
+        service_msg_clear(&service_msgs[i]);
+    }
 
     service_count = 0;
     next_system_pid = K64_SYSTEM_PID_BASE;
     next_root_pid = K64_ROOT_PID_BASE;
     next_user_pid = K64_USER_PID_BASE;
+    next_service_request_id = 1;
     rootfs_ctx_count = 0;
 }
 
@@ -1006,6 +1158,56 @@ void k64_system_register_core_services(void) {
                                            K64_SERVICE_CALL_FLAG_KERNEL_ONLY |
                                            K64_SERVICE_CALL_FLAG_CAN_SPAWN,
                                            svc_demo_run_call);
+            (void)k64_system_register_call("svc",
+                                           "recv",
+                                           K64_SERVICE_CALL_FLAG_PUBLIC |
+                                           K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                           svc_recv_call);
+            (void)k64_system_register_call("svc",
+                                           "reply",
+                                           K64_SERVICE_CALL_FLAG_PUBLIC |
+                                           K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                           svc_reply_call);
+        }
+    }
+
+    {
+        k64_service_t* demo_service = k64_system_register_service("demo",
+                                                                  "/ex/demosvc.elf",
+                                                                  K64_SERVICE_CLASS_SYSTEM,
+                                                                  0,
+                                                                  0,
+                                                                  0,
+                                                                  true,
+                                                                  default_start,
+                                                                  default_stop,
+                                                                  NULL,
+                                                                  NULL);
+        if (demo_service) {
+            demo_service->state = K64_SERVICE_STATE_RUNNING;
+            demo_service->start_count = 1;
+            demo_service->vm_space.present = true;
+            copy_string(demo_service->entry_path,
+                        sizeof(demo_service->entry_path),
+                        "/ex/demosvc.elf");
+            (void)k64_system_register_call_backend("demo",
+                                                   "echo",
+                                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                                   K64_SERVICE_CALL_BACKEND_RING3_MESSAGE,
+                                                   NULL);
+            (void)k64_system_register_call_backend("demo",
+                                                   "upper",
+                                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                                   K64_SERVICE_CALL_BACKEND_RING3_MESSAGE,
+                                                   NULL);
+            (void)k64_system_register_call_backend("demo",
+                                                   "pid",
+                                                   K64_SERVICE_CALL_FLAG_PUBLIC |
+                                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                                   K64_SERVICE_CALL_BACKEND_RING3_MESSAGE,
+                                                   NULL);
         }
     }
 }
@@ -1411,7 +1613,15 @@ int64_t k64_system_dispatch_call(const char* service,
         req.actual_out_len = 0;
         req.flags = service_calls[i].flags;
         if (service_calls[i].backend == K64_SERVICE_CALL_BACKEND_RING3_MESSAGE) {
-            return K64_ERR_BUSY;
+            return dispatch_ring3_message_call(owner,
+                                               &service_calls[i],
+                                               in,
+                                               in_len,
+                                               out,
+                                               out_len,
+                                               actual_out_len,
+                                               caller_pid,
+                                               caller_flags);
         }
         if (!service_calls[i].handler) {
             return K64_ERR_NOENT;
@@ -1504,6 +1714,92 @@ static int64_t svc_demo_run_call(const k64_service_call_request_t* req) {
         memcpy(req->out, &pid, sizeof(pid));
         ((k64_service_call_request_t*)req)->actual_out_len = sizeof(pid);
     }
+    return K64_OK;
+}
+
+static int64_t svc_recv_call(const k64_service_call_request_t* req) {
+    const char* service_name;
+    k64_service_t* service;
+    k64_service_recv_resp_t* out;
+    uint64_t caller_pid;
+
+    if (!req || !req->in || req->in_len == 0 || req->in_len > K64_SERVICE_CALL_OWNER_MAX ||
+        !req->out || req->out_len < sizeof(k64_service_msg_header_t)) {
+        return K64_ERR_INVAL;
+    }
+    service_name = (const char*)req->in;
+    if (!service_name[0] || service_name[req->in_len - 1] != '\0' ||
+        !name_valid(service_name, K64_SERVICE_CALL_OWNER_MAX)) {
+        return K64_ERR_INVAL;
+    }
+    service = k64_system_find_service_by_name(service_name);
+    if (!service || service->state != K64_SERVICE_STATE_RUNNING) {
+        return K64_ERR_NOENT;
+    }
+    if (!current_process_is_service_host(service)) {
+        return K64_ERR_ACCESS;
+    }
+    caller_pid = req->caller_pid;
+    out = (k64_service_recv_resp_t*)req->out;
+    for (size_t i = 0; i < K64_MAX_SERVICE_MESSAGES; ++i) {
+        k64_service_msg_t* msg = &service_msgs[i];
+        if (msg->state != K64_SERVICE_MSG_PENDING ||
+            !k64_streq(msg->service, service_name)) {
+            continue;
+        }
+        msg->state = K64_SERVICE_MSG_ACTIVE;
+        msg->service_pid = caller_pid;
+        out->header.request_id = msg->request_id;
+        out->header.caller_pid = msg->caller_pid;
+        out->header.caller_uid = msg->caller_uid;
+        out->header.request_len = msg->request_len;
+        out->header.response_capacity = msg->response_capacity;
+        out->header.flags = msg->caller_flags;
+        copy_string(out->header.service, sizeof(out->header.service), msg->service);
+        copy_string(out->header.method, sizeof(out->header.method), msg->method);
+        if (msg->request_len) {
+            memcpy(out->data, msg->request, msg->request_len);
+        }
+        ((k64_service_call_request_t*)req)->actual_out_len =
+            sizeof(out->header) + msg->request_len;
+        return K64_OK;
+    }
+    return K64_ERR_AGAIN;
+}
+
+static int64_t svc_reply_call(const k64_service_call_request_t* req) {
+    const k64_service_reply_req_t* reply;
+    k64_service_msg_t* msg;
+
+    if (!req || !req->in || req->in_len < sizeof(reply->request_id) +
+                                             sizeof(reply->status) +
+                                             sizeof(reply->response_len)) {
+        return K64_ERR_INVAL;
+    }
+    reply = (const k64_service_reply_req_t*)req->in;
+    if (reply->response_len > K64_SERVICE_MSG_DATA_MAX ||
+        sizeof(reply->request_id) + sizeof(reply->status) + sizeof(reply->response_len) +
+            reply->response_len > req->in_len) {
+        return K64_ERR_OVERFLOW;
+    }
+    msg = service_msg_find(reply->request_id);
+    if (!msg || msg->state != K64_SERVICE_MSG_ACTIVE) {
+        return K64_ERR_NOENT;
+    }
+    if (msg->service_pid != req->caller_pid) {
+        return K64_ERR_ACCESS;
+    }
+    if (reply->response_len > msg->response_capacity) {
+        msg->status = K64_ERR_OVERFLOW;
+        msg->response_len = 0;
+    } else {
+        msg->status = reply->status;
+        msg->response_len = reply->response_len;
+        if (reply->response_len) {
+            memcpy(msg->response, reply->data, reply->response_len);
+        }
+    }
+    msg->state = K64_SERVICE_MSG_DONE;
     return K64_OK;
 }
 

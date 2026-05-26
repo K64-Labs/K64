@@ -16,7 +16,9 @@ Calls are dispatchable only while their owner service is running. The user/kerne
 
 Most service handlers started as kernel-hosted in v0.3.21 because K64 did not yet have message queues, resumable service processes, or a safe Ring-3 service registration ABI. v0.3.28 adds a Ring-3 service gate: non-kernel services must have a Ring-3 entry image and pass startup verification before their owned commands or service calls can dispatch.
 
-v0.3.30 adds explicit backend metadata to each registered service call. The dispatcher still supports kernel-hosted calls for compatibility, but the registry can now represent Ring-3-message-backed calls without changing the userland ABI. Ring-3-message dispatch returns a bounded service error until the persistent service queue work lands.
+v0.3.30 adds explicit backend metadata to each registered service call. v0.3.31 adds the first Ring-3-message-backed service path: the dispatcher can queue a request, enter a Ring-3 service host, let it receive the message through `svc.recv`, and collect the reply through `svc.reply`.
+
+The first message-backed service is `demo`. It is intentionally small and exists to validate the service-server ABI before larger services move out of kernel-mediated handlers. Core services such as `fs`, `proc`, `io`, `sched`, and `term` are still Ring-3-gated facades with kernel-mediated handlers until their state, blocking behavior, and driver dependencies are split into service-safe message loops.
 
 v0.3.22 adds a first multiuser permission layer on top of those service calls. Filesystem and process-launch calls now consult the effective UID/GID from `userctl` and check owner/group/other mode bits before reading, writing, creating, opening, listing, moving, or executing paths.
 
@@ -50,6 +52,8 @@ Common errors:
 - `proc.getpid`, `proc.info`, `proc.spawn`, `proc.wait`, `proc.exit`: process operations
 - `sched.yield`, `sched.sleep`: cooperative scheduling operations
 - `term.clear`, `term.read_key`, `term.read_key_nonblock`, `term.set_cursor`, `term.size`, `term.fb_info`, `term.fb_blit`: terminal and text framebuffer operations
+- `svc.recv`, `svc.reply`: kernel-gated message receive/reply methods for Ring-3 service hosts
+- `demo.echo`, `demo.upper`, `demo.pid`: first Ring-3-message-backed demo service calls
 
 ## Closed Feature Syscalls
 
@@ -65,6 +69,15 @@ As of v0.3.29, only the literal `kernel` service may be registered as a Ring-0 k
 - dispatch refuses the owner until `ring3_verified` is true
 
 This is the compatibility bridge toward persistent Ring-3 service servers. K64 still needs an async service message queue before all command handlers can be removed from kernel-mediated code, but `servicectl list` should now report `ring0` only for `kernel`.
+
+## Ring-3 message backend
+
+A `ring3-msg` service call does not invoke a kernel handler for the method. The dispatcher creates a bounded kernel message containing copied request bytes and caller metadata, enters the owner service's Ring-3 entry image, and waits for that service host to call:
+
+- `svc.recv <service>` through the service-call ABI, which returns a `k64_service_recv_resp_t`
+- `svc.reply`, which supplies a request ID, status, and bounded response payload
+
+The current implementation is synchronous because user processes are still cooperative and wait-driven. It proves the ABI, copy boundaries, caller metadata, and service-host authorization model, but it is not yet a fully persistent asynchronous server loop. The next scheduler step must let service processes stay blocked on queues instead of being entered for each request.
 
 ## Permission Model
 

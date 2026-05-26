@@ -29,6 +29,9 @@
 #define K64_WAIT_BLOCK 0ULL
 #define K64_WAIT_NOHANG 1ULL
 #define K64_SERVICE_CALL_PAYLOAD_MAX 65536ULL
+#define K64_SERVICE_CALL_NAME_MAX 32ULL
+#define K64_SERVICE_CALL_OWNER_MAX 32ULL
+#define K64_SERVICE_MSG_DATA_MAX 65400ULL
 
 typedef struct {
     uint64_t pid;
@@ -74,6 +77,29 @@ typedef struct {
     uint64_t response_len;
     uint64_t flags;
 } k64_service_call_user_t;
+
+typedef struct {
+    uint64_t request_id;
+    uint64_t caller_pid;
+    uint64_t caller_uid;
+    uint64_t request_len;
+    uint64_t response_capacity;
+    uint64_t flags;
+    char service[K64_SERVICE_CALL_OWNER_MAX];
+    char method[K64_SERVICE_CALL_NAME_MAX];
+} k64_service_msg_header_t;
+
+typedef struct {
+    k64_service_msg_header_t header;
+    uint8_t data[K64_SERVICE_MSG_DATA_MAX];
+} k64_service_recv_resp_t;
+
+typedef struct {
+    uint64_t request_id;
+    int64_t status;
+    uint64_t response_len;
+    uint8_t data[K64_SERVICE_MSG_DATA_MAX];
+} k64_service_reply_req_t;
 
 typedef struct {
     uint32_t width;
@@ -129,6 +155,11 @@ int64_t  k64_service_call(const char* service,
                           void* response,
                           uint64_t response_len);
 int64_t  k64_service_call_ex(const k64_service_call_user_t* call);
+int64_t  k64_service_recv(const char* service, k64_service_recv_resp_t* out);
+int64_t  k64_service_reply(uint64_t request_id,
+                           int64_t status,
+                           const void* response,
+                           uint64_t response_len);
 uint64_t k64_uptime_ticks(void);
 size_t   k64_strlen(const char* text);
 int      k64_strcmp(const char* a, const char* b);
