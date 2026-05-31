@@ -838,6 +838,20 @@ static int64_t run_reserved_child(uint64_t pid, uint64_t parent_pid) {
 }
 
 static bool run_ready_child_for_parent(uint64_t parent_pid) {
+    /*
+     * Cooperative async spawn bridge.
+     *
+     * K64 still has one global ring-3 execution context, so a child cannot yet
+     * be resumed by the timer IRQ as an independent saved trap frame. This
+     * helper is the deliberately narrow middle step: spawn() still returns a
+     * PID immediately, and scheduler-friendly points drive one queued child to
+     * completion without requiring the parent to call waitpid() first.
+     *
+     * parent_pid == 0 is used by the shell/service poll path to make orphaned
+     * queued children progress after their parent has already returned to the
+     * shell. A nonzero parent PID is used by sched.yield/sched.sleep so a
+     * running parent can let its own child make progress before blocking wait.
+     */
     for (int i = 0; i < K64_USER_SPAWN_MAX; ++i) {
         if (spawn_ctx[i].used && (parent_pid == 0 || spawn_ctx[i].parent_pid == parent_pid)) {
             (void)run_reserved_child(spawn_ctx[i].pid, spawn_ctx[i].parent_pid);
@@ -1339,6 +1353,14 @@ static int64_t syscall_service_call(uint64_t user_call_ptr) {
     int depth;
     int64_t rc;
 
+    /*
+     * This is the public Ring-3 ABI gate. The service dispatcher never sees
+     * raw user pointers: the call block, service/method strings, and optional
+     * request bytes are copied into bounded kernel staging buffers first. The
+     * response is copied back only after the handler reports how many bytes it
+     * actually produced. Keep this boring and explicit; cleverness here would
+     * be a security bug factory.
+     */
     if (!user_call_ptr ||
         !user_read(user_call_ptr, &user_call, sizeof(user_call))) {
         return K64_ERR_FAULT;

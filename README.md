@@ -12,7 +12,7 @@ K64 is currently best understood as:
 - a legacy-hardware-oriented runtime using VGA text mode, PIC, PIT, and PS/2 keyboard input
 - a registry-based service/driver environment
 - a boot image that includes the legacy custom root filesystem format, `K64XFS`
-- a writable ATA-backed K64XFS LegacyFS/BootFS root path in the default QEMU flow
+- a writable ATA-backed K64XFS root path in the default QEMU flow
 - an experimental K64XFS modern block-backed filesystem core with `xfsctl` tooling
 - a first RTL8139/e1000-backed Ethernet path for QEMU and VMware-style VM networking
 - a system where user-facing commands are mostly exposed by services rather than hard-coded into the kernel core
@@ -50,6 +50,8 @@ Important directories and files:
 - `rootfs/`: host-side source tree used to build `root.xfs`
 - `tools/mk_k64xfs.py`: image builder for the `K64XFS` format
 - `tests/`: parser, filesystem, shell, userland, persistence, GRUB-config, and boot smoke tests
+- `docs/dev/architecture.md`: detailed architecture guide for maintainers
+- `docs/dev/code-map.md`: subsystem-by-subsystem code map
 
 ## Architectural Summary
 
@@ -169,7 +171,7 @@ The binary `.k64s` and `.k64m` files are discovered from the mounted rootfs by t
 1. first compatible writable block device with a valid `K64XFS` header
    - raw `K64XFS` at LBA 0 for older disk images
    - installed `K64XFS` at LBA 2048 behind the BIOS boot area
-2. first Multiboot module whose path ends in `.K64XFS`
+2. first Multiboot module whose path ends in `.xfs`, normally `root.xfs`
 3. tiny in-memory fallback tree
 
 In normal QEMU builds, the first path is used because `make` now builds and attaches `build/root.disk`.
@@ -295,9 +297,9 @@ The old feature-specific syscall numbers `0..24` are no longer public userland A
 
 This is still intentionally small, but it is now enough for simple ring-3 programs to do console output, read regular files from `K64XFS`, save complete files, use structured key input, move files, list directories, reserve child process identities, query process metadata, collect child exits with wait flags, create anonymous pipes, call service-owned methods, and draw text-mode cell regions. It is not a POSIX-compatible libc and there is no fork/execve ABI, dynamic linker, shared-library loader, socket API, or mature VFS.
 
-The process model now records a stable PID, parent PID, scheduler task ID, state, exit code, start/end ticks, runtime ticks, fault vector, fault RIP, and image path for each K64-native ELF run. Normal exits become `ZOMBIE` records and remain visible until a parent reaps them. `waitpid()` enforces direct parent-child ownership, `K64_WAIT_NOHANG` reports `K64_ERR_AGAIN` for a still-running child, and `K64_WAIT_BLOCK` runs a reserved child user context to completion through a cooperative wait-driven path before writing the exit code and reaping the child. This is a concrete step beyond reserved-only child identity, but it is not full timer-preemptive user process scheduling yet.
+The process model now records a stable PID, parent PID, scheduler task ID, state, exit code, start/end ticks, runtime ticks, fault vector, fault RIP, and image path for each K64-native ELF run. Normal exits become `ZOMBIE` records and remain visible until a parent reaps them. `waitpid()` enforces direct parent-child ownership, `K64_WAIT_NOHANG` reports `K64_ERR_AGAIN` for a still-running child, and `K64_WAIT_BLOCK` can run a reserved child user context to completion before writing the exit code and reaping the child. This is now cooperative-asynchronous rather than strictly wait-driven, but it is not full timer-preemptive user process scheduling yet.
 
-`spawn()` still returns a child PID immediately and records parent/child ownership. In v0.3.19, blocking `waitpid()` is the point where the child is entered and collected. The ELF loader now has a small nested execution context stack and the wait path uses a temporary syscall stack for the child, so nested parent/child ring-3 execution does not clobber the parent's loader state or syscall frame. Full background user tasks, per-user-task kernel stacks, and timer-preemptive ring-3 context switching remain future work.
+`spawn()` still returns a child PID immediately and records parent/child ownership. As of v0.3.32, child execution is cooperative-asynchronous rather than strictly wait-driven: queued children can run from explicit scheduler points such as `sched.yield`, `sched.sleep`, and the shell/service poll loop before the parent calls `waitpid()`. Blocking `waitpid()` can still enter and collect a specific child. The ELF loader keeps a small nested execution context stack and the wait path uses a temporary syscall stack for the child, so nested parent/child ring-3 execution does not clobber the parent's loader state or syscall frame. Full per-user-task kernel stacks, saved user trap frames, and timer-preemptive ring-3 context switching remain future work.
 
 The file descriptor model is early but real. Each active user process has a small fd table; `0`, `1`, and `2` are stdin/stdout/stderr; `open()` returns fd values `>= 3`; read/close validate descriptors; stdout/stderr writes go through the fd path; `stat()` exposes filesystem metadata to userland; and `pipe()` creates anonymous read/write endpoints backed by fixed kernel ring buffers. File writes are still primarily the whole-file `write_file()` helper.
 
@@ -305,7 +307,7 @@ v0.3.21 makes the service-call ABI the userland ABI beside the existing service 
 
 v0.3.22 adds a first POSIX-like multiuser permission core. The active `userctl` session has numeric runtime UID/GID identity, `stat()` reports owner and group IDs, `io.open`, `fs.*` service calls, `proc.spawn`, ELF execution, and `fsctl` operations check owner/group/other read, write, and execute bits, and root/sudo elevation maps to effective UID `0`.
 
-v0.3.23 introduces K64XFS as a separate modern filesystem core. K64XFS remains the default boot/root filesystem, while K64XFS can be formatted and mounted explicitly for testing through `xfsctl` at `/x`.
+v0.3.23 introduced K64XFS as the modern filesystem core, and v0.3.24 made it the standard root filesystem for the normal build and release path. `xfsctl` remains the debugging/tooling surface for formatting, checking, inspecting, and exercising K64XFS.
 
 Security boundary:
 
@@ -534,9 +536,9 @@ The `storagectl` service exposes that state at runtime:
 - `install <device> yes`
 - `sync`
 
-`storagectl list` prints each disk/partition with block counts plus human-readable KiB/MiB/GiB size. `storagectl partitions <device>` reads the disk's MBR and reports each partition plus currently unallocated space. `storagectl root` reports the mounted rootfs source, used bytes, free bytes, mounted K64XFS volume capacity, and the current packed-image runtime limit.
+`storagectl list` prints each disk/partition with block counts plus human-readable KiB/MiB/GiB size. `storagectl partitions <device>` reads the disk's MBR and reports each partition plus currently unallocated space. `storagectl root` reports the mounted rootfs source plus used, free, and total K64XFS volume capacity.
 
-K64XFS now distinguishes the mounted volume size from the packed in-memory image size. On an installed 8 GiB disk, a partition such as `ata3p1` can therefore report roughly 7.9 GiB of K64XFS volume capacity instead of making the disk look like a 2 MiB device. The current packed image writer still has a bounded in-kernel image buffer, so `image_limit` is shown separately until K64XFS grows into a streaming or block-allocation filesystem.
+K64XFS distinguishes the mounted volume size from the initial root image size. On an installed 8 GiB disk, a partition such as `ata3p1` can therefore report roughly 7.9 GiB of K64XFS volume capacity instead of making the disk look like a tiny ISO-root image.
 
 `storagectl partition <device> k64 yes` writes a simple K64 MBR layout: one active Linux-type partition starting at LBA 2048 and using the rest of the disk. This is intentionally confirmation-gated because it overwrites the target disk's partition table.
 
@@ -833,38 +835,12 @@ This is how many user-facing commands are implemented. The shell parses a comman
 
 That model is central to K64 today.
 
-## Filesystems: `K64XFS` and `K64XFS`
+## Filesystem: `K64XFS`
 
 Files:
 
 - `k64_fs.c`
 - `k64_fs.h`
-- `tools/mk_k64xfs.py`
-- `grub/k64xfs.c`
-
-`K64XFS` is now best understood as the LegacyFS/BootFS compatibility filesystem. It is the custom filesystem/image format used both by:
-
-- the kernel runtime filesystem driver
-- the GRUB-side filesystem module
-- the persistent raw disk image attached as `build/root.disk` in the default QEMU path
-
-### Design goals of `K64XFS`
-
-The format is optimized for:
-
-- cheap mounting
-- repeated reads
-- simple structure
-- easy host-side image generation
-- deterministic validation during kernel mount
-- compatibility with the GRUB-side reader
-
-It is intentionally not a journaled or crash-safe disk filesystem. K64XFS is still a compact image-backed filesystem, not a modern extent/tree allocator, but the kernel side now enforces stricter structure checks and carries enough metadata for real userland tools.
-
-### K64XFS
-
-Files:
-
 - `k64_xfs.c`
 - `k64_xfs.h`
 - `k64_xfs_format.c`
@@ -873,8 +849,27 @@ Files:
 - `k64_xfs_cache.h`
 - `k64_xfs_journal.c`
 - `k64_xfs_journal.h`
+- `tools/mk_k64xfs.py`
+- `grub/k64xfs.c`
 
-K64XFS is a new block-backed filesystem introduced in v0.3.23. It is not a patch to K64XFS and does not replace the current root filesystem yet.
+K64XFS is the standard K64 root filesystem in the normal build, boot, test, and release flow. It is used by:
+
+- the kernel runtime filesystem driver
+- the GRUB-side filesystem module
+- the persistent raw disk image attached as `build/root.disk` in the default QEMU path
+- the ISO module fallback as `root.xfs`
+
+### Design goals
+
+The format is optimized for:
+
+- GRUB-readable boot roots
+- block-backed persistence
+- deterministic host-side image generation
+- checked metadata structures
+- POSIX-like mode/UID/GID metadata
+- service-call-friendly file operations
+- incremental growth toward a stronger journaled filesystem
 
 K64XFS currently provides:
 
@@ -890,89 +885,40 @@ K64XFS currently provides:
 - a read-only checker foundation
 - `xfsctl` format, mount, info, list, stat, mkdir, write, append, cat, remove, chmod, chown, sync, and check commands
 
-K64XFS is mounted explicitly for development at `/x`; normal `/` paths still use K64XFS. See `docs/fs/k64xfs.md` for the on-disk layout and limitations.
+Normal `/` paths use K64XFS. See `docs/fs/k64xfs.md` for the on-disk layout and limitations.
 
 ### On-image layout
 
-The format contains:
+K64XFS v1 uses fixed 4096-byte filesystem blocks. The first regions are:
 
-- one fixed header
-- one contiguous entry table
-- one contiguous string table
-- one contiguous data region
+- block `0`: checksummed superblock
+- block `1`: inode bitmap
+- block `2`: block bitmap
+- blocks `3..10`: journal area
+- following blocks: fixed inode table
+- remaining blocks: file and directory data extents
 
-Header:
-
-```c
-typedef struct {
-    uint32_t magic0;
-    uint32_t magic1;
-    uint16_t version;
-    uint16_t reserved;
-    uint32_t entry_count;
-    uint32_t entries_offset;
-    uint32_t strings_offset;
-    uint32_t data_offset;
-    uint32_t image_size;
-} __attribute__((packed)) K64XFS_header_t;
-```
-
-Entry:
-
-```c
-typedef struct {
-    uint32_t parent_index;
-    uint16_t type;
-    uint16_t reserved0; /* mode bits in current images */
-    uint32_t name_offset;
-    uint32_t data_offset;
-    uint32_t data_size;
-    uint32_t reserved1; /* low modified tick in current images */
-} __attribute__((packed)) K64XFS_entry_t;
-```
-
-Type values:
-
-- `1`: directory
-- `2`: file
-
-Current images store simple mode bits in `reserved0`; older images with zero mode fields still mount and receive default file/directory modes in memory.
+The superblock records magic, version, block size, total/free blocks, metadata region locations, root inode, mount state, feature flags, UUID, label, generation, and checksum. Inodes record type, mode, UID, GID, size, link count, timestamps, generation, direct extents, and checksum.
 
 ### Kernel-side representation
 
-The mounted image is parsed into a fixed in-memory node table:
+The mounted filesystem keeps a `k64_xfs_mount_t` with the attached block device, validated superblock, cache state, and journal state. Metadata is read and written in block-sized units through the cache. Inodes remain on disk in the inode table, and directory contents are stored as ordinary file data made of fixed directory-entry records.
 
-- max nodes: `1024`
-- max packed image size: `16 MiB`
-- mutable write buffer: `16 MiB`
-
-Each node tracks:
-
-- whether it is used
-- directory vs file
-- parent index
-- short name
-- file offsets and sizes
-- mode bits
-- runtime owner UID and group GID
-- created/modified ticks
-- generation counters
-- whether the file content is “dirty” and backed by the mutable area
 
 ### Mount behavior
 
 `k64_fs_driver_start()`:
 
 1. resets the filesystem state
-2. probes registered block devices for a valid `K64XFS` image
-3. if no block-backed root is found, scans Multiboot modules for the first `.K64XFS`
-4. validates the header and entry table
-5. populates the node table
-6. if no mountable image exists, creates a fallback in-memory filesystem
+2. probes registered block devices for a valid K64XFS image
+3. handles the installed-disk layout where K64XFS begins behind the BIOS boot area
+4. if no block-backed root is found, scans Multiboot modules for `root.xfs`
+5. validates the superblock, geometry, checksums, and root inode
+6. mounts the K64XFS root or reports a fallback failure path during early boot
 
 ### Read behavior
 
-Unmodified files are read directly from the packed image already loaded into RAM. That keeps reads cheap and avoids copying for common boot-time files.
+File reads resolve the path, read the inode, walk direct extents, and copy bytes from cached filesystem blocks. Directories are read as directory-entry files and scanned linearly.
 
 ### Write behavior
 
@@ -990,20 +936,17 @@ Mutations such as:
 - `mv`
 - `cp`
 
-cause the in-memory node table to be repacked into a fresh `K64XFS` image through `fs_writeback_image()`.
+update bitmaps, inodes, directory entries, extents, and cached data blocks instead of repacking a whole image. `sync` flushes dirty cache entries to the backing block device. Files and directories can be created, modified, moved, copied, inspected, and removed through the `fsctl` command surface, and those changes survive reboot when booted with the default attached disk image.
 
-If the mounted root came from a block device, the rebuilt image is also flushed back to that device. If the mounted root came from a Multiboot module, the writeback stays in memory only.
-
-That means `K64XFS` now behaves as a real read/write filesystem for everyday shell usage, not just a static system-image mount. Files and directories can be created, modified, moved, copied, inspected, and removed through the `fsctl` command surface, and those changes survive reboot when booted with the default attached disk image.
-
-The parser rejects malformed names, unterminated strings, duplicate sibling names, invalid parent ordering, invalid roots, and data ranges outside the packed image. Path resolution now rejects overlong path components instead of silently truncating them.
+The parser rejects malformed metadata, bad checksums, invalid geometry, invalid roots, and path components that exceed the supported name length. Path resolution rejects overlong path components instead of silently truncating them.
 
 Current boundaries:
 
-- the persistent path supports both older raw `K64XFS` disks and the current BIOS-bootable disk layout
 - the first implemented backend is ATA PIO, not AHCI or NVMe
-- there is no journal or crash-recovery layer
-- writes still repack the image rather than updating independently allocated blocks
+- the journal is a skeleton, not full crash recovery
+- only direct extents are implemented
+- directories are linear
+- the checker is read-only
 
 ### GRUB-side support
 

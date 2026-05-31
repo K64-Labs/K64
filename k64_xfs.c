@@ -118,6 +118,12 @@ static bool xfs_write_inode(k64_xfs_mount_t* fs, const k64_xfs_inode_disk_t* in)
     if (!xfs_block_read(fs, block, xfs_tmp_block)) {
         return false;
     }
+    /*
+     * Inodes are checksummed as standalone records, but the physical write is
+     * a whole 4 KiB inode-table block. Journal the full metadata block that is
+     * about to change so recovery/replay can reason in block-sized units, the
+     * same granularity used by the cache and block device layer.
+     */
     memcpy(&tmp, in, sizeof(tmp));
     tmp.checksum = k64_xfs_inode_checksum(&tmp);
     memcpy(xfs_tmp_block + offset, &tmp, sizeof(tmp));

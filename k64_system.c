@@ -1557,6 +1557,14 @@ int64_t k64_system_dispatch_call(const char* service,
                                  size_t* actual_out_len,
                                  uint64_t caller_pid,
                                  uint64_t caller_flags) {
+    /*
+     * Service calls are K64's OS ABI, not just a shell convenience layer.
+     * The syscall side has already copied user memory into kernel buffers by
+     * the time control reaches this dispatcher. This function therefore owns
+     * registry lookup, owner liveness checks, Ring-3-gate enforcement, and
+     * coarse call-level access policy before handing the request to either a
+     * kernel-mediated compatibility handler or a Ring-3 message backend.
+     */
     if (actual_out_len) {
         *actual_out_len = 0;
     }
