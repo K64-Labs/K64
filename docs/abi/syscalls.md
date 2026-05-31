@@ -52,7 +52,7 @@ Normal exits currently transition to `ZOMBIE`; faulted user programs transition 
 - `waitpid` enforces direct parent-child ownership.
 - `K64_WAIT_NOHANG` returns `K64_ERR_AGAIN` while the child remains running.
 - `K64_WAIT_BLOCK` can run a reserved child user context to completion, writes the child exit code, and reaps the child. v0.3.32 also lets queued children run from cooperative yield/sleep and shell/service poll points before wait. This avoids kernel busy-polling, but it is not full timer-preemptive user scheduling yet.
-- `spawn()` reserves a stable child PID and parent relationship immediately. The child starts when the parent collects it with blocking `waitpid`; fully background ring-3 child scheduling remains future work.
+- `spawn()` reserves a stable child PID and parent relationship immediately. Since v0.3.32, queued children can make cooperative progress from yield, sleep, service-dispatch, and shell poll points before a parent calls blocking `waitpid`; full timer-preemptive user scheduling remains future work.
 - File descriptors are per active user process. `0`, `1`, and `2` are stdin, stdout, and stderr; `open()` returns `>= 3`.
 - Anonymous pipes use fixed kernel buffers. Empty pipes with an open write end return `K64_ERR_AGAIN`; empty pipes with no write end return `0`.
 - `write_file` is still a whole-file helper and is not the same as POSIX `write`.

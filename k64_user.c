@@ -1417,3 +1417,24 @@ bool k64_user_can_access(uint32_t owner_uid, uint32_t owner_gid, uint32_t mode, 
     }
     return (bits & mask) == mask;
 }
+
+bool k64_user_can_access_uid(uint32_t effective_uid,
+                             uint32_t effective_gid,
+                             uint32_t owner_uid,
+                             uint32_t owner_gid,
+                             uint32_t mode,
+                             uint32_t mask) {
+    uint32_t bits;
+
+    if (effective_uid == 0) {
+        return true;
+    }
+    if (effective_uid == owner_uid) {
+        bits = (mode >> 6) & 7u;
+    } else if (effective_gid == owner_gid) {
+        bits = (mode >> 3) & 7u;
+    } else {
+        bits = mode & 7u;
+    }
+    return (bits & mask) == mask;
+}

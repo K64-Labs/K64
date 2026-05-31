@@ -366,7 +366,9 @@ static int64_t dispatch_ring3_message_call(k64_service_t* owner,
         return K64_ERR_BUSY;
     }
     msg->caller_pid = caller_pid;
-    msg->caller_uid = (caller_flags & K64_SERVICE_CALLER_KERNEL) ? 0 : k64_user_effective_uid();
+    msg->caller_uid = (caller_flags & K64_SERVICE_CALLER_KERNEL)
+                          ? 0
+                          : k64_usermode_current_effective_uid();
     msg->caller_flags = caller_flags;
     msg->response_capacity = out_len < K64_SERVICE_MSG_DATA_MAX ? out_len : K64_SERVICE_MSG_DATA_MAX;
     copy_string(msg->service, sizeof(msg->service), call->owner);
@@ -404,7 +406,12 @@ static bool fs_call_can_access_path(const char* path, uint32_t mask) {
     if (!k64_fs_stat(path, &st)) {
         return false;
     }
-    return k64_user_can_access(st.uid, st.gid, st.mode, mask);
+    return k64_user_can_access_uid(k64_usermode_current_effective_uid(),
+                                   k64_usermode_current_effective_gid(),
+                                   st.uid,
+                                   st.gid,
+                                   st.mode,
+                                   mask);
 }
 
 static bool fs_call_can_create_path(const char* path) {
@@ -472,7 +479,12 @@ static int64_t fs_stat_call(const k64_service_call_request_t* req) {
     if (!k64_fs_stat(path, &fs_stat)) {
         return K64_ERR_NOENT;
     }
-    if (!k64_user_can_access(fs_stat.uid, fs_stat.gid, fs_stat.mode, K64_ACCESS_READ)) {
+    if (!k64_user_can_access_uid(k64_usermode_current_effective_uid(),
+                                 k64_usermode_current_effective_gid(),
+                                 fs_stat.uid,
+                                 fs_stat.gid,
+                                 fs_stat.mode,
+                                 K64_ACCESS_READ)) {
         return K64_ERR_ACCESS;
     }
     out.type = fs_stat.is_dir ? 1u : 2u;
@@ -557,7 +569,9 @@ static int64_t fs_write_file_call(const k64_service_call_request_t* req) {
     if (!k64_fs_write_file_raw(packed_path, packed_data, (size_t)user_req->data_len)) {
         return K64_ERR_ACCESS;
     }
-    (void)k64_fs_chown(packed_path, k64_user_effective_uid(), k64_user_effective_gid());
+    (void)k64_fs_chown(packed_path,
+                       k64_usermode_current_effective_uid(),
+                       k64_usermode_current_effective_gid());
     return K64_OK;
 }
 
@@ -1610,7 +1624,9 @@ int64_t k64_system_dispatch_call(const char* service,
         }
 
         req.caller_pid = caller_pid;
-        req.caller_uid = (caller_flags & K64_SERVICE_CALLER_KERNEL) ? 0 : k64_user_effective_uid();
+        req.caller_uid = (caller_flags & K64_SERVICE_CALLER_KERNEL)
+                             ? 0
+                             : k64_usermode_current_effective_uid();
         req.caller_flags = caller_flags;
         copy_string(req.service, sizeof(req.service), service);
         copy_string(req.method, sizeof(req.method), method);

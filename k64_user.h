@@ -23,6 +23,12 @@ bool k64_user_name_to_uid(const char* name, uint32_t* uid_out);
 bool k64_user_group_to_gid(const char* name, uint32_t* gid_out);
 bool k64_user_is_member_gid(uint32_t gid);
 bool k64_user_can_access(uint32_t owner_uid, uint32_t owner_gid, uint32_t mode, uint32_t mask);
+bool k64_user_can_access_uid(uint32_t effective_uid,
+                             uint32_t effective_gid,
+                             uint32_t owner_uid,
+                             uint32_t owner_gid,
+                             uint32_t mode,
+                             uint32_t mask);
 
 #define K64_ACCESS_EXEC  1u
 #define K64_ACCESS_WRITE 2u

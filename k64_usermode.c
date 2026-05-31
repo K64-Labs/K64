@@ -111,11 +111,22 @@ typedef struct {
     uint64_t end_tick;
     uint64_t fault_vector;
     uint64_t fault_rip;
+    uint32_t real_uid;
+    uint32_t effective_uid;
+    uint32_t real_gid;
+    uint32_t effective_gid;
     char     path[K64_USER_PROCESS_PATH_MAX];
     k64_user_fd_t fds[K64_USER_FD_MAX];
     k64_task_t* wait_task;
     uint64_t wait_target_pid;
 } k64_user_process_t;
+
+typedef struct {
+    bool used;
+    uint64_t owner_pid;
+    uint8_t in_buf[K64_SERVICE_CALL_PAYLOAD_MAX];
+    uint8_t out_buf[K64_SERVICE_CALL_PAYLOAD_MAX];
+} k64_user_service_scratch_t;
 
 typedef struct {
     bool used;
@@ -161,9 +172,7 @@ extern void k64_syscall_stub(void);
 static k64_tss64_t tss64;
 static uint8_t syscall_stack[16384] __attribute__((aligned(16)));
 static uint8_t nested_syscall_stack[16384] __attribute__((aligned(16)));
-static uint8_t service_call_in_buffers[K64_USER_SERVICE_CALL_DEPTH_MAX][K64_SERVICE_CALL_PAYLOAD_MAX];
-static uint8_t service_call_out_buffers[K64_USER_SERVICE_CALL_DEPTH_MAX][K64_SERVICE_CALL_PAYLOAD_MAX];
-static int service_call_depth;
+static k64_user_service_scratch_t service_scratch[K64_USER_SERVICE_CALL_DEPTH_MAX];
 static k64_user_exec_context_t active_ctx;
 static k64_user_process_t process_table[K64_USER_PROCESS_MAX];
 static k64_user_pipe_t pipe_table[K64_USER_PIPE_MAX];
@@ -182,6 +191,72 @@ static k64_user_spawn_ctx_t spawn_ctx[K64_USER_SPAWN_MAX];
 static int64_t queue_spawn(const char* path, const char* args);
 static int64_t run_reserved_child(uint64_t pid, uint64_t parent_pid);
 static bool run_ready_child_for_parent(uint64_t parent_pid);
+
+static void current_session_creds(uint32_t* real_uid,
+                                  uint32_t* effective_uid,
+                                  uint32_t* real_gid,
+                                  uint32_t* effective_gid) {
+    uint32_t rgid = k64_user_effective_gid();
+
+    if (real_uid) {
+        *real_uid = k64_user_real_uid();
+    }
+    if (effective_uid) {
+        *effective_uid = k64_user_effective_uid();
+    }
+    if (real_gid) {
+        *real_gid = rgid;
+    }
+    if (effective_gid) {
+        *effective_gid = rgid;
+    }
+}
+
+static void inherit_process_creds(uint64_t parent_pid,
+                                  uint32_t* real_uid,
+                                  uint32_t* effective_uid,
+                                  uint32_t* real_gid,
+                                  uint32_t* effective_gid) {
+    if (parent_pid) {
+        for (int i = 0; i < K64_USER_PROCESS_MAX; ++i) {
+            if (process_table[i].used && process_table[i].pid == parent_pid) {
+                if (real_uid) {
+                    *real_uid = process_table[i].real_uid;
+                }
+                if (effective_uid) {
+                    *effective_uid = process_table[i].effective_uid;
+                }
+                if (real_gid) {
+                    *real_gid = process_table[i].real_gid;
+                }
+                if (effective_gid) {
+                    *effective_gid = process_table[i].effective_gid;
+                }
+                return;
+            }
+        }
+    }
+    current_session_creds(real_uid, effective_uid, real_gid, effective_gid);
+}
+
+static k64_user_service_scratch_t* service_scratch_acquire(uint64_t owner_pid) {
+    for (int i = 0; i < K64_USER_SERVICE_CALL_DEPTH_MAX; ++i) {
+        if (!service_scratch[i].used) {
+            service_scratch[i].used = true;
+            service_scratch[i].owner_pid = owner_pid;
+            return &service_scratch[i];
+        }
+    }
+    return NULL;
+}
+
+static void service_scratch_release(k64_user_service_scratch_t* scratch) {
+    if (!scratch) {
+        return;
+    }
+    scratch->used = false;
+    scratch->owner_pid = 0;
+}
 
 static void set_tss_descriptor(uint64_t base, uint32_t limit) {
     uint64_t low;
@@ -251,6 +326,11 @@ static int process_alloc(const char* path,
                          uint64_t pid) {
     int free_slot = -1;
     k64_task_t* task = k64_sched_current_task();
+    bool replacing;
+    uint32_t real_uid;
+    uint32_t effective_uid;
+    uint32_t real_gid;
+    uint32_t effective_gid;
 
     if (pid != 0) {
         for (int i = 0; i < K64_USER_PROCESS_MAX; ++i) {
@@ -273,6 +353,16 @@ static int process_alloc(const char* path,
         return -1;
     }
 
+    replacing = process_table[free_slot].used;
+    if (replacing) {
+        real_uid = process_table[free_slot].real_uid;
+        effective_uid = process_table[free_slot].effective_uid;
+        real_gid = process_table[free_slot].real_gid;
+        effective_gid = process_table[free_slot].effective_gid;
+    } else {
+        inherit_process_creds(parent_pid, &real_uid, &effective_uid, &real_gid, &effective_gid);
+    }
+
     process_table[free_slot].used = true;
     process_table[free_slot].pid = pid ? pid : k64_usermode_next_pid();
     if (process_table[free_slot].pid >= next_user_pid) {
@@ -290,6 +380,10 @@ static int process_alloc(const char* path,
     process_table[free_slot].end_tick = 0;
     process_table[free_slot].fault_vector = 0;
     process_table[free_slot].fault_rip = 0;
+    process_table[free_slot].real_uid = real_uid;
+    process_table[free_slot].effective_uid = effective_uid;
+    process_table[free_slot].real_gid = real_gid;
+    process_table[free_slot].effective_gid = effective_gid;
     process_table[free_slot].wait_task = NULL;
     process_table[free_slot].wait_target_pid = 0;
     process_copy_path(process_table[free_slot].path, path);
@@ -389,6 +483,33 @@ uint64_t k64_usermode_current_pid(void) {
     return current_process_pid();
 }
 
+uint32_t k64_usermode_current_real_uid(void) {
+    if (active_ctx.process_index < 0 ||
+        active_ctx.process_index >= K64_USER_PROCESS_MAX ||
+        !process_table[active_ctx.process_index].used) {
+        return k64_user_real_uid();
+    }
+    return process_table[active_ctx.process_index].real_uid;
+}
+
+uint32_t k64_usermode_current_effective_uid(void) {
+    if (active_ctx.process_index < 0 ||
+        active_ctx.process_index >= K64_USER_PROCESS_MAX ||
+        !process_table[active_ctx.process_index].used) {
+        return k64_user_effective_uid();
+    }
+    return process_table[active_ctx.process_index].effective_uid;
+}
+
+uint32_t k64_usermode_current_effective_gid(void) {
+    if (active_ctx.process_index < 0 ||
+        active_ctx.process_index >= K64_USER_PROCESS_MAX ||
+        !process_table[active_ctx.process_index].used) {
+        return k64_user_effective_gid();
+    }
+    return process_table[active_ctx.process_index].effective_gid;
+}
+
 bool k64_usermode_current_path(char* out, size_t out_size) {
     const char* src;
     size_t i = 0;
@@ -482,7 +603,12 @@ static int64_t proc_spawn_service_call(const k64_service_call_request_t* req) {
         if (!k64_fs_stat(in->path, &st)) {
             return K64_ERR_NOENT;
         }
-        if (!k64_user_can_access(st.uid, st.gid, st.mode, K64_ACCESS_EXEC | K64_ACCESS_READ)) {
+        if (!k64_user_can_access_uid(k64_usermode_current_effective_uid(),
+                                     k64_usermode_current_effective_gid(),
+                                     st.uid,
+                                     st.gid,
+                                     st.mode,
+                                     K64_ACCESS_EXEC | K64_ACCESS_READ)) {
             return K64_ERR_ACCESS;
         }
     }
@@ -1110,7 +1236,12 @@ static int64_t io_open_service_call(const k64_service_call_request_t* req) {
             ((k64_service_call_request_t*)req)->actual_out_len = sizeof(fd);
             return K64_OK;
         }
-        if (!k64_user_can_access(st.uid, st.gid, st.mode, K64_ACCESS_READ)) {
+        if (!k64_user_can_access_uid(k64_usermode_current_effective_uid(),
+                                     k64_usermode_current_effective_gid(),
+                                     st.uid,
+                                     st.gid,
+                                     st.mode,
+                                     K64_ACCESS_READ)) {
             fd = K64_ERR_ACCESS;
             memcpy(req->out, &fd, sizeof(fd));
             ((k64_service_call_request_t*)req)->actual_out_len = sizeof(fd);
@@ -1347,11 +1478,12 @@ static int64_t syscall_service_call(uint64_t user_call_ptr) {
     k64_service_call_user_t user_call;
     char service[K64_SERVICE_CALL_OWNER_MAX];
     char method[K64_SERVICE_CALL_NAME_MAX];
+    k64_user_service_scratch_t* scratch = NULL;
     uint8_t* in_buf;
     uint8_t* out_buf;
     size_t actual = 0;
-    int depth;
     int64_t rc;
+    uint64_t caller_pid;
 
     /*
      * This is the public Ring-3 ABI gate. The service dispatcher never sees
@@ -1381,16 +1513,17 @@ static int64_t syscall_service_call(uint64_t user_call_ptr) {
         (user_call.response_len && !user_call.response)) {
         return K64_ERR_FAULT;
     }
-    if (service_call_depth < 0 || service_call_depth >= K64_USER_SERVICE_CALL_DEPTH_MAX) {
+    caller_pid = current_process_pid();
+    scratch = service_scratch_acquire(caller_pid);
+    if (!scratch) {
         return K64_ERR_BUSY;
     }
-    depth = service_call_depth++;
-    in_buf = service_call_in_buffers[depth];
-    out_buf = service_call_out_buffers[depth];
+    in_buf = scratch->in_buf;
+    out_buf = scratch->out_buf;
 
     if (user_call.request_len &&
         !user_read((uint64_t)(uintptr_t)user_call.request, in_buf, (size_t)user_call.request_len)) {
-        service_call_depth--;
+        service_scratch_release(scratch);
         return K64_ERR_FAULT;
     }
     if (user_call.response_len) {
@@ -1404,7 +1537,7 @@ static int64_t syscall_service_call(uint64_t user_call_ptr) {
                                   user_call.response_len ? out_buf : NULL,
                                   (size_t)user_call.response_len,
                                   &actual,
-                                  current_process_pid(),
+                                  caller_pid,
                                   0);
     if (rc >= 0 && actual > user_call.response_len) {
         rc = K64_ERR_OVERFLOW;
@@ -1413,7 +1546,7 @@ static int64_t syscall_service_call(uint64_t user_call_ptr) {
         !user_write((uint64_t)(uintptr_t)user_call.response, out_buf, actual)) {
         rc = K64_ERR_FAULT;
     }
-    service_call_depth--;
+    service_scratch_release(scratch);
     if (rc == K64_OK && k64_streq(service, "proc") && k64_streq(method, "exit")) {
         k64_user_return_asm(&active_ctx, active_ctx.result);
     }
