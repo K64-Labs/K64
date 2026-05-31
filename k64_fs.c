@@ -23,6 +23,7 @@ static char fs_mount_name[48];
 static char fs_cwd[256] = "/";
 static uint8_t fs_raw_buffer[K64_ROOTFS_RAW_MAX];
 static uint8_t fs_range_buffer[K64_ROOTFS_RAW_MAX];
+static uint8_t fs_pseudo_buffer[4096];
 static uint8_t fs_boot_area[K64_ROOTFS_BOOT_AREA_SECTORS * K64_ROOTFS_BLOCK_SIZE];
 static uint8_t fs_fallback_image[K64_ROOTFS_FALLBACK_BYTES];
 static k64_memdev_t fs_module_memdev;
@@ -166,6 +167,106 @@ static bool fs_normalize(const char* path, char* out, size_t out_size) {
         out[pos] = '\0';
     }
     return true;
+}
+
+static bool fs_is_pseudo_path(const char* path) {
+    return path &&
+           (k64_streq(path, "/proc") ||
+            fs_name_has_prefix(path, "/proc/") ||
+            k64_streq(path, "/dev") ||
+            fs_name_has_prefix(path, "/dev/"));
+}
+
+static void fs_stat_fill(k64_fs_stat_t* out,
+                         const char* path,
+                         bool is_dir,
+                         size_t size,
+                         uint32_t mode) {
+    memset(out, 0, sizeof(*out));
+    out->exists = true;
+    out->is_dir = is_dir;
+    out->size = size;
+    out->mode = mode;
+    out->uid = 0;
+    out->gid = 0;
+    out->generation = 1;
+    fs_copy(out->path, sizeof(out->path), path);
+}
+
+static size_t fs_build_proc_services(char* out, size_t out_size) {
+    if (!out || out_size == 0) {
+        return 0;
+    }
+    fs_copy(out,
+            out_size,
+            "kernel running ring0\n"
+            "fs running ring3-gated\n"
+            "proc running ring3-gated\n"
+            "io running ring3-gated\n"
+            "term running ring3-gated\n");
+    return k64_strlen(out);
+}
+
+static bool fs_pseudo_read_all(const char* path, const uint8_t** data, size_t* size) {
+    char* out = (char*)fs_pseudo_buffer;
+
+    if (!path || !data || !size) {
+        return false;
+    }
+    memset(fs_pseudo_buffer, 0, sizeof(fs_pseudo_buffer));
+    if (k64_streq(path, "/proc/version")) {
+        fs_copy(out, sizeof(fs_pseudo_buffer), "K64 0.3\n");
+    } else if (k64_streq(path, "/proc/services")) {
+        (void)fs_build_proc_services(out, sizeof(fs_pseudo_buffer));
+    } else if (k64_streq(path, "/dev/null")) {
+        out[0] = '\0';
+    } else {
+        return false;
+    }
+    *data = fs_pseudo_buffer;
+    *size = k64_strlen(out);
+    return true;
+}
+
+static bool fs_pseudo_ls(const char* path, char* out, int out_size) {
+    if (!out || out_size <= 0 || !path) {
+        return false;
+    }
+    if (k64_streq(path, "/proc")) {
+        fs_copy(out, (size_t)out_size, "version\nservices\n");
+        return true;
+    }
+    if (k64_streq(path, "/dev")) {
+        fs_copy(out, (size_t)out_size, "null\nconsole\ntty0\n");
+        return true;
+    }
+    return false;
+}
+
+static bool fs_pseudo_stat(const char* path, k64_fs_stat_t* out) {
+    const uint8_t* data;
+    size_t size;
+
+    if (!path || !out) {
+        return false;
+    }
+    if (k64_streq(path, "/proc") || k64_streq(path, "/dev")) {
+        fs_stat_fill(out, path, true, 0, 0555u);
+        return true;
+    }
+    if (k64_streq(path, "/proc/version") ||
+        k64_streq(path, "/proc/services") ||
+        k64_streq(path, "/dev/null") ||
+        k64_streq(path, "/dev/console") ||
+        k64_streq(path, "/dev/tty0")) {
+        size = 0;
+        if (fs_pseudo_read_all(path, &data, &size)) {
+            (void)data;
+        }
+        fs_stat_fill(out, path, false, size, k64_streq(path, "/dev/null") ? 0666u : 0444u);
+        return true;
+    }
+    return false;
 }
 
 static bool fs_mount_device(k64_block_device_t* dev, const char* name, bool persistent) {
@@ -316,7 +417,9 @@ bool k64_fs_cd(const char* path) {
 bool k64_fs_ls(const char* path, char* out, int out_size) {
     char full[256];
     if (!fs_normalize(path && path[0] ? path : ".", full, sizeof(full)) ||
-        !k64_xfs_list_dir(&rootfs, full, out, out_size)) {
+        (fs_is_pseudo_path(full)
+             ? !fs_pseudo_ls(full, out, out_size)
+             : !k64_xfs_list_dir(&rootfs, full, out, out_size))) {
         return false;
     }
     if (out && out_size > 0 && !out[0]) {
@@ -417,8 +520,16 @@ bool k64_fs_touch(const char* path) {
 
 bool k64_fs_write_file_raw(const char* path, const uint8_t* data, size_t size) {
     char full[256];
-    return fs_normalize(path, full, sizeof(full)) &&
-           k64_xfs_write_file(&rootfs, full, data, size, 0, 0);
+    if (!fs_normalize(path, full, sizeof(full))) {
+        return false;
+    }
+    if (k64_streq(full, "/dev/null")) {
+        return data || size == 0;
+    }
+    if (fs_is_pseudo_path(full)) {
+        return false;
+    }
+    return k64_xfs_write_file(&rootfs, full, data, size, 0, 0);
 }
 
 bool k64_fs_write_file(const char* path, const char* text) {
@@ -428,12 +539,29 @@ bool k64_fs_write_file(const char* path, const char* text) {
 bool k64_fs_read_file_range(const char* path, size_t offset, uint8_t* out, size_t size, size_t* read_out) {
     char full[256];
     k64_fs_stat_t st;
+    const uint8_t* pseudo_data;
+    size_t pseudo_size;
     size_t read = 0;
     if (read_out) {
         *read_out = 0;
     }
-    if ((!out && size != 0) || !fs_normalize(path, full, sizeof(full)) ||
-        !k64_xfs_stat(&rootfs, full, &st) || st.is_dir || st.size > sizeof(fs_raw_buffer)) {
+    if ((!out && size != 0) || !fs_normalize(path, full, sizeof(full))) {
+        return false;
+    }
+    if (fs_pseudo_read_all(full, &pseudo_data, &pseudo_size)) {
+        if (offset >= pseudo_size) {
+            return true;
+        }
+        if (size > pseudo_size - offset) {
+            size = pseudo_size - offset;
+        }
+        memcpy(out, pseudo_data + offset, size);
+        if (read_out) {
+            *read_out = size;
+        }
+        return true;
+    }
+    if (!k64_xfs_stat(&rootfs, full, &st) || st.is_dir || st.size > sizeof(fs_raw_buffer)) {
         return false;
     }
     if (!k64_xfs_read_file(&rootfs, full, fs_raw_buffer, st.size, &read) || read != st.size) {
@@ -579,6 +707,9 @@ bool k64_fs_stat(const char* path, k64_fs_stat_t* out) {
     char full[256];
     if (!out || !fs_normalize(path && path[0] ? path : ".", full, sizeof(full))) {
         return false;
+    }
+    if (fs_is_pseudo_path(full)) {
+        return fs_pseudo_stat(full, out);
     }
     return k64_xfs_stat(&rootfs, full, out);
 }

@@ -8,7 +8,7 @@ K64XFS is the block-backed filesystem core introduced in K64 v0.3.23 and promote
 - Persist mode, UID, GID, size, timestamps, generation, and extent metadata in inodes.
 - Use extents for file data.
 - Provide a superblock with versioning, feature flags, mount state, UUID, label, and CRC32 checksum.
-- Provide a block cache and metadata-journal skeleton.
+- Provide a block cache and metadata-journal foundation with committed metadata-block replay.
 - Keep current service-call userland APIs and v0.3.22 permission checks intact.
 
 ## Non-Goals
@@ -72,7 +72,7 @@ Directory operations are intentionally conservative:
 
 ## Journaling
 
-v0.3.23 includes the journal region, transaction IDs, dirty/clean mount state, and journal API skeleton. Metadata updates are routed through transaction begin/commit hooks, but full committed-record replay is still limited. The docs and release notes intentionally describe this as a crash-awareness foundation, not complete ext4-grade journaling.
+K64XFS includes a fixed journal region, transaction IDs, dirty/clean mount state, metadata-block records, commit records, and committed-record replay. Metadata writes for the superblock, bitmaps, and inode table are staged through the journal before the cached metadata block is updated.
 
 The intended write ordering is:
 
@@ -84,7 +84,7 @@ The intended write ordering is:
 6. Flush dirty cache entries on sync/unmount.
 7. Mark the filesystem clean after a successful sync.
 
-Current code follows the transaction hooks for metadata mutation, but recovery remains a limited skeleton. If the mount state says the filesystem needs recovery, the mount path asks the journal layer to recover before the volume is considered clean. Do not document this as full crash safety until committed-record replay and crash simulation tests cover the common failure windows.
+If the mount state says the filesystem is dirty or needs recovery, the mount path asks the journal layer to scan the journal, replay committed transactions, discard incomplete transactions, clear the journal, and return the volume to a clean metadata state. This is still metadata-only journaling; file data is not journaled as a separate durability mode.
 
 ## Cache
 
@@ -131,6 +131,6 @@ K64XFS persists UID, GID, and mode in inodes. The low-level `k64_xfs_*` API is a
 - Only direct extents are implemented, capped at eight extents per file.
 - Directories are linear.
 - The checker is read-only and does not repair.
-- The journal is a skeleton with clean/dirty state and transaction hooks, not full crash replay.
-- Service-call routing uses the stable `k64_fs_*` facade over the mounted K64XFS root; a full VFS with multiple mounted filesystem kinds is future work.
+- The journal is metadata-only. It replays committed metadata-block records, but it is not a full ext4/ZFS-style crash-consistency implementation.
+- The stable `k64_fs_*` facade now also exposes a small pseudo-filesystem surface for `/proc` and `/dev`; a fully pluggable multi-backend VFS remains future work.
 - The implementation still needs broader malformed-image and crash-simulation coverage before it should be treated as production-grade.

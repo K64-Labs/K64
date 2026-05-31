@@ -110,7 +110,7 @@ K64XFS provides:
 - directory files made of directory entries
 - UID/GID/mode/timestamp/generation metadata
 - a small block cache
-- a metadata journal skeleton
+- a metadata journal with committed metadata-block replay
 - a read-only checker
 
 The low-level `k64_xfs_*` API is trusted mechanism code. User-visible permission checks sit above it in service and command paths. That separation matters: filesystem internals should be able to format, check, recover, and repair structures, while policy code decides whether a user may perform the operation.
@@ -132,7 +132,7 @@ Known limits:
 - Persistent Ring-3 services are not yet the default for `fs`, `proc`, `io`, `sched`, or `term`.
 - Per-process credentials are still evolving from the session model.
 - User task preemption is not complete.
-- K64XFS journaling is not full crash recovery yet.
+- K64XFS journaling is metadata-only and replays committed metadata-block records, but it is not a full ext4/ZFS-style crash-consistency model yet.
 - There is no mature VFS, sockets API, dynamic linker, POSIX signals, or `fork()`.
 
 ## How To Read The Code

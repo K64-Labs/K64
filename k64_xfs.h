@@ -13,6 +13,8 @@ typedef struct k64_xfs_mount {
     k64_xfs_superblock_disk_t super;
     k64_xfs_cache_t cache;
     uint64_t tx_id;
+    uint32_t journal_records;
+    bool journal_active;
     char mount_path[16];
 } k64_xfs_mount_t;
 

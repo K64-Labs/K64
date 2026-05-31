@@ -8,6 +8,10 @@ build/
 *.disk
 kdesk-*.png
 kdesk-*.ppm
+k64_graphics.c
+k64_graphics.h
+k64_mouse.c
+k64_mouse.h
 tests/.shell_cmd_test
 tests/.string_test
 tests/.fs_unit_test

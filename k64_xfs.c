@@ -62,7 +62,17 @@ static bool xfs_block_read(k64_xfs_mount_t* fs, uint64_t block, void* out) {
 }
 
 static bool xfs_block_write(k64_xfs_mount_t* fs, uint64_t block, const void* data) {
-    return fs && k64_xfs_cache_write(&fs->cache, fs->dev, block, data);
+    if (!fs || !data) {
+        return false;
+    }
+    if (fs->journal_active &&
+        block < fs->super.data_start &&
+        (block < fs->super.journal_start ||
+         block >= fs->super.journal_start + fs->super.journal_blocks) &&
+        !k64_xfs_journal_metadata(fs, block, data)) {
+        return false;
+    }
+    return k64_xfs_cache_write(&fs->cache, fs->dev, block, data);
 }
 
 static bool xfs_bitmap_get(const uint8_t* bitmap, uint32_t bit) {
@@ -127,7 +137,6 @@ static bool xfs_write_inode(k64_xfs_mount_t* fs, const k64_xfs_inode_disk_t* in)
     memcpy(&tmp, in, sizeof(tmp));
     tmp.checksum = k64_xfs_inode_checksum(&tmp);
     memcpy(xfs_tmp_block + offset, &tmp, sizeof(tmp));
-    (void)k64_xfs_journal_metadata(fs, block, xfs_tmp_block);
     return xfs_block_write(fs, block, xfs_tmp_block);
 }
 
@@ -993,6 +1002,7 @@ bool k64_xfs_check(k64_xfs_mount_t* fs, k64_xfs_check_report_t* out) {
     uint32_t used_inodes = 0;
     uint64_t used_blocks = 0;
     uint64_t bitmap_free = 0;
+    k64_xfs_inode_disk_t root_inode;
 
     if (!out) {
         return false;
@@ -1013,6 +1023,11 @@ bool k64_xfs_check(k64_xfs_mount_t* fs, k64_xfs_check_report_t* out) {
         xfs_copy(out->message, sizeof(out->message), "bitmap read failed");
         return true;
     }
+    if (!xfs_read_inode(fs, fs->super.root_inode, &root_inode) ||
+        root_inode.type != K64_XFS_TYPE_DIRECTORY) {
+        out->errors++;
+    }
+    memset(xfs_tmp_block, 0, K64_XFS_BLOCK_SIZE);
     for (uint32_t i = 0; i < K64_XFS_MAX_INODES; ++i) {
         if (xfs_bitmap_get(xfs_tmp_block3, i)) {
             k64_xfs_inode_disk_t inode;
@@ -1021,12 +1036,28 @@ bool k64_xfs_check(k64_xfs_mount_t* fs, k64_xfs_check_report_t* out) {
                 out->errors++;
                 continue;
             }
+            if (inode.type < K64_XFS_TYPE_REGULAR || inode.type > K64_XFS_TYPE_PIPE ||
+                inode.extent_count > K64_XFS_DIRECT_EXTENTS) {
+                out->errors++;
+            }
             for (uint32_t e = 0; e < inode.extent_count && e < K64_XFS_DIRECT_EXTENTS; ++e) {
                 uint64_t start = inode.direct_extents[e].physical_block;
                 uint64_t count = inode.direct_extents[e].block_count;
-                if (start < fs->super.data_start || start + count > fs->super.total_blocks) {
+                if (count == 0 || start < fs->super.data_start ||
+                    start > UINT64_MAX - count ||
+                    start + count > fs->super.total_blocks) {
                     out->errors++;
                 } else {
+                    for (uint64_t b = start; b < start + count; ++b) {
+                        if (!xfs_bitmap_get(xfs_tmp_block2, (uint32_t)b) ||
+                            (fs->super.total_blocks <= K64_XFS_BLOCK_SIZE * 8u &&
+                             xfs_bitmap_get(xfs_tmp_block, (uint32_t)b))) {
+                            out->errors++;
+                        }
+                        if (fs->super.total_blocks <= K64_XFS_BLOCK_SIZE * 8u) {
+                            xfs_bitmap_set(xfs_tmp_block, (uint32_t)b, true);
+                        }
+                    }
                     used_blocks += count;
                 }
             }
