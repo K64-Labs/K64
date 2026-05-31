@@ -17,6 +17,7 @@ tests/.string_test
 tests/.fs_unit_test
 tests/.kpm_unit_test
 tests/.xfs_unit_test
+tests/.klcs_unit_test
 KDesk/
 rootfs/etc/kpm/
 rootfs/ex/kdesk-*.elf

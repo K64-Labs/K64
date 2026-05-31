@@ -23,3 +23,6 @@ fi
 
 "$CC" $CFLAGS -o tests/.kpm_unit_test tests/kpm_unit_test.c k64_kpm.c k64_fs.c k64_xfs.c k64_xfs_format.c k64_xfs_cache.c k64_xfs_journal.c k64_block.c k64_string.c
 ./tests/.kpm_unit_test
+
+"$CC" $CFLAGS -DK64_HOST_TEST -o tests/.klcs_unit_test tests/klcs_unit_test.c k64_klcs.c k64_string.c
+./tests/.klcs_unit_test

@@ -5,6 +5,7 @@
 #include "k64_fs.h"
 #include "k64_hotreload.h"
 #include "k64_keyboard.h"
+#include "k64_klcs.h"
 #include "k64_kpm.h"
 #include "k64_modules.h"
 #include "k64_net.h"
@@ -114,6 +115,12 @@ static void storagectl_usage(void) {
     svc_print_line("       install wizard");
     svc_print_line("       install user <name> <password> [sudo]");
     svc_print_line("       install <device> yes");
+}
+
+static void klcs_usage(void) {
+    svc_print_line("usage: klcs <status|run|trace|syscalls>");
+    svc_print_line("       klcs trace <on|off>");
+    svc_print_line("       klcs run <linux-elf> [args...]");
 }
 
 static void svc_print_uptime_line(void) {
@@ -528,6 +535,125 @@ static bool uname_command(const char* command, const char* args) {
     return true;
 }
 
+static bool klcs_print_file_validation(const char* path) {
+    const uint8_t* data;
+    size_t size;
+    klcs_elf_info_t info;
+
+    if (!path || !path[0]) {
+        svc_print_line("klcs: missing path");
+        return true;
+    }
+    if (!k64_fs_read_file_raw(path, &data, &size)) {
+        svc_print_line("klcs: file not found");
+        return true;
+    }
+    if (!klcs_validate_elf64(data, size, &info)) {
+        k64_term_write("klcs: invalid Linux ELF: ");
+        svc_print_line(info.message);
+        return true;
+    }
+    if (info.dynamic) {
+        k64_term_write("klcs: ");
+        svc_print_line(info.message);
+        return true;
+    }
+    svc_print_line("klcs: static x86_64 ELF accepted");
+    svc_print_line("klcs: execution bridge is not enabled in this MVP");
+    return true;
+}
+
+static bool klcs_command(const char* command, const char* args) {
+    char sub[32];
+    char buf[2048];
+
+    (void)command;
+    args = svc_next_token(args, sub, sizeof(sub));
+    if (!sub[0] || k64_streq(sub, "status")) {
+        klcs_status(buf, sizeof(buf));
+        k64_term_write(buf);
+        return true;
+    }
+    if (k64_streq(sub, "syscalls")) {
+        klcs_syscalls(buf, sizeof(buf));
+        k64_term_write(buf);
+        return true;
+    }
+    if (k64_streq(sub, "trace")) {
+        char mode[16];
+        args = svc_next_token(args, mode, sizeof(mode));
+        if (k64_streq(mode, "on")) {
+            klcs_trace_set(true);
+            svc_print_line("KLCS trace: on");
+            return true;
+        }
+        if (k64_streq(mode, "off")) {
+            klcs_trace_set(false);
+            svc_print_line("KLCS trace: off");
+            return true;
+        }
+        klcs_trace_dump(buf, sizeof(buf));
+        k64_term_write(buf);
+        return true;
+    }
+    if (k64_streq(sub, "run")) {
+        char path[256];
+        (void)svc_next_token(args, path, sizeof(path));
+        return klcs_print_file_validation(path);
+    }
+    klcs_usage();
+    return true;
+}
+
+static int64_t klcs_copy_text_response(const k64_service_call_request_t* req,
+                                       void (*fill)(char*, size_t)) {
+    k64_service_call_request_t* mutable_req = (k64_service_call_request_t*)req;
+
+    if (!req || !req->out || req->out_len == 0 || !fill) {
+        return K64_ERR_INVAL;
+    }
+    fill((char*)req->out, req->out_len);
+    mutable_req->actual_out_len = k64_strlen((const char*)req->out) + 1;
+    return K64_OK;
+}
+
+static int64_t klcs_status_call(const k64_service_call_request_t* req) {
+    return klcs_copy_text_response(req, klcs_status);
+}
+
+static int64_t klcs_syscalls_call(const k64_service_call_request_t* req) {
+    return klcs_copy_text_response(req, klcs_syscalls);
+}
+
+static int64_t klcs_trace_dump_call(const k64_service_call_request_t* req) {
+    return klcs_copy_text_response(req, klcs_trace_dump);
+}
+
+static int64_t klcs_trace_enable_call(const k64_service_call_request_t* req) {
+    (void)req;
+    klcs_trace_set(true);
+    return K64_OK;
+}
+
+static int64_t klcs_trace_disable_call(const k64_service_call_request_t* req) {
+    (void)req;
+    klcs_trace_set(false);
+    return K64_OK;
+}
+
+static int64_t klcs_syscall_call(const k64_service_call_request_t* req) {
+    int64_t result;
+
+    if (!req || !req->in || req->in_len < sizeof(klcs_linux_syscall_frame_t) ||
+        !req->out || req->out_len < sizeof(result)) {
+        return K64_ERR_INVAL;
+    }
+    result = klcs_dispatch_syscall((const klcs_linux_syscall_frame_t*)req->in);
+    memcpy(req->out, &result, sizeof(result));
+    ((k64_service_call_request_t*)req)->actual_out_len = sizeof(result);
+    return K64_OK;
+}
+
 static bool k64cc_command(const char* command, const char* args) {
     char subcmd[16];
     char name[64];
@@ -903,6 +1029,41 @@ static bool uname_start(k64_service_t* service) {
 
 static void uname_stop(k64_service_t* service) {
     (void)service;
+}
+
+static bool klcs_start(k64_service_t* service) {
+    klcs_init();
+    (void)k64_system_register_command(service->name, "klcs", klcs_command);
+    (void)k64_system_register_call(service->name,
+                                   "status",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC | K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   klcs_status_call);
+    (void)k64_system_register_call(service->name,
+                                   "syscalls",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC | K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   klcs_syscalls_call);
+    (void)k64_system_register_call(service->name,
+                                   "trace.dump",
+                                   K64_SERVICE_CALL_FLAG_PUBLIC | K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   klcs_trace_dump_call);
+    (void)k64_system_register_call(service->name,
+                                   "trace.enable",
+                                   K64_SERVICE_CALL_FLAG_ROOT_ONLY,
+                                   klcs_trace_enable_call);
+    (void)k64_system_register_call(service->name,
+                                   "trace.disable",
+                                   K64_SERVICE_CALL_FLAG_ROOT_ONLY,
+                                   klcs_trace_disable_call);
+    (void)k64_system_register_call(service->name,
+                                   "syscall",
+                                   K64_SERVICE_CALL_FLAG_USER_ALLOWED,
+                                   klcs_syscall_call);
+    return true;
+}
+
+static void klcs_stop(k64_service_t* service) {
+    (void)service;
+    klcs_trace_set(false);
 }
 
 static void driverctl_stop(k64_service_t* service) {
@@ -2721,6 +2882,13 @@ static bool init_start(k64_service_t* service) {
         k64_term_putc('\n');
     }
 
+    result = k64_system_start_service_by_name("klcs");
+    if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        k64_term_write("init: failed to start klcs: ");
+        k64_term_write(k64_system_result_string(result));
+        k64_term_putc('\n');
+    }
+
     result = k64_system_start_service_by_name("k64cc");
     if (result != K64_SERVICE_OK && result != K64_SERVICE_ERR_ALREADY_RUNNING) {
         k64_term_write("init: failed to start k64cc: ");
@@ -2952,6 +3120,18 @@ void k64s_register_builtin_services(void) {
                                 true,
                                 uname_start,
                                 uname_stop,
+                                NULL,
+                                NULL);
+
+    k64_system_register_service("klcs",
+                                "k64s/klcs.k64s",
+                                K64_SERVICE_CLASS_SYSTEM,
+                                0,
+                                1,
+                                0,
+                                true,
+                                klcs_start,
+                                klcs_stop,
                                 NULL,
                                 NULL);
 

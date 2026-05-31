@@ -54,6 +54,9 @@ Common errors:
 - `term.clear`, `term.read_key`, `term.read_key_nonblock`, `term.set_cursor`, `term.size`, `term.fb_info`, `term.fb_blit`: terminal and text framebuffer operations
 - `svc.recv`, `svc.reply`: kernel-gated message receive/reply methods for Ring-3 service hosts
 - `demo.echo`, `demo.upper`, `demo.pid`: first Ring-3-message-backed demo service calls
+- `klcs.status`, `klcs.syscalls`, `klcs.syscall`, `klcs.trace.enable`, `klcs.trace.disable`, `klcs.trace.dump`: KLCS Linux compatibility foundation calls
+
+`klcs.syscall` accepts a staged `klcs_linux_syscall_frame_t` and returns a Linux-style syscall result. KLCS translates K64-native errors into Linux negative errno values; Linux-personality callers must not observe raw `K64_ERR_*` codes.
 
 ## Closed Feature Syscalls
 

@@ -117,6 +117,7 @@ K64_SRCS = \
   k64_pic.c \
   k64_pit.c \
   k64_keyboard.c \
+  k64_klcs.c \
   k64_sched.c \
   k64_pmm.c \
   k64_vmm.c \

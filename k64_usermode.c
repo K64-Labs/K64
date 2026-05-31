@@ -3,6 +3,7 @@
 #include "k64_fs.h"
 #include "k64_idt.h"
 #include "k64_keyboard.h"
+#include "k64_klcs.h"
 #include "k64_log.h"
 #include "k64_pit.h"
 #include "k64_sched.h"
@@ -115,6 +116,7 @@ typedef struct {
     uint32_t effective_uid;
     uint32_t real_gid;
     uint32_t effective_gid;
+    k64_process_personality_t personality;
     char     path[K64_USER_PROCESS_PATH_MAX];
     k64_user_fd_t fds[K64_USER_FD_MAX];
     k64_task_t* wait_task;
@@ -384,6 +386,7 @@ static int process_alloc(const char* path,
     process_table[free_slot].effective_uid = effective_uid;
     process_table[free_slot].real_gid = real_gid;
     process_table[free_slot].effective_gid = effective_gid;
+    process_table[free_slot].personality = replacing ? process_table[free_slot].personality : K64_PERSONALITY_NATIVE;
     process_table[free_slot].wait_task = NULL;
     process_table[free_slot].wait_target_pid = 0;
     process_copy_path(process_table[free_slot].path, path);
@@ -508,6 +511,16 @@ uint32_t k64_usermode_current_effective_gid(void) {
         return k64_user_effective_gid();
     }
     return process_table[active_ctx.process_index].effective_gid;
+}
+
+bool k64_usermode_set_process_personality(uint64_t pid, k64_process_personality_t personality) {
+    int index = process_find_pid(pid);
+
+    if (index < 0) {
+        return false;
+    }
+    process_table[index].personality = personality;
+    return true;
 }
 
 bool k64_usermode_current_path(char* out, size_t out_size) {

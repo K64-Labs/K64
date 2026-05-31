@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include "k64_vmm.h"
 #include "k64_errno.h"
+#include "k64_klcs.h"
 
 #define K64_SYSCALL_EXIT  0ULL
 #define K64_SYSCALL_WRITE 1ULL
@@ -96,6 +97,7 @@ uint64_t k64_usermode_current_pid(void);
 uint32_t k64_usermode_current_real_uid(void);
 uint32_t k64_usermode_current_effective_uid(void);
 uint32_t k64_usermode_current_effective_gid(void);
+bool k64_usermode_set_process_personality(uint64_t pid, k64_process_personality_t personality);
 bool k64_usermode_current_path(char* out, size_t out_size);
 bool k64_usermode_is_active(void);
 void k64_usermode_poll_background(void);
