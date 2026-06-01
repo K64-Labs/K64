@@ -12,6 +12,7 @@ static uint8_t xfs_zero_block[K64_XFS_BLOCK_SIZE];
 static uint8_t xfs_tmp_block[K64_XFS_BLOCK_SIZE];
 static uint8_t xfs_tmp_block2[K64_XFS_BLOCK_SIZE];
 static uint8_t xfs_tmp_block3[K64_XFS_BLOCK_SIZE];
+static uint8_t xfs_check_seen_block[K64_XFS_BLOCK_SIZE];
 
 static void xfs_copy(char* dst, size_t dst_size, const char* src) {
     size_t i = 0;
@@ -1026,19 +1027,26 @@ bool k64_xfs_check(k64_xfs_mount_t* fs, k64_xfs_check_report_t* out) {
     if (!xfs_read_inode(fs, fs->super.root_inode, &root_inode) ||
         root_inode.type != K64_XFS_TYPE_DIRECTORY) {
         out->errors++;
+        xfs_copy(out->message, sizeof(out->message), "bad root inode");
     }
-    memset(xfs_tmp_block, 0, K64_XFS_BLOCK_SIZE);
+    memset(xfs_check_seen_block, 0, K64_XFS_BLOCK_SIZE);
     for (uint32_t i = 0; i < K64_XFS_MAX_INODES; ++i) {
         if (xfs_bitmap_get(xfs_tmp_block3, i)) {
             k64_xfs_inode_disk_t inode;
             used_inodes++;
             if (!xfs_read_inode(fs, i + 1u, &inode)) {
                 out->errors++;
+                if (!out->message[0]) {
+                    xfs_copy(out->message, sizeof(out->message), "bad used inode");
+                }
                 continue;
             }
             if (inode.type < K64_XFS_TYPE_REGULAR || inode.type > K64_XFS_TYPE_PIPE ||
                 inode.extent_count > K64_XFS_DIRECT_EXTENTS) {
                 out->errors++;
+                if (!out->message[0]) {
+                    xfs_copy(out->message, sizeof(out->message), "bad inode fields");
+                }
             }
             for (uint32_t e = 0; e < inode.extent_count && e < K64_XFS_DIRECT_EXTENTS; ++e) {
                 uint64_t start = inode.direct_extents[e].physical_block;
@@ -1047,15 +1055,25 @@ bool k64_xfs_check(k64_xfs_mount_t* fs, k64_xfs_check_report_t* out) {
                     start > UINT64_MAX - count ||
                     start + count > fs->super.total_blocks) {
                     out->errors++;
+                    if (!out->message[0]) {
+                        xfs_copy(out->message, sizeof(out->message), "bad extent range");
+                    }
                 } else {
                     for (uint64_t b = start; b < start + count; ++b) {
-                        if (!xfs_bitmap_get(xfs_tmp_block2, (uint32_t)b) ||
-                            (fs->super.total_blocks <= K64_XFS_BLOCK_SIZE * 8u &&
-                             xfs_bitmap_get(xfs_tmp_block, (uint32_t)b))) {
+                        if (!xfs_bitmap_get(xfs_tmp_block2, (uint32_t)b)) {
                             out->errors++;
+                            if (!out->message[0]) {
+                                xfs_copy(out->message, sizeof(out->message), "extent block unmarked");
+                            }
+                        } else if (fs->super.total_blocks <= K64_XFS_BLOCK_SIZE * 8u &&
+                                   xfs_bitmap_get(xfs_check_seen_block, (uint32_t)b)) {
+                            out->errors++;
+                            if (!out->message[0]) {
+                                xfs_copy(out->message, sizeof(out->message), "extent block duplicate");
+                            }
                         }
                         if (fs->super.total_blocks <= K64_XFS_BLOCK_SIZE * 8u) {
-                            xfs_bitmap_set(xfs_tmp_block, (uint32_t)b, true);
+                            xfs_bitmap_set(xfs_check_seen_block, (uint32_t)b, true);
                         }
                     }
                     used_blocks += count;
@@ -1073,8 +1091,15 @@ bool k64_xfs_check(k64_xfs_mount_t* fs, k64_xfs_check_report_t* out) {
     out->free_blocks = bitmap_free;
     if (bitmap_free != fs->super.free_blocks) {
         out->errors++;
+        if (!out->message[0]) {
+            xfs_copy(out->message, sizeof(out->message), "free count mismatch");
+        }
     }
     out->ok = out->errors == 0;
-    xfs_copy(out->message, sizeof(out->message), out->ok ? "K64XFS check: OK" : "K64XFS check: errors");
+    if (out->ok) {
+        xfs_copy(out->message, sizeof(out->message), "K64XFS check: OK");
+    } else if (!out->message[0]) {
+        xfs_copy(out->message, sizeof(out->message), "K64XFS check: errors");
+    }
     return true;
 }

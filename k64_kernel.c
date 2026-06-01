@@ -35,6 +35,21 @@ static void k64_selftest(void) {
     K64_LOG_INFO("Self tests completed.");
 }
 
+static void k64_enable_user_sse(void) {
+    uint64_t cr0;
+    uint64_t cr4;
+
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 &= ~(1ULL << 2); /* EM: allow x87/SSE instructions. */
+    cr0 |= (1ULL << 1);  /* MP: monitor coprocessor for WAIT/FWAIT. */
+    __asm__ volatile("mov %0, %%cr0" : : "r"(cr0));
+
+    __asm__ volatile("mov %%cr4, %0" : "=r"(cr4));
+    cr4 |= (1ULL << 9);  /* OSFXSR: enable FXSAVE/FXRSTOR SSE state. */
+    cr4 |= (1ULL << 10); /* OSXMMEXCPT: enable unmasked SIMD exceptions. */
+    __asm__ volatile("mov %0, %%cr4" : : "r"(cr4));
+}
+
 void k64_kernel_main(void) {
     k64_term_init();
     k64_term_draw_boot_screen();
@@ -73,6 +88,7 @@ void k64_kernel_main(void) {
 
     K64_LOG_INFO("Initializing scheduler...");
     k64_sched_init();
+    k64_enable_user_sse();
     k64_usermode_init();
     k64_term_boot_status("scheduler and usermode ready", true);
 

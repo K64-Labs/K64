@@ -11,11 +11,14 @@
 #define KLCS_LINUX_EFAULT 14
 #define KLCS_LINUX_EINVAL 22
 #define KLCS_LINUX_EMFILE 24
+#define KLCS_LINUX_ERANGE 34
 #define KLCS_LINUX_ENOSYS 38
 #define KLCS_LINUX_ENOMEM 12
 #define KLCS_LINUX_EEXIST 17
 #define KLCS_LINUX_ENOTDIR 20
 #define KLCS_LINUX_EISDIR 21
+#define KLCS_LINUX_EAGAIN 11
+#define KLCS_LINUX_ENOTSUP 95
 
 #define KLCS_PATH_MAX 256
 #define KLCS_TRACE_LINES 16
@@ -55,6 +58,8 @@ typedef struct {
     klcs_fd_kind_t kind;
     int native_fd;
     bool cloexec;
+    uint64_t offset;
+    uint64_t flags;
     char path[KLCS_PATH_MAX];
 } klcs_fd_t;
 
@@ -82,6 +87,13 @@ klcs_state_t* klcs_state(void);
 void klcs_trace_set(bool enabled);
 bool klcs_trace_enabled(void);
 void klcs_trace_record(uint64_t pid, uint64_t nr, const char* name, int64_t result);
+void klcs_trace_record_args(uint64_t pid,
+                            uint64_t nr,
+                            const char* name,
+                            uint64_t arg0,
+                            uint64_t arg1,
+                            uint64_t arg2,
+                            int64_t result);
 void klcs_status(char* out, size_t out_size);
 void klcs_syscalls(char* out, size_t out_size);
 void klcs_trace_dump(char* out, size_t out_size);

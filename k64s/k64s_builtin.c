@@ -21,6 +21,7 @@
 #include "k64_system.h"
 #include "k64_terminal.h"
 #include "k64_user.h"
+#include "k64_usermode.h"
 #include "k64_version.h"
 #include "k64_xfs.h"
 #include "k64_autoversion.h"
@@ -535,18 +536,148 @@ static bool uname_command(const char* command, const char* args) {
     return true;
 }
 
-static bool klcs_print_file_validation(const char* path) {
+static bool svc_copy_text(char* out, size_t out_size, const char* text) {
+    size_t i = 0;
+
+    if (!out || out_size == 0) {
+        return false;
+    }
+    if (!text) {
+        out[0] = '\0';
+        return true;
+    }
+    while (text[i] && i + 1 < out_size) {
+        out[i] = text[i];
+        i++;
+    }
+    out[i] = '\0';
+    return text[i] == '\0';
+}
+
+static bool svc_join2(char* out, size_t out_size, const char* a, const char* b) {
+    size_t ai = 0;
+    size_t bi = 0;
+
+    if (!out || out_size == 0 || !a || !b) {
+        return false;
+    }
+    while (a[ai]) {
+        if (ai + 1 >= out_size) {
+            out[0] = '\0';
+            return false;
+        }
+        out[ai] = a[ai];
+        ai++;
+    }
+    while (b[bi]) {
+        if (ai + 1 >= out_size) {
+            out[0] = '\0';
+            return false;
+        }
+        out[ai++] = b[bi++];
+    }
+    out[ai] = '\0';
+    return true;
+}
+
+static const char* svc_basename(const char* path) {
+    const char* base = path;
+
+    if (!path) {
+        return "";
+    }
+    while (*path) {
+        if (*path == '/') {
+            base = path + 1;
+        }
+        path++;
+    }
+    return base;
+}
+
+static bool klcs_try_read_candidate(const char* candidate,
+                                    char* resolved,
+                                    size_t resolved_size,
+                                    const uint8_t** data,
+                                    size_t* size) {
+    if (!candidate || !candidate[0]) {
+        return false;
+    }
+    if (k64_fs_read_file_raw(candidate, data, size)) {
+        (void)svc_copy_text(resolved, resolved_size, candidate);
+        return true;
+    }
+    return false;
+}
+
+static bool klcs_read_linux_payload(const char* path,
+                                    char* resolved,
+                                    size_t resolved_size,
+                                    const uint8_t** data,
+                                    size_t* size) {
+    char candidate[256];
+    const char* base;
+
+    if (!path || !path[0]) {
+        return false;
+    }
+    if (klcs_try_read_candidate(path, resolved, resolved_size, data, size)) {
+        return true;
+    }
+
+    if (k64_strncmp(path, "/bin/", 5) == 0) {
+        if (svc_join2(candidate, sizeof(candidate), "/compat/linux", path) &&
+            klcs_try_read_candidate(candidate, resolved, resolved_size, data, size)) {
+            return true;
+        }
+    }
+
+    if (k64_strncmp(path, "/usr/bin/", 9) == 0) {
+        if (svc_join2(candidate, sizeof(candidate), "/compat/linux", path) &&
+            klcs_try_read_candidate(candidate, resolved, resolved_size, data, size)) {
+            return true;
+        }
+    }
+
+    base = svc_basename(path);
+    if (base[0] &&
+        svc_join2(candidate, sizeof(candidate), "/compat/linux/bin/", base) &&
+        klcs_try_read_candidate(candidate, resolved, resolved_size, data, size)) {
+        return true;
+    }
+
+    if (path[0] != '/' &&
+        svc_join2(candidate, sizeof(candidate), "/compat/linux/", path) &&
+        klcs_try_read_candidate(candidate, resolved, resolved_size, data, size)) {
+        return true;
+    }
+
+    return false;
+}
+
+static bool klcs_print_file_validation(const char* path, const char* run_args) {
     const uint8_t* data;
     size_t size;
     klcs_elf_info_t info;
+    char resolved[256];
+    char loader_args[384];
+    const char* linux_argv_path;
+    const char* loader = "/compat/linux/lib64/ld-linux-x86-64.so.2";
 
     if (!path || !path[0]) {
         svc_print_line("klcs: missing path");
         return true;
     }
-    if (!k64_fs_read_file_raw(path, &data, &size)) {
+    if (!klcs_read_linux_payload(path, resolved, sizeof(resolved), &data, &size)) {
         svc_print_line("klcs: file not found");
+        svc_print_line("klcs: try tcc, nano, git, /bin/tcc, or /compat/linux/bin/tcc");
         return true;
+    }
+    if (!k64_streq(path, resolved)) {
+        k64_term_write("klcs: resolved ");
+        k64_term_write(path);
+        k64_term_write(" -> ");
+        svc_print_line(resolved);
     }
     if (!klcs_validate_elf64(data, size, &info)) {
         k64_term_write("klcs: invalid Linux ELF: ");
@@ -554,12 +685,36 @@ static bool klcs_print_file_validation(const char* path) {
         return true;
     }
     if (info.dynamic) {
-        k64_term_write("klcs: ");
-        svc_print_line(info.message);
+        svc_print_line("klcs: dynamic x86_64 ELF accepted");
+        svc_print_line("klcs: launching staged Linux dynamic loader");
+        linux_argv_path = resolved;
+        if (k64_strncmp(resolved, "/compat/linux", 13) == 0) {
+            linux_argv_path = resolved + 13;
+            if (!linux_argv_path[0]) {
+                linux_argv_path = "/";
+            }
+        }
+        k64_usermode_set_next_personality(K64_PERSONALITY_LINUX_X86_64);
+        loader_args[0] = '\0';
+        svc_append(loader_args, sizeof(loader_args), "--library-path /lib64 --argv0 ");
+        svc_append(loader_args, sizeof(loader_args), linux_argv_path);
+        svc_append(loader_args, sizeof(loader_args), " ");
+        svc_append(loader_args, sizeof(loader_args), linux_argv_path);
+        if (run_args && run_args[0]) {
+            svc_append(loader_args, sizeof(loader_args), " ");
+            svc_append(loader_args, sizeof(loader_args), run_args);
+        }
+        if (!k64_elf_spawn_user_path_args(loader, loader_args)) {
+            svc_print_line("klcs: dynamic loader execution failed");
+        }
         return true;
     }
     svc_print_line("klcs: static x86_64 ELF accepted");
-    svc_print_line("klcs: execution bridge is not enabled in this MVP");
+    svc_print_line("klcs: entering Linux syscall ABI");
+    k64_usermode_set_next_personality(K64_PERSONALITY_LINUX_X86_64);
+    if (!k64_elf_spawn_user_path_args(resolved, run_args ? run_args : "")) {
+        svc_print_line("klcs: execution failed");
+    }
     return true;
 }
 
@@ -598,8 +753,8 @@ static bool klcs_command(const char* command, const char* args) {
     }
     if (k64_streq(sub, "run")) {
         char path[256];
-        (void)svc_next_token(args, path, sizeof(path));
-        return klcs_print_file_validation(path);
+        args = svc_next_token(args, path, sizeof(path));
+        return klcs_print_file_validation(path, args);
     }
     klcs_usage();
     return true;

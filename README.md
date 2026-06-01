@@ -309,7 +309,7 @@ v0.3.22 adds a first POSIX-like multiuser permission core. The active `userctl` 
 
 v0.3.23 introduced K64XFS as the modern filesystem core, and v0.3.24 made it the standard root filesystem for the normal build and release path. `xfsctl` remains the debugging/tooling surface for formatting, checking, inspecting, and exercising K64XFS.
 
-v0.3.36 introduces the first KLCS foundation. KLCS is the K64 Linux Compatibility Service: a service-level compatibility path for routing selected Linux x86_64 userspace behavior into native K64 service calls. It adds `klcs status`, `klcs syscalls`, `klcs trace`, and static Linux ELF validation through `klcs run <path>`. KLCS does not make K64 a Linux clone, and full Linux binary execution is not claimed yet. See `docs/klcs.md`.
+v0.3.37 turns the first KLCS foundation into a staged dynamic Linux app bridge. KLCS is the K64 Linux Compatibility Service: a service-level compatibility path for routing selected Linux x86_64 userspace behavior into native K64 service calls. It adds a real x86_64 `syscall` entry gate for Linux-personality Ring-3 processes, a built-in `klcs-hello` smoke binary, and a first `/compat/linux/lib64/ld-linux-x86-64.so.2` loader path for staged dynamic tools such as `tcc`, `git`, and `nano`. This is not a complete Linux kernel ABI yet, but loader/libc startup, TLS, `mmap`/`brk`, file descriptor I/O, stat/open paths, time, randomness, and common startup stubs are wired far enough for basic staged tool execution. See `docs/klcs.md`.
 
 Security boundary:
 

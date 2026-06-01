@@ -68,9 +68,12 @@ K64M_DEF_SRCS = $(wildcard k64m_def/*.drv)
 K64M_BUILD_DIR := build/k64m
 K64M_BINS := $(patsubst k64m_def/%.drv,$(K64M_BUILD_DIR)/%.k64m,$(K64M_DEF_SRCS))
 EX_SRCS = $(wildcard ex/*.S)
+KLCS_LINUX_SRCS = $(wildcard compat/linux/*.S)
 USER_C_SRCS = $(wildcard userland/bin/*.c)
 EX_BUILD_DIR := build/ex
+KLCS_LINUX_BUILD_DIR := build/compat/linux/bin
 EX_ELFS := $(patsubst ex/%.S,$(EX_BUILD_DIR)/%.elf,$(EX_SRCS))
+KLCS_LINUX_ELFS := $(patsubst compat/linux/%.S,$(KLCS_LINUX_BUILD_DIR)/%,$(KLCS_LINUX_SRCS))
 USER_ELFS := $(patsubst userland/bin/%.c,$(EX_BUILD_DIR)/%.elf,$(USER_C_SRCS))
 USER_LIB_OBJS := build/userland/crt0.o build/userland/k64libc.o
 ROOTFS_SRC_ROOT := rootfs
@@ -78,6 +81,8 @@ ROOTFS_STAGE_ROOT := build/rootfs
 ROOTFS_STAGE_STAMP := build/rootfs.stamp
 ROOTFS_IMAGE := build/root.xfs
 ROOTFS_IMAGE_SIZE ?= 16M
+ROOTFS_EXTRA_IMAGE := build/root-extra.xfs
+ROOTFS_EXTRA_IMAGE_SIZE ?= 128M
 K64_DISK_IMAGE := build/root.disk
 K64_DISK_SIZE ?= 32M
 GRUB_MODDIR := build/grub/i386-pc
@@ -180,6 +185,14 @@ $(EX_BUILD_DIR)/%.elf: $(EX_BUILD_DIR)/%.o
 	mkdir -p $(EX_BUILD_DIR)
 	$(LD) -nostdlib -static -e _start $(USER_IMAGE_BASE_FLAG) -Ttext 0x40100000 -o $@ $<
 
+$(KLCS_LINUX_BUILD_DIR)/%.o: compat/linux/%.S
+	mkdir -p $(KLCS_LINUX_BUILD_DIR)
+	$(CC64) $(TARGET64) -I. -m64 -ffreestanding -O2 -Wall -Wextra -fno-stack-protector -fno-builtin -fno-pic -fno-pie -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -c -o $@ $<
+
+$(KLCS_LINUX_BUILD_DIR)/%: $(KLCS_LINUX_BUILD_DIR)/%.o
+	mkdir -p $(KLCS_LINUX_BUILD_DIR)
+	$(LD) -nostdlib -static -e _start $(USER_IMAGE_BASE_FLAG) -Ttext 0x40100000 -o $@ $<
+
 build/userland/%.o: userland/lib/%.S
 	mkdir -p build/userland
 	$(CC64) $(USER_CFLAGS) -c -o $@ $<
@@ -277,13 +290,14 @@ $(K64M_BUILD_DIR)/%.k64m: k64m_def/%.drv tools/build_k64x.py
 	mkdir -p $(K64M_BUILD_DIR)
 	$(PYTHON) tools/build_k64x.py driver $< $@
 
-$(ROOTFS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(USER_ELFS) $(K64_GRUB_ROOT_CFG) $(K64_BOOT_AREA) tools/mk_k64xfs.py tools/build_k64x.py $(shell find rootfs -type f 2>/dev/null) $(K64S_DEF_SRCS) $(K64M_DEF_SRCS) $(K64S_BINS) $(K64M_BINS)
+$(ROOTFS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(USER_ELFS) $(KLCS_LINUX_ELFS) $(K64_GRUB_ROOT_CFG) $(K64_BOOT_AREA) tools/mk_k64xfs.py tools/build_k64x.py $(shell find rootfs -type f 2>/dev/null) $(K64S_DEF_SRCS) $(K64M_DEF_SRCS) $(K64S_BINS) $(K64M_BINS)
 	rm -rf $(ROOTFS_STAGE_ROOT)
 	mkdir -p $(ROOTFS_STAGE_ROOT)/boot
 	mkdir -p $(ROOTFS_STAGE_ROOT)/boot/grub
 	mkdir -p $(ROOTFS_STAGE_ROOT)/k64s
 	mkdir -p $(ROOTFS_STAGE_ROOT)/k64m
 	mkdir -p $(ROOTFS_STAGE_ROOT)/ex
+	mkdir -p $(ROOTFS_STAGE_ROOT)/compat/linux/bin
 	rsync -a \
 		--exclude '/ex/kdesk-*.elf' \
 		--exclude '/k64m/kdesk-*.k64m' \
@@ -295,11 +309,20 @@ $(ROOTFS_STAGE_STAMP): $(K64_KERNEL_ELF) $(EX_ELFS) $(USER_ELFS) $(K64_GRUB_ROOT
 	if [ -n "$(K64S_BINS)" ]; then cp $(K64S_BINS) $(ROOTFS_STAGE_ROOT)/k64s/; fi
 	if [ -n "$(K64M_BINS)" ]; then cp $(K64M_BINS) $(ROOTFS_STAGE_ROOT)/k64m/; fi
 	if [ -n "$(EX_ELFS) $(USER_ELFS)" ]; then cp $(EX_ELFS) $(USER_ELFS) $(ROOTFS_STAGE_ROOT)/ex/; fi
+	if [ -n "$(KLCS_LINUX_ELFS)" ]; then cp $(KLCS_LINUX_ELFS) $(ROOTFS_STAGE_ROOT)/compat/linux/bin/; chmod 0755 $(ROOTFS_STAGE_ROOT)/compat/linux/bin/*; fi
 	touch $(ROOTFS_STAGE_STAMP)
 
 $(ROOTFS_IMAGE): $(ROOTFS_STAGE_STAMP)
 	mkdir -p build
 	$(PYTHON) tools/mk_k64xfs.py $(ROOTFS_STAGE_ROOT) $(ROOTFS_IMAGE) --size $(ROOTFS_IMAGE_SIZE)
+
+$(ROOTFS_EXTRA_IMAGE): $(ROOTFS_STAGE_STAMP) tools/stage_klcs_apps.sh tools/mk_k64xfs.py
+	mkdir -p build
+	rm -rf build/rootfs-extra
+	mkdir -p build/rootfs-extra
+	rsync -a $(ROOTFS_STAGE_ROOT)/ build/rootfs-extra/
+	bash tools/stage_klcs_apps.sh build/rootfs-extra/compat/linux
+	$(PYTHON) tools/mk_k64xfs.py build/rootfs-extra $(ROOTFS_EXTRA_IMAGE) --size $(ROOTFS_EXTRA_IMAGE_SIZE)
 
 $(K64_DISK_IMAGE): $(ROOTFS_IMAGE)
 	mkdir -p build
@@ -320,7 +343,19 @@ k64.iso: $(K64_KERNEL_ELF) $(ROOTFS_IMAGE) $(K64_DISK_IMAGE) $(K64_GRUB_BOOTSTRA
 	cp $(K64_GRUB_BOOTSTRAP_CFG) iso/boot/grub/grub.cfg
 	$(GRUB_MKRESCUE) -d $(GRUB_MODDIR) -o k64.iso iso
 
-iso: k64.iso
+k64-extra.iso: $(K64_KERNEL_ELF) $(ROOTFS_EXTRA_IMAGE) $(K64_GRUB_BOOTSTRAP_CFG) $(K64_GRUB_K64XFS_MOD) $(K64_GRUB_ROOT_CFG) $(K64_GRUB_ISO_CFG)
+	@if [ -z "$(GRUB_MKRESCUE)" ]; then \
+		echo "Missing GRUB ISO builder. Install grub-mkrescue/grub2-mkrescue."; \
+		exit 1; \
+	fi
+	rm -rf iso-extra
+	mkdir -p iso-extra/boot/grub
+	cp $(K64_KERNEL_ELF) iso-extra/boot/$(K64_KERNEL_ELF)
+	cp $(ROOTFS_EXTRA_IMAGE) iso-extra/root.xfs
+	cp $(K64_GRUB_BOOTSTRAP_CFG) iso-extra/boot/grub/grub.cfg
+	$(GRUB_MKRESCUE) -d $(GRUB_MODDIR) -o k64-extra.iso iso-extra
+
+iso: k64.iso k64-extra.iso
 
 run: k64.iso
 	$(QEMU) -boot order=d -cdrom k64.iso -drive file=$(K64_DISK_IMAGE),format=raw,if=ide,index=0 -netdev user,id=k64net -device rtl8139,netdev=k64net -serial stdio -no-reboot -no-shutdown

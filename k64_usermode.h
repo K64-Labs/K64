@@ -98,6 +98,7 @@ uint32_t k64_usermode_current_real_uid(void);
 uint32_t k64_usermode_current_effective_uid(void);
 uint32_t k64_usermode_current_effective_gid(void);
 bool k64_usermode_set_process_personality(uint64_t pid, k64_process_personality_t personality);
+void k64_usermode_set_next_personality(k64_process_personality_t personality);
 bool k64_usermode_current_path(char* out, size_t out_size);
 bool k64_usermode_is_active(void);
 void k64_usermode_poll_background(void);

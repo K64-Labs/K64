@@ -1,0 +1,23 @@
+KLCS Linux compatibility payload root.
+
+Local test ISOs can stage Linux tools here with:
+
+  tools/stage_klcs_apps.sh
+
+The staged binaries are intentionally local payloads for KLCS testing. KLCS can
+now launch staged dynamic Linux ELF64 programs through the bundled ld-linux
+bridge. This is not a complete Linux ABI, but basic glibc loader startup works.
+
+Inside K64, these forms are accepted for staged tools:
+
+  klcs run klcs-hello
+  klcs run tcc -v
+  klcs run nano --version
+  klcs run git --version
+  klcs run sl
+
+klcs-hello is a static Linux x86_64 ELF built with K64 and should actually run
+through the Linux syscall gate. sl is the real Debian amd64 sl binary staged
+from the Debian package archive. Dynamically linked tools depend on staged
+libraries and data files under /compat/linux/lib64, /compat/linux/usr/lib* and
+/compat/linux/usr/share.

@@ -49,6 +49,7 @@ jobs:
       run: |
         make clean
         make test
+        make k64-extra.iso
 
     - name: Upload build artifacts
       if: always()
@@ -57,6 +58,8 @@ jobs:
         name: k64-build-artifacts
         path: |
           k64.iso
+          k64-extra.iso
           k64-kernel-v*.elf
           build/root.disk
           build/root.xfs
+          build/root-extra.xfs

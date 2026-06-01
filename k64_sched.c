@@ -246,7 +246,13 @@ static uint64_t pick_next_rsp(void) {
 uint64_t k64_sched_handle_timer(uint64_t old_rsp) {
     if (k64_usermode_is_active()) {
         k64_pit_on_tick();
-        on_tick_accounting();
+        /*
+         * K64 does not yet save and preempt independent Ring-3 trap frames from
+         * the timer path. While a user context is active, keep the timer IRQ
+         * deliberately tiny. Do not touch current_task or the task ring here:
+         * cooperative user execution can leave scheduler task records stale
+         * until control returns through the normal syscall/ELF path.
+         */
         k64_pic_send_eoi(0);
         return old_rsp;
     }

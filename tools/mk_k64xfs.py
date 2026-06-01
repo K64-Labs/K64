@@ -11,7 +11,7 @@ SECTOR_SIZE = 512
 MAGIC = b"K64XFS1\0"
 VERSION_MAJOR = 1
 VERSION_MINOR = 0
-MAX_INODES = 128
+MAX_INODES = 512
 DIRECT_EXTENTS = 8
 NAME_MAX = 128
 JOURNAL_BLOCKS = 32
@@ -52,7 +52,9 @@ def normalize_rel(path):
 
 
 def file_mode(rel):
-    if rel.endswith(".elf") or rel.startswith("k64s/") or rel.startswith("k64m/"):
+    if (rel.endswith(".elf") or rel.startswith("k64s/") or
+            rel.startswith("k64m/") or rel.startswith("compat/linux/bin/") or
+            rel.startswith("compat/linux/lib64/")):
         return 0o100755
     return 0o100644
 

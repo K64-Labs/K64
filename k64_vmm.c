@@ -12,7 +12,7 @@
 #define K64_SERVICE_VM_BASE       0x0000000100000000ULL
 #define K64_SERVICE_VM_STRIDE     0x0000000001000000ULL
 #define K64_SERVICE_VM_ROOT_SIZE  0x0000000001000000ULL
-#define K64_SERVICE_VM_STACK_SIZE 0x0000000000008000ULL
+#define K64_SERVICE_VM_STACK_SIZE 0x0000000000040000ULL
 #define K64_SERVICE_VM_HEAP_SIZE  0x0000000000100000ULL
 #define K64_SERVICE_VM_MAX_SLOTS  256
 #define K64_SERVICE_STACK_FRAMES  (K64_SERVICE_VM_STACK_SIZE / K64_PAGE_SIZE)
@@ -95,13 +95,52 @@ static uint64_t* vmm_alloc_table_frame(k64_vm_space_t* space) {
     return (uint64_t*)(uintptr_t)frame;
 }
 
-static uint64_t* vmm_next_table(k64_vm_space_t* space, uint64_t* table, size_t index, uint64_t flags) {
+static uint64_t* vmm_split_large_page(k64_vm_space_t* space,
+                                      uint64_t* table,
+                                      size_t index,
+                                      uint64_t flags,
+                                      int level) {
+    uint64_t entry = table[index];
+    uint64_t* next;
+    uint64_t phys_base;
+    uint64_t child_flags;
+
+    if ((entry & (1ULL << 7)) == 0 || level < 1 || level > 2) {
+        return NULL;
+    }
+
+    next = vmm_alloc_table_frame(space);
+    if (!next) {
+        return NULL;
+    }
+
+    child_flags = entry & 0xFFFULL;
+    if (level == 2) {
+        phys_base = entry & 0xFFFFFC0000000ULL;
+        for (size_t i = 0; i < 512; ++i) {
+            next[i] = (phys_base + (uint64_t)i * 0x200000ULL) | child_flags;
+        }
+    } else {
+        phys_base = entry & 0xFFFFFFE00000ULL;
+        child_flags &= ~(1ULL << 7);
+        for (size_t i = 0; i < 512; ++i) {
+            next[i] = (phys_base + (uint64_t)i * K64_PAGE_SIZE) | child_flags;
+        }
+    }
+
+    table[index] = ((uint64_t)(uintptr_t)next) |
+                   K64_PAGE_TABLE_FLAGS |
+                   ((entry | flags) & K64_PAGE_USER);
+    return next;
+}
+
+static uint64_t* vmm_next_table(k64_vm_space_t* space, uint64_t* table, size_t index, uint64_t flags, int level) {
     uint64_t entry = table[index];
     uint64_t* next;
 
     if ((entry & K64_PAGE_PRESENT) != 0) {
         if ((entry & (1ULL << 7)) != 0) {
-            return NULL;
+            return vmm_split_large_page(space, table, index, flags, level);
         }
         return (uint64_t*)(uintptr_t)(entry & K64_PAGE_MASK);
     }
@@ -134,15 +173,15 @@ static bool vmm_map_page(k64_vm_space_t* space, uint64_t virt_addr, uint64_t phy
     pdt_index = (size_t)((virt_addr >> 21) & 0x1FFULL);
     pt_index = (size_t)((virt_addr >> 12) & 0x1FFULL);
 
-    pdpt = vmm_next_table(space, pml4, pml4_index, flags);
+    pdpt = vmm_next_table(space, pml4, pml4_index, flags, 3);
     if (!pdpt) {
         return false;
     }
-    pdt = vmm_next_table(space, pdpt, pdpt_index, flags);
+    pdt = vmm_next_table(space, pdpt, pdpt_index, flags, 2);
     if (!pdt) {
         return false;
     }
-    pt = vmm_next_table(space, pdt, pdt_index, flags);
+    pt = vmm_next_table(space, pdt, pdt_index, flags, 1);
     if (!pt) {
         return false;
     }
@@ -408,6 +447,10 @@ bool k64_vmm_map_user_range(k64_vm_space_t* space,
                             size_t file_size,
                             size_t mem_size) {
     return vmm_map_range_flags(space, virt_addr, data, file_size, mem_size, K64_PAGE_RW | K64_PAGE_USER);
+}
+
+bool k64_vmm_map_user_anon(k64_vm_space_t* space, uint64_t virt_addr, size_t mem_size) {
+    return vmm_map_range_flags(space, virt_addr, NULL, 0, mem_size, K64_PAGE_RW | K64_PAGE_USER);
 }
 
 bool k64_vmm_is_mapped(const k64_vm_space_t* space, uint64_t virt_addr, bool require_user) {

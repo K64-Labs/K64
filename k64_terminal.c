@@ -14,6 +14,24 @@ static bool mirror_serial = true;
 static bool screen_enabled = true;
 static bool cursor_visible = true;
 
+typedef enum {
+    TERM_ESC_NORMAL = 0,
+    TERM_ESC_ESC,
+    TERM_ESC_CSI,
+    TERM_ESC_CHARSET
+} term_escape_state_t;
+
+typedef struct {
+    term_escape_state_t state;
+    int params[8];
+    int param_count;
+    int current;
+    bool have_current;
+    bool private_mode;
+} term_ansi_state_t;
+
+static term_ansi_state_t ansi_state;
+
 static inline void outb(uint16_t port, uint8_t value) {
     __asm__ __volatile__("outb %0, %1" : : "a"(value), "Nd"(port));
 }
@@ -56,6 +74,51 @@ static void term_write_at(int x, int y, const char* s, uint8_t color) {
         }
         i++;
     }
+}
+
+static void term_clear_line_from(int y, int x0, int x1) {
+    if (!screen_enabled || y < 0 || y >= K64_ROWS) {
+        return;
+    }
+    if (x0 < 0) {
+        x0 = 0;
+    }
+    if (x1 >= K64_COLS) {
+        x1 = K64_COLS - 1;
+    }
+    for (int x = x0; x <= x1; ++x) {
+        VGA[y * K64_COLS + x] = vga_entry(' ', current_color);
+    }
+}
+
+static void term_clear_screen_region(int y0, int x0, int y1, int x1) {
+    for (int y = y0; y <= y1; ++y) {
+        int start = (y == y0) ? x0 : 0;
+        int end = (y == y1) ? x1 : K64_COLS - 1;
+        term_clear_line_from(y, start, end);
+    }
+}
+
+static void term_delete_chars(int count) {
+    if (!screen_enabled || count <= 0 || cursor_y < 0 || cursor_y >= K64_ROWS) {
+        return;
+    }
+    if (count > K64_COLS - cursor_x) {
+        count = K64_COLS - cursor_x;
+    }
+    for (int x = cursor_x; x < K64_COLS - count; ++x) {
+        VGA[cursor_y * K64_COLS + x] = VGA[cursor_y * K64_COLS + x + count];
+    }
+    for (int x = K64_COLS - count; x < K64_COLS; ++x) {
+        VGA[cursor_y * K64_COLS + x] = vga_entry(' ', current_color);
+    }
+}
+
+static int term_ansi_param(const term_ansi_state_t* st, int idx, int fallback) {
+    if (idx < 0 || idx >= st->param_count) {
+        return fallback;
+    }
+    return st->params[idx] == 0 ? fallback : st->params[idx];
 }
 
 static void term_center(int y, const char* s, uint8_t color) {
@@ -183,6 +246,23 @@ void k64_term_putc(char c) {
         k64_serial_putc(c);
     }
 
+    if (c == '\a') {
+        return;
+    }
+    if (c == '\b') {
+        if (cursor_x > 0) {
+            cursor_x--;
+        }
+        k64_term_sync_cursor();
+        return;
+    }
+    if (c == '\t') {
+        int next = (cursor_x + 8) & ~7;
+        while (cursor_x < next) {
+            k64_term_putc(' ');
+        }
+        return;
+    }
     if (c == '\n') {
         k64_term_newline();
         return;
@@ -213,6 +293,196 @@ void k64_term_putc(char c) {
 void k64_term_write(const char* s) {
     while (*s) {
         k64_term_putc(*s++);
+    }
+}
+
+static void term_ansi_reset(term_ansi_state_t* st) {
+    st->state = TERM_ESC_NORMAL;
+    st->param_count = 0;
+    st->current = 0;
+    st->have_current = false;
+    st->private_mode = false;
+}
+
+static void term_ansi_finish_param(term_ansi_state_t* st) {
+    if (st->param_count >= (int)(sizeof(st->params) / sizeof(st->params[0]))) {
+        return;
+    }
+    st->params[st->param_count++] = st->have_current ? st->current : 0;
+    st->current = 0;
+    st->have_current = false;
+}
+
+static void term_ansi_sgr(const term_ansi_state_t* st) {
+    if (st->param_count == 0) {
+        k64_term_setcolor(K64_COLOR_LIGHT_GREY, K64_COLOR_BLACK);
+        return;
+    }
+    for (int i = 0; i < st->param_count; ++i) {
+        int p = st->params[i];
+        if (p == 0) {
+            k64_term_setcolor(K64_COLOR_LIGHT_GREY, K64_COLOR_BLACK);
+        } else if (p >= 30 && p <= 37) {
+            static const k64_color_t fg[8] = {
+                K64_COLOR_BLACK, K64_COLOR_RED, K64_COLOR_GREEN, K64_COLOR_BROWN,
+                K64_COLOR_BLUE, K64_COLOR_MAGENTA, K64_COLOR_CYAN, K64_COLOR_LIGHT_GREY
+            };
+            k64_term_setcolor(fg[p - 30], (k64_color_t)(current_color >> 4));
+        } else if (p >= 40 && p <= 47) {
+            static const k64_color_t bg[8] = {
+                K64_COLOR_BLACK, K64_COLOR_RED, K64_COLOR_GREEN, K64_COLOR_BROWN,
+                K64_COLOR_BLUE, K64_COLOR_MAGENTA, K64_COLOR_CYAN, K64_COLOR_LIGHT_GREY
+            };
+            k64_term_setcolor((k64_color_t)(current_color & 0x0F), bg[p - 40]);
+        }
+    }
+}
+
+static void term_ansi_handle_csi(term_ansi_state_t* st, char final) {
+    int n;
+
+    if (final != 'm') {
+        term_ansi_finish_param(st);
+    }
+
+    switch (final) {
+        case 'A':
+            cursor_y -= term_ansi_param(st, 0, 1);
+            if (cursor_y < 0) cursor_y = 0;
+            k64_term_sync_cursor();
+            break;
+        case 'B':
+            cursor_y += term_ansi_param(st, 0, 1);
+            if (cursor_y >= K64_ROWS) cursor_y = K64_ROWS - 1;
+            k64_term_sync_cursor();
+            break;
+        case 'C':
+            cursor_x += term_ansi_param(st, 0, 1);
+            if (cursor_x >= K64_COLS) cursor_x = K64_COLS - 1;
+            k64_term_sync_cursor();
+            break;
+        case 'D':
+            cursor_x -= term_ansi_param(st, 0, 1);
+            if (cursor_x < 0) cursor_x = 0;
+            k64_term_sync_cursor();
+            break;
+        case 'G':
+            k64_term_set_cursor(term_ansi_param(st, 0, 1) - 1, cursor_y);
+            break;
+        case 'H':
+        case 'f':
+            k64_term_set_cursor(term_ansi_param(st, 1, 1) - 1,
+                                term_ansi_param(st, 0, 1) - 1);
+            break;
+        case 'd':
+            k64_term_set_cursor(cursor_x, term_ansi_param(st, 0, 1) - 1);
+            break;
+        case 'J':
+            n = term_ansi_param(st, 0, 0);
+            if (n == 2 || n == 3) {
+                k64_term_clear();
+            } else if (n == 1) {
+                term_clear_screen_region(0, 0, cursor_y, cursor_x);
+            } else {
+                term_clear_screen_region(cursor_y, cursor_x, K64_ROWS - 1, K64_COLS - 1);
+            }
+            break;
+        case 'K':
+            n = term_ansi_param(st, 0, 0);
+            if (n == 2) {
+                term_clear_line_from(cursor_y, 0, K64_COLS - 1);
+            } else if (n == 1) {
+                term_clear_line_from(cursor_y, 0, cursor_x);
+            } else {
+                term_clear_line_from(cursor_y, cursor_x, K64_COLS - 1);
+            }
+            break;
+        case 'P':
+            term_delete_chars(term_ansi_param(st, 0, 1));
+            break;
+        case 'h':
+        case 'l':
+            n = term_ansi_param(st, 0, 0);
+            if (st->private_mode && n == 25) {
+                k64_term_set_cursor_visible(final == 'h');
+            } else if (st->private_mode && n == 1049) {
+                k64_term_clear();
+            }
+            break;
+        case 'm':
+            term_ansi_finish_param(st);
+            term_ansi_sgr(st);
+            break;
+        case 't':
+        default:
+            break;
+    }
+    term_ansi_reset(st);
+}
+
+static void term_ansi_putc(char c) {
+    term_ansi_state_t* st = &ansi_state;
+
+    switch (st->state) {
+        case TERM_ESC_NORMAL:
+            if ((unsigned char)c == 0x1B) {
+                st->state = TERM_ESC_ESC;
+                return;
+            }
+            k64_term_putc(c);
+            return;
+        case TERM_ESC_ESC:
+            if (c == '[') {
+                st->state = TERM_ESC_CSI;
+                st->param_count = 0;
+                st->current = 0;
+                st->have_current = false;
+                st->private_mode = false;
+                return;
+            }
+            if (c == '(' || c == ')') {
+                st->state = TERM_ESC_CHARSET;
+                return;
+            }
+            if (c == 'c') {
+                k64_term_clear();
+                term_ansi_reset(st);
+                return;
+            }
+            if (c == '>' || c == '=' || c == '7' || c == '8') {
+                term_ansi_reset(st);
+                return;
+            }
+            term_ansi_reset(st);
+            return;
+        case TERM_ESC_CHARSET:
+            term_ansi_reset(st);
+            return;
+        case TERM_ESC_CSI:
+            if (c == '?') {
+                st->private_mode = true;
+                return;
+            }
+            if (c >= '0' && c <= '9') {
+                st->current = st->current * 10 + (c - '0');
+                st->have_current = true;
+                return;
+            }
+            if (c == ';') {
+                term_ansi_finish_param(st);
+                return;
+            }
+            term_ansi_handle_csi(st, c);
+            return;
+    }
+}
+
+void k64_term_write_ansi(const char* data, size_t len) {
+    if (!data) {
+        return;
+    }
+    for (size_t i = 0; i < len; ++i) {
+        term_ansi_putc(data[i]);
     }
 }
 

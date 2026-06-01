@@ -115,6 +115,14 @@ int main(void) {
     expect_true("unmount", k64_xfs_unmount(&fs));
     expect_true("remount", k64_xfs_mount(dev, &fs));
     expect_true("check remount", k64_xfs_check(&fs, &report) && report.ok);
+    if (!report.ok) {
+        printf("xfs remount check: errors=%u used_inodes=%u used_blocks=%llu free=%llu msg=%s\n",
+               report.errors,
+               report.used_inodes,
+               (unsigned long long)report.used_blocks,
+               (unsigned long long)report.free_blocks,
+               report.message);
+    }
 
     if (tests_failed) {
         printf("xfs tests failed: %d\n", tests_failed);

@@ -1,0 +1,15 @@
+This directory contains locally staged Linux binaries for KLCS testing.
+
+Expected first checks inside K64:
+
+  klcs run klcs-hello
+  klcs run tcc -v
+  klcs run nano --version
+  klcs run git --version
+  klcs run sl
+
+KLCS now launches staged dynamically linked x86_64 Linux tools through the
+staged ld-linux bridge. This is still a compatibility layer, not a full Linux
+kernel ABI, but loader, libc, TLS, mmap/brk, fd reads, and common startup
+syscalls are wired far enough for basic staged tool execution. The `sl` payload
+is the real Debian amd64 sl binary staged from the Debian package archive.

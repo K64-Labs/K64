@@ -23,3 +23,8 @@ rootfs/etc/kpm/
 rootfs/ex/kdesk-*.elf
 rootfs/k64m/
 rootfs/k64s/
+rootfs/compat/linux/bin/
+rootfs/compat/linux/lib/
+rootfs/compat/linux/lib64/
+rootfs/compat/linux/usr/
+rootfs/compat/linux/src/

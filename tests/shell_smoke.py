@@ -9,6 +9,7 @@ import sys
 import http.server
 import socketserver
 import threading
+import tempfile
 import time
 
 try:
@@ -27,10 +28,17 @@ def qemu_base_cmd():
         "k64.iso",
     ]
     if os.environ.get("K64_SMOKE_ATTACH_DISK", "1") != "0":
+        disk_image = os.environ.get("K64_SMOKE_DISK_IMAGE", "build/root.disk")
         cmd += [
             "-drive",
-            "file=build/root.disk,format=raw,if=ide,index=0",
+            f"file={disk_image},format=raw,if=ide,index=0",
         ]
+        install_disk = os.environ.get("K64_SMOKE_INSTALL_DISK")
+        if install_disk:
+            cmd += [
+                "-drive",
+                f"file={install_disk},format=raw,if=ide,index=1",
+            ]
     cmd += [
         "-netdev",
         "user,id=k64net",
@@ -266,10 +274,26 @@ def main():
     http_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
     http_thread.start()
 
+    disk_tmp = None
+    saved_disk_image = os.environ.get("K64_SMOKE_DISK_IMAGE")
+    saved_install_disk = os.environ.get("K64_SMOKE_INSTALL_DISK")
+
     try:
+        if attach_disk:
+            disk_tmp = tempfile.TemporaryDirectory(prefix="k64-shell-smoke-")
+            smoke_disk = os.path.join(disk_tmp.name, "root.disk")
+            install_disk = os.path.join(disk_tmp.name, "install.disk")
+            shutil.copyfile("build/root.disk", smoke_disk)
+            with open(install_disk, "wb") as fh:
+                fh.truncate(32 * 1024 * 1024)
+            os.environ["K64_SMOKE_DISK_IMAGE"] = smoke_disk
+            os.environ["K64_SMOKE_INSTALL_DISK"] = install_disk
+
         with Guest() as guest:
             net_device = os.environ.get("K64_SMOKE_NET_DEVICE", "rtl8139")
             net_driver = "e1000" if net_device.startswith("e1000") else "rtl8139"
+            install_target = "ata1" if attach_disk else "ata0"
+            shell_dir = f"/tmp/shell-smoke-{net_driver}-{'disk' if attach_disk else 'iso'}-{os.getpid()}"
             checks = [
             ("help", "shutdown         - power down the machine"),
             ("echo shell-smoke-ok", "shell-smoke-ok"),
@@ -294,7 +318,7 @@ def main():
             ("xfsctl devices", "size=" if attach_disk else PROMPT_NEEDLE),
             ("driverctl list", "ID    STATE"),
             ("storagectl list", "size=" if attach_disk else PROMPT_NEEDLE),
-            ("storagectl partitions ata0", "unallocated=" if attach_disk else "storagectl: disk not found"),
+            (f"storagectl partitions {install_target}", "free=" if attach_disk else "storagectl: disk not found"),
             ("storagectl root", "image_limit="),
             ("grow /", "grow complete") if attach_disk else ("grow /", "grow failed"),
             ("netctl status", f"net: driver={net_driver}"),
@@ -311,7 +335,7 @@ def main():
             ("udp send 10.0.2.2 9 shell-smoke", PROMPT_NEEDLE),
             ("install", "K64 installer"),
             ("install user smokeuser smokepass sudo", "installer: user created: smokeuser"),
-            ("install ata0 yes", "installer: root filesystem installed") if attach_disk else ("install ata0 yes", "installer: failed"),
+            (f"install {install_target} yes", "installer: root filesystem installed", 90) if attach_disk else ("install ata0 yes", "installer: failed"),
             ("pwd", "/"),
             ("ls /", "etc/"),
             ("stat /etc/motd", "file /etc/motd"),
@@ -323,21 +347,23 @@ def main():
             ("write /dev/null discarded", PROMPT_NEEDLE),
             ("klcs status", "KLCS: running"),
             ("klcs syscalls", "write implemented"),
+            ("klcs run klcs-hello", "klcs-hello: Linux syscall ABI works"),
+            ("klcs run sl", "ELF: exit code", 45),
             ("klcs trace on", "KLCS trace: on"),
             ("klcs trace off", "KLCS trace: off"),
             ("klcs run /etc/motd", "invalid Linux ELF"),
-            ("mkdir /tmp/shell-smoke", PROMPT_NEEDLE),
-            ("touch /tmp/shell-smoke/empty", PROMPT_NEEDLE),
-            ("write /tmp/shell-smoke/file one", PROMPT_NEEDLE),
-            ("append /tmp/shell-smoke/file -two", PROMPT_NEEDLE),
-            ("cat /tmp/shell-smoke/file", "one-two"),
-            ("cp /tmp/shell-smoke/file /tmp/shell-smoke/copy", PROMPT_NEEDLE),
-            ("mv /tmp/shell-smoke/copy /tmp/shell-smoke/moved", PROMPT_NEEDLE),
-            ("stat /tmp/shell-smoke/moved", "file /tmp/shell-smoke/moved"),
-            ("rm /tmp/shell-smoke/moved", PROMPT_NEEDLE),
-            ("rm /tmp/shell-smoke/file", PROMPT_NEEDLE),
-            ("rm /tmp/shell-smoke/empty", PROMPT_NEEDLE),
-            ("rmdir /tmp/shell-smoke", PROMPT_NEEDLE),
+            (f"mkdir {shell_dir}", PROMPT_NEEDLE),
+            (f"touch {shell_dir}/empty", PROMPT_NEEDLE),
+            (f"write {shell_dir}/file one", PROMPT_NEEDLE),
+            (f"append {shell_dir}/file -two", PROMPT_NEEDLE),
+            (f"cat {shell_dir}/file", "one-two"),
+            (f"cp {shell_dir}/file {shell_dir}/copy", PROMPT_NEEDLE),
+            (f"mv {shell_dir}/copy {shell_dir}/moved", PROMPT_NEEDLE),
+            (f"stat {shell_dir}/moved", f"file {shell_dir}/moved"),
+            (f"rm {shell_dir}/moved", PROMPT_NEEDLE),
+            (f"rm {shell_dir}/file", PROMPT_NEEDLE),
+            (f"rm {shell_dir}/empty", PROMPT_NEEDLE),
+            (f"rmdir {shell_dir}", PROMPT_NEEDLE),
             ("sync", "sync complete"),
             ("whoami", "guest"),
             ("id", "real=guest"),
@@ -374,8 +400,17 @@ def main():
             if os.environ.get("K64_SMOKE_EXTERNAL_NET") == "1":
                 checks.insert(25, ("netctl resolve example.com", "resolve: example.com ->"))
                 checks.insert(26, ("kcurl example.com", "Example Domain"))
-            for cmd, expected in checks:
-                guest.command(cmd, expected)
+            if os.environ.get("K64_SMOKE_KLCS_DYNAMIC") == "1":
+                checks.insert(55, ("klcs run tcc -v", "tcc version", 30))
+                checks.insert(56, ("klcs run git --version", "git version", 30))
+                checks.insert(57, ("klcs run nano --version", "GNU nano", 30))
+            for item in checks:
+                if len(item) == 3:
+                    cmd, expected, timeout = item
+                else:
+                    cmd, expected = item
+                    timeout = 15
+                guest.command(cmd, expected, timeout=timeout)
 
             edit_path = f"/tmp/edit-smoke-{net_driver}-{'disk' if attach_disk else 'iso'}.txt"
             guest.send(f"edit {edit_path}\n")
@@ -389,6 +424,16 @@ def main():
             guest.send(f"cat {edit_path}\n")
             guest.read_until("second line", 10)
     finally:
+        if saved_disk_image is None:
+            os.environ.pop("K64_SMOKE_DISK_IMAGE", None)
+        else:
+            os.environ["K64_SMOKE_DISK_IMAGE"] = saved_disk_image
+        if saved_install_disk is None:
+            os.environ.pop("K64_SMOKE_INSTALL_DISK", None)
+        else:
+            os.environ["K64_SMOKE_INSTALL_DISK"] = saved_install_disk
+        if disk_tmp:
+            disk_tmp.cleanup()
         http_server.shutdown()
         http_server.server_close()
 

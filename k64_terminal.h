@@ -29,6 +29,7 @@ void k64_term_setcolor(k64_color_t fg, k64_color_t bg);
 void k64_term_set_mirror_serial(bool enabled);
 void k64_term_putc(char c);
 void k64_term_write(const char* s);
+void k64_term_write_ansi(const char* data, size_t len);
 void k64_term_write_hex(uint64_t v);
 void k64_term_write_dec(uint64_t v);
 void k64_term_draw_boot_screen(void);

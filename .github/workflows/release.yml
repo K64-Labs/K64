@@ -46,6 +46,7 @@ jobs:
       run: |
         make clean
         make test
+        make k64-extra.iso
 
     - name: Compute release version
       id: version
@@ -66,6 +67,8 @@ jobs:
         overwrite_files: true
         files: |
           k64.iso
+          k64-extra.iso
           k64-kernel-v*.elf
           build/root.disk
           build/root.xfs
+          build/root-extra.xfs

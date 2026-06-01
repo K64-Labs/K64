@@ -16,7 +16,7 @@
 #define K64_GDT_TSS_SELECTOR  0x28
 #define K64_USER_DATA_SELECTOR 0x1B
 #define K64_USER_CODE_SELECTOR 0x23
-#define K64_USER_PROCESS_MAX 32
+#define K64_USER_PROCESS_MAX 64
 #define K64_USER_PROCESS_PATH_MAX 96
 #define K64_USER_SPAWN_MAX 8
 #define K64_USER_SPAWN_ARGS_MAX 256
@@ -26,6 +26,12 @@
 #define K64_USER_PIPE_MAX 16
 #define K64_USER_PIPE_BUFFER_SIZE 4096
 #define K64_USER_SERVICE_CALL_DEPTH_MAX 4
+#define K64_LINUX_PAGE_SIZE 0x1000ULL
+#define K64_LINUX_PAGE_MASK (~(K64_LINUX_PAGE_SIZE - 1ULL))
+#define K64_LINUX_HEAP_BASE 0x0000000004B70000ULL
+#define K64_LINUX_BRK_BASE  0x0000000004B80000ULL
+#define K64_LINUX_HEAP_SIZE 0x0000000001000000ULL
+#define K64_LINUX_BRK_LIMIT (K64_LINUX_HEAP_BASE + K64_LINUX_HEAP_SIZE)
 
 typedef struct {
     uint32_t width;
@@ -117,6 +123,9 @@ typedef struct {
     uint32_t real_gid;
     uint32_t effective_gid;
     k64_process_personality_t personality;
+    uint64_t linux_brk;
+    uint64_t linux_mmap_next;
+    uint64_t linux_fs_base;
     char     path[K64_USER_PROCESS_PATH_MAX];
     k64_user_fd_t fds[K64_USER_FD_MAX];
     k64_task_t* wait_task;
@@ -170,6 +179,7 @@ extern int64_t k64_user_enter_asm(uint64_t new_cr3,
                                   k64_user_exec_context_t* ctx);
 extern void k64_user_return_asm(k64_user_exec_context_t* ctx, int64_t result);
 extern void k64_syscall_stub(void);
+extern void k64_linux_syscall_stub(void);
 
 static k64_tss64_t tss64;
 static uint8_t syscall_stack[16384] __attribute__((aligned(16)));
@@ -179,6 +189,7 @@ static k64_user_exec_context_t active_ctx;
 static k64_user_process_t process_table[K64_USER_PROCESS_MAX];
 static k64_user_pipe_t pipe_table[K64_USER_PIPE_MAX];
 static uint64_t next_user_pid = 5000;
+static k64_process_personality_t next_process_personality = K64_PERSONALITY_NATIVE;
 
 typedef struct {
     bool used;
@@ -386,7 +397,11 @@ static int process_alloc(const char* path,
     process_table[free_slot].effective_uid = effective_uid;
     process_table[free_slot].real_gid = real_gid;
     process_table[free_slot].effective_gid = effective_gid;
-    process_table[free_slot].personality = replacing ? process_table[free_slot].personality : K64_PERSONALITY_NATIVE;
+    process_table[free_slot].personality = replacing ? process_table[free_slot].personality : next_process_personality;
+    next_process_personality = K64_PERSONALITY_NATIVE;
+    process_table[free_slot].linux_brk = 0x0000000070000000ULL;
+    process_table[free_slot].linux_mmap_next = 0x0000000060000000ULL;
+    process_table[free_slot].linux_fs_base = 0;
     process_table[free_slot].wait_task = NULL;
     process_table[free_slot].wait_target_pid = 0;
     process_copy_path(process_table[free_slot].path, path);
@@ -482,6 +497,15 @@ static uint64_t current_process_pid(void) {
     return process_table[active_ctx.process_index].pid;
 }
 
+static const char* current_process_image_path(void) {
+    if (active_ctx.process_index < 0 ||
+        active_ctx.process_index >= K64_USER_PROCESS_MAX ||
+        !process_table[active_ctx.process_index].used) {
+        return "";
+    }
+    return process_table[active_ctx.process_index].path;
+}
+
 uint64_t k64_usermode_current_pid(void) {
     return current_process_pid();
 }
@@ -521,6 +545,10 @@ bool k64_usermode_set_process_personality(uint64_t pid, k64_process_personality_
     }
     process_table[index].personality = personality;
     return true;
+}
+
+void k64_usermode_set_next_personality(k64_process_personality_t personality) {
+    next_process_personality = personality;
 }
 
 bool k64_usermode_current_path(char* out, size_t out_size) {
@@ -1566,6 +1594,1006 @@ static int64_t syscall_service_call(uint64_t user_call_ptr) {
     return rc;
 }
 
+typedef struct {
+    uint64_t nr;
+    uint64_t arg0;
+    uint64_t arg1;
+    uint64_t arg2;
+    uint64_t arg3;
+    uint64_t arg4;
+    uint64_t arg5;
+    uint64_t user_rip;
+    uint64_t user_rflags;
+    uint64_t user_rsp;
+} k64_linux_syscall_entry_frame_t;
+
+static int64_t linux_write_user_buffer(uint64_t fd, uint64_t user_ptr, uint64_t len) {
+    klcs_state_t* state = klcs_state();
+    char chunk[128];
+    uint64_t done = 0;
+
+    if (len && !user_ptr) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (len > K64_SERVICE_CALL_PAYLOAD_MAX) {
+        len = K64_SERVICE_CALL_PAYLOAD_MAX;
+    }
+    if (fd >= 3) {
+        klcs_fd_t* desc;
+        if (fd >= KLCS_LINUX_FD_MAX || !state->fds[fd].used) {
+            return -KLCS_LINUX_EBADF;
+        }
+        desc = &state->fds[fd];
+        if (desc->kind == KLCS_FD_DEV_NULL) {
+            return (int64_t)len;
+        }
+        if (desc->kind != KLCS_FD_FILE) {
+            return -KLCS_LINUX_EBADF;
+        }
+        while (done < len) {
+            size_t count = (size_t)((len - done) < sizeof(chunk) ? (len - done) : sizeof(chunk));
+            if (!user_read(user_ptr + done, chunk, count)) {
+                return -KLCS_LINUX_EFAULT;
+            }
+            if (!k64_fs_write_file_range(desc->path, (size_t)desc->offset, (const uint8_t*)chunk, count)) {
+                return done ? (int64_t)done : -KLCS_LINUX_EIO;
+            }
+            desc->offset += count;
+            done += count;
+        }
+        return (int64_t)done;
+    }
+    if (fd != 1 && fd != 2) {
+        return -KLCS_LINUX_EBADF;
+    }
+    while (done < len) {
+        size_t count = (size_t)((len - done) < sizeof(chunk) ? (len - done) : sizeof(chunk));
+        if (!user_read(user_ptr + done, chunk, count)) {
+            return -KLCS_LINUX_EFAULT;
+        }
+        k64_term_write_ansi(chunk, count);
+        done += count;
+    }
+    return (int64_t)done;
+}
+
+typedef struct {
+    uint64_t st_dev;
+    uint64_t st_ino;
+    uint64_t st_nlink;
+    uint32_t st_mode;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    uint32_t __pad0;
+    uint64_t st_rdev;
+    int64_t  st_size;
+    int64_t  st_blksize;
+    int64_t  st_blocks;
+    int64_t  st_atime;
+    int64_t  st_atime_nsec;
+    int64_t  st_mtime;
+    int64_t  st_mtime_nsec;
+    int64_t  st_ctime;
+    int64_t  st_ctime_nsec;
+    int64_t  __unused[3];
+} k64_linux_stat_t;
+
+typedef struct {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+    char domainname[65];
+} k64_linux_utsname_t;
+
+typedef struct {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+} k64_linux_timespec_t;
+
+typedef struct {
+    uint16_t ws_row;
+    uint16_t ws_col;
+    uint16_t ws_xpixel;
+    uint16_t ws_ypixel;
+} k64_linux_winsize_t;
+
+static bool linux_copy_user_cstr(uint64_t user_ptr, char* out, size_t out_size) {
+    if (!user_ptr || !out || out_size == 0) {
+        return false;
+    }
+    for (size_t i = 0; i + 1 < out_size; ++i) {
+        if (!user_read(user_ptr + i, &out[i], 1)) {
+            out[0] = '\0';
+            return false;
+        }
+        if (out[i] == '\0') {
+            return true;
+        }
+    }
+    out[out_size - 1] = '\0';
+    return false;
+}
+
+static bool linux_stdin_event_byte(uint8_t* out) {
+    static uint8_t pending[8];
+    static size_t pending_pos = 0;
+    static size_t pending_len = 0;
+    k64_key_event_t event;
+    char c;
+
+    if (!out) {
+        return false;
+    }
+    if (pending_pos < pending_len) {
+        *out = pending[pending_pos++];
+        if (pending_pos >= pending_len) {
+            pending_pos = 0;
+            pending_len = 0;
+        }
+        return true;
+    }
+
+    if (k64_serial_get_char(&c)) {
+        *out = (uint8_t)c;
+        return true;
+    }
+
+    if (!k64_keyboard_get_event(&event)) {
+        return false;
+    }
+
+    switch (event.type) {
+        case K64_KEY_CHAR:
+        case K64_KEY_ENTER:
+        case K64_KEY_TAB:
+        case K64_KEY_ESCAPE:
+            *out = (uint8_t)event.ch;
+            return true;
+        case K64_KEY_BACKSPACE:
+            *out = 127;
+            return true;
+        case K64_KEY_DELETE:
+            pending[0] = 27; pending[1] = '['; pending[2] = '3'; pending[3] = '~';
+            pending_len = 4; pending_pos = 1; *out = pending[0]; return true;
+        case K64_KEY_UP:
+            pending[0] = 27; pending[1] = '['; pending[2] = 'A';
+            pending_len = 3; pending_pos = 1; *out = pending[0]; return true;
+        case K64_KEY_DOWN:
+            pending[0] = 27; pending[1] = '['; pending[2] = 'B';
+            pending_len = 3; pending_pos = 1; *out = pending[0]; return true;
+        case K64_KEY_RIGHT:
+            pending[0] = 27; pending[1] = '['; pending[2] = 'C';
+            pending_len = 3; pending_pos = 1; *out = pending[0]; return true;
+        case K64_KEY_LEFT:
+            pending[0] = 27; pending[1] = '['; pending[2] = 'D';
+            pending_len = 3; pending_pos = 1; *out = pending[0]; return true;
+        case K64_KEY_NONE:
+        default:
+            return false;
+    }
+}
+
+static int64_t linux_stdin_read(uint64_t user_ptr, uint64_t len) {
+    uint64_t done = 0;
+
+    if (!user_ptr && len) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (len == 0) {
+        return 0;
+    }
+    while (done < len) {
+        uint8_t byte;
+        while (!linux_stdin_event_byte(&byte)) {
+            __asm__ __volatile__("pause");
+        }
+        if (!user_write(user_ptr + done, &byte, 1)) {
+            return done ? (int64_t)done : -KLCS_LINUX_EFAULT;
+        }
+        done++;
+        break;
+    }
+    return (int64_t)done;
+}
+
+static int64_t linux_fd_read(uint64_t fd, uint64_t user_ptr, uint64_t len) {
+    klcs_state_t* state = klcs_state();
+    klcs_fd_t* desc;
+    uint8_t chunk[256];
+    uint64_t done = 0;
+
+    if (!user_ptr && len) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (fd >= KLCS_LINUX_FD_MAX || !state->fds[fd].used) {
+        return -KLCS_LINUX_EBADF;
+    }
+    desc = &state->fds[fd];
+    if (desc->kind == KLCS_FD_STDIN) {
+        return linux_stdin_read(user_ptr, len);
+    }
+    if (desc->kind == KLCS_FD_DEV_ZERO || desc->kind == KLCS_FD_DEV_NULL) {
+        memset(chunk, 0, sizeof(chunk));
+        while (done < len) {
+            size_t count = (size_t)((len - done) < sizeof(chunk) ? (len - done) : sizeof(chunk));
+            if (!user_write(user_ptr + done, chunk, count)) {
+                return -KLCS_LINUX_EFAULT;
+            }
+            done += count;
+        }
+        return (int64_t)done;
+    }
+    if (desc->kind != KLCS_FD_FILE) {
+        return -KLCS_LINUX_EBADF;
+    }
+    while (done < len) {
+        size_t count = (size_t)((len - done) < sizeof(chunk) ? (len - done) : sizeof(chunk));
+        size_t read = 0;
+        if (!k64_fs_read_file_range(desc->path, (size_t)desc->offset, chunk, count, &read)) {
+            return done ? (int64_t)done : -KLCS_LINUX_EIO;
+        }
+        if (read == 0) {
+            break;
+        }
+        if (!user_write(user_ptr + done, chunk, read)) {
+            return -KLCS_LINUX_EFAULT;
+        }
+        desc->offset += read;
+        done += read;
+        if (read < count) {
+            break;
+        }
+    }
+    return (int64_t)done;
+}
+
+static int64_t linux_fd_pread(uint64_t fd, uint64_t user_ptr, uint64_t len, uint64_t offset) {
+    klcs_state_t* state = klcs_state();
+    klcs_fd_t* desc;
+    uint8_t chunk[256];
+    uint64_t done = 0;
+
+    if (!user_ptr && len) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (fd >= KLCS_LINUX_FD_MAX || !state->fds[fd].used) {
+        return -KLCS_LINUX_EBADF;
+    }
+    desc = &state->fds[fd];
+    if (desc->kind == KLCS_FD_DEV_ZERO || desc->kind == KLCS_FD_DEV_NULL) {
+        memset(chunk, 0, sizeof(chunk));
+        while (done < len) {
+            size_t count = (size_t)((len - done) < sizeof(chunk) ? (len - done) : sizeof(chunk));
+            if (!user_write(user_ptr + done, chunk, count)) {
+                return -KLCS_LINUX_EFAULT;
+            }
+            done += count;
+        }
+        return (int64_t)done;
+    }
+    if (desc->kind != KLCS_FD_FILE) {
+        return -KLCS_LINUX_EBADF;
+    }
+    while (done < len) {
+        size_t count = (size_t)((len - done) < sizeof(chunk) ? (len - done) : sizeof(chunk));
+        size_t read = 0;
+        if (!k64_fs_read_file_range(desc->path, (size_t)(offset + done), chunk, count, &read)) {
+            return done ? (int64_t)done : -KLCS_LINUX_EIO;
+        }
+        if (read == 0) {
+            break;
+        }
+        if (!user_write(user_ptr + done, chunk, read)) {
+            return -KLCS_LINUX_EFAULT;
+        }
+        done += read;
+        if (read < count) {
+            break;
+        }
+    }
+    return (int64_t)done;
+}
+
+static int64_t linux_fd_pwrite(uint64_t fd, uint64_t user_ptr, uint64_t len, uint64_t offset) {
+    klcs_state_t* state = klcs_state();
+    klcs_fd_t* desc;
+    uint8_t chunk[256];
+    uint64_t done = 0;
+
+    if (!user_ptr && len) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (fd >= KLCS_LINUX_FD_MAX || !state->fds[fd].used) {
+        return -KLCS_LINUX_EBADF;
+    }
+    desc = &state->fds[fd];
+    if (desc->kind == KLCS_FD_DEV_NULL) {
+        return (int64_t)len;
+    }
+    if (desc->kind != KLCS_FD_FILE) {
+        return -KLCS_LINUX_EBADF;
+    }
+    if (len > K64_SERVICE_CALL_PAYLOAD_MAX) {
+        len = K64_SERVICE_CALL_PAYLOAD_MAX;
+    }
+    while (done < len) {
+        size_t count = (size_t)((len - done) < sizeof(chunk) ? (len - done) : sizeof(chunk));
+        if (!user_read(user_ptr + done, chunk, count)) {
+            return -KLCS_LINUX_EFAULT;
+        }
+        if (!k64_fs_write_file_range(desc->path, (size_t)(offset + done), chunk, count)) {
+            return done ? (int64_t)done : -KLCS_LINUX_EIO;
+        }
+        done += count;
+    }
+    return (int64_t)done;
+}
+
+static int64_t linux_fd_open_path(const char* linux_path, uint64_t flags) {
+    char path[KLCS_PATH_MAX];
+    k64_fs_stat_t st;
+    (void)flags;
+
+    if (!klcs_translate_path(linux_path, path, sizeof(path))) {
+        return -KLCS_LINUX_EINVAL;
+    }
+    if (k64_streq(path, "/dev/null")) {
+        return klcs_fd_alloc(KLCS_FD_DEV_NULL, path, -1);
+    }
+    if (k64_streq(path, "/dev/zero") ||
+        k64_streq(path, "/dev/random") ||
+        k64_streq(path, "/dev/urandom")) {
+        return klcs_fd_alloc(KLCS_FD_DEV_ZERO, path, -1);
+    }
+    if (!k64_fs_stat(path, &st)) {
+        if ((flags & 64u) == 0 || !k64_fs_write_file_raw(path, NULL, 0) || !k64_fs_stat(path, &st)) {
+            return -KLCS_LINUX_ENOENT;
+        }
+    }
+    if (st.is_dir) {
+        return -KLCS_LINUX_EISDIR;
+    }
+    if ((flags & 512u) != 0 && !k64_fs_write_file_raw(path, NULL, 0)) {
+        return -KLCS_LINUX_EACCES;
+    }
+    {
+        int fd = klcs_fd_alloc(KLCS_FD_FILE, path, -1);
+        if (fd >= 0) {
+            klcs_state()->fds[fd].flags = flags;
+            if ((flags & 1024u) != 0 && k64_fs_stat(path, &st)) {
+                klcs_state()->fds[fd].offset = st.size;
+            }
+        }
+        return fd;
+    }
+}
+
+static int64_t linux_sys_open(uint64_t path_ptr, uint64_t flags) {
+    char linux_path[KLCS_PATH_MAX];
+    int64_t rc;
+
+    if (!linux_copy_user_cstr(path_ptr, linux_path, sizeof(linux_path))) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    rc = linux_fd_open_path(linux_path, flags);
+    if (rc < 0 && klcs_trace_enabled()) {
+        k64_term_write("KLCS open failed: ");
+        k64_term_write(linux_path);
+        k64_term_write(" -> ");
+        k64_term_write_dec((uint64_t)(-rc));
+        k64_term_putc('\n');
+    }
+    return rc;
+}
+
+static void linux_fill_stat_from_k64(const k64_fs_stat_t* st, k64_linux_stat_t* out) {
+    memset(out, 0, sizeof(*out));
+    out->st_dev = 1;
+    out->st_ino = st->generation ? st->generation : 1;
+    out->st_nlink = st->is_dir ? 2 : 1;
+    out->st_mode = st->mode;
+    out->st_uid = st->uid;
+    out->st_gid = st->gid;
+    out->st_size = (int64_t)st->size;
+    out->st_blksize = 4096;
+    out->st_blocks = (int64_t)((st->size + 511u) / 512u);
+    out->st_atime = (int64_t)st->created_tick;
+    out->st_mtime = (int64_t)st->modified_tick;
+    out->st_ctime = (int64_t)st->modified_tick;
+}
+
+static int64_t linux_stat_path(const char* linux_path, uint64_t out_ptr) {
+    char path[KLCS_PATH_MAX];
+    k64_fs_stat_t st;
+    k64_linux_stat_t lst;
+
+    if (!out_ptr) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (!klcs_translate_path(linux_path, path, sizeof(path)) || !k64_fs_stat(path, &st)) {
+        return -KLCS_LINUX_ENOENT;
+    }
+    linux_fill_stat_from_k64(&st, &lst);
+    return user_write(out_ptr, &lst, sizeof(lst)) ? 0 : -KLCS_LINUX_EFAULT;
+}
+
+static int64_t linux_fstat(uint64_t fd, uint64_t out_ptr) {
+    klcs_state_t* state = klcs_state();
+    klcs_fd_t* desc;
+    k64_fs_stat_t st;
+    k64_linux_stat_t lst;
+
+    if (!out_ptr) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (fd >= KLCS_LINUX_FD_MAX || !state->fds[fd].used) {
+        return -KLCS_LINUX_EBADF;
+    }
+    desc = &state->fds[fd];
+    memset(&st, 0, sizeof(st));
+    if (desc->kind == KLCS_FD_STDIN || desc->kind == KLCS_FD_STDOUT ||
+        desc->kind == KLCS_FD_STDERR || desc->kind == KLCS_FD_DEV_NULL ||
+        desc->kind == KLCS_FD_DEV_ZERO) {
+        st.mode = 020666u;
+        st.uid = 0;
+        st.gid = 0;
+        st.size = 0;
+    } else if (desc->kind == KLCS_FD_FILE) {
+        if (!k64_fs_stat(desc->path, &st)) {
+            return -KLCS_LINUX_ENOENT;
+        }
+    } else {
+        return -KLCS_LINUX_EBADF;
+    }
+    linux_fill_stat_from_k64(&st, &lst);
+    return user_write(out_ptr, &lst, sizeof(lst)) ? 0 : -KLCS_LINUX_EFAULT;
+}
+
+static int64_t linux_newfstatat(uint64_t dirfd, uint64_t path_ptr, uint64_t out_ptr, uint64_t flags) {
+    char linux_path[KLCS_PATH_MAX];
+    (void)dirfd;
+    (void)flags;
+
+    if (!linux_copy_user_cstr(path_ptr, linux_path, sizeof(linux_path))) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    return linux_stat_path(linux_path, out_ptr);
+}
+
+static int64_t linux_lseek(uint64_t fd, uint64_t offset, uint64_t whence) {
+    klcs_state_t* state = klcs_state();
+    klcs_fd_t* desc;
+    k64_fs_stat_t st;
+    int64_t base;
+    int64_t next;
+
+    if (fd >= KLCS_LINUX_FD_MAX || !state->fds[fd].used) {
+        return -KLCS_LINUX_EBADF;
+    }
+    desc = &state->fds[fd];
+    if (desc->kind != KLCS_FD_FILE && desc->kind != KLCS_FD_DEV_ZERO && desc->kind != KLCS_FD_DEV_NULL) {
+        return -KLCS_LINUX_EBADF;
+    }
+    if (whence == 0) {
+        base = 0;
+    } else if (whence == 1) {
+        base = (int64_t)desc->offset;
+    } else if (whence == 2) {
+        base = k64_fs_stat(desc->path, &st) ? (int64_t)st.size : 0;
+    } else {
+        return -KLCS_LINUX_EINVAL;
+    }
+    next = base + (int64_t)offset;
+    if (next < 0) {
+        return -KLCS_LINUX_EINVAL;
+    }
+    desc->offset = (uint64_t)next;
+    return next;
+}
+
+static int64_t linux_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg) {
+    klcs_state_t* state = klcs_state();
+    (void)arg;
+
+    if (fd >= KLCS_LINUX_FD_MAX || !state->fds[fd].used) {
+        return -KLCS_LINUX_EBADF;
+    }
+    if (cmd == 1) {
+        return state->fds[fd].cloexec ? 1 : 0;
+    }
+    if (cmd == 2) {
+        state->fds[fd].cloexec = (arg & 1u) != 0;
+        return 0;
+    }
+    if (cmd == 3) {
+        return (int64_t)state->fds[fd].flags;
+    }
+    if (cmd == 4) {
+        state->fds[fd].flags = arg;
+        return 0;
+    }
+    return 0;
+}
+
+static int64_t linux_ftruncate(uint64_t fd, uint64_t size) {
+    klcs_state_t* state = klcs_state();
+    klcs_fd_t* desc;
+
+    if (fd >= KLCS_LINUX_FD_MAX || !state->fds[fd].used) {
+        return -KLCS_LINUX_EBADF;
+    }
+    desc = &state->fds[fd];
+    if (desc->kind != KLCS_FD_FILE) {
+        return -KLCS_LINUX_EBADF;
+    }
+    return k64_fs_truncate(desc->path, (size_t)size) ? 0 : -KLCS_LINUX_EIO;
+}
+
+static int64_t linux_unlink(uint64_t path_ptr) {
+    char linux_path[KLCS_PATH_MAX];
+    char path[KLCS_PATH_MAX];
+
+    if (!linux_copy_user_cstr(path_ptr, linux_path, sizeof(linux_path))) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (!klcs_translate_path(linux_path, path, sizeof(path))) {
+        return -KLCS_LINUX_EINVAL;
+    }
+    return k64_fs_remove(path) ? 0 : -KLCS_LINUX_ENOENT;
+}
+
+static int64_t linux_chmod(uint64_t path_ptr, uint64_t mode) {
+    char linux_path[KLCS_PATH_MAX];
+    char path[KLCS_PATH_MAX];
+
+    if (!linux_copy_user_cstr(path_ptr, linux_path, sizeof(linux_path))) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (!klcs_translate_path(linux_path, path, sizeof(path))) {
+        return -KLCS_LINUX_EINVAL;
+    }
+    return k64_fs_chmod(path, (uint32_t)mode) ? 0 : -KLCS_LINUX_EACCES;
+}
+
+static int64_t linux_fchmod(uint64_t fd, uint64_t mode) {
+    klcs_state_t* state = klcs_state();
+    klcs_fd_t* desc;
+
+    if (fd >= KLCS_LINUX_FD_MAX || !state->fds[fd].used) {
+        return -KLCS_LINUX_EBADF;
+    }
+    desc = &state->fds[fd];
+    if (desc->kind != KLCS_FD_FILE) {
+        return -KLCS_LINUX_EBADF;
+    }
+    return k64_fs_chmod(desc->path, (uint32_t)mode) ? 0 : -KLCS_LINUX_EACCES;
+}
+
+static int64_t linux_ioctl(uint64_t fd, uint64_t request, uint64_t argp) {
+    klcs_state_t* state = klcs_state();
+
+    if (fd >= KLCS_LINUX_FD_MAX || !state->fds[fd].used) {
+        return -KLCS_LINUX_EBADF;
+    }
+    if (request == 0x5413u) {
+        k64_linux_winsize_t ws;
+        ws.ws_row = 25;
+        ws.ws_col = 80;
+        ws.ws_xpixel = 0;
+        ws.ws_ypixel = 0;
+        return user_write(argp, &ws, sizeof(ws)) ? 0 : -KLCS_LINUX_EFAULT;
+    }
+    if (request == 0x5401u) {
+        uint8_t termios[64];
+        memset(termios, 0, sizeof(termios));
+        termios[0] = 0x00;
+        termios[1] = 0x05;
+        termios[2] = 0x00;
+        termios[3] = 0x00;
+        termios[8] = 0xBF;
+        termios[9] = 0x8A;
+        return user_write(argp, termios, sizeof(termios)) ? 0 : -KLCS_LINUX_EFAULT;
+    }
+    if (request == 0x5402u || request == 0x5403u || request == 0x5404u) {
+        return argp ? 0 : -KLCS_LINUX_EFAULT;
+    }
+    if (request == 0x540Fu) {
+        int32_t pgrp = (int32_t)process_table[active_ctx.process_index].pid;
+        return user_write(argp, &pgrp, sizeof(pgrp)) ? 0 : -KLCS_LINUX_EFAULT;
+    }
+    if (request == 0x5410u) {
+        return argp ? 0 : -KLCS_LINUX_EFAULT;
+    }
+    return 0;
+}
+
+static int64_t linux_sleep_compat(void) {
+    for (volatile uint64_t i = 0; i < 10000ULL; ++i) {
+        __asm__ __volatile__("pause");
+    }
+    return 0;
+}
+
+static bool linux_map_heap_range(k64_vm_space_t* space, uint64_t from, uint64_t to) {
+    uint64_t start;
+    uint64_t end;
+
+    if (!space || to <= from || to > K64_LINUX_BRK_LIMIT) {
+        return to <= from;
+    }
+
+    start = from & K64_LINUX_PAGE_MASK;
+    end = (to + K64_LINUX_PAGE_SIZE - 1ULL) & K64_LINUX_PAGE_MASK;
+    for (uint64_t page = start; page < end; page += K64_LINUX_PAGE_SIZE) {
+        if (k64_vmm_is_mapped(space, page, true)) {
+            continue;
+        }
+        if (!k64_vmm_map_user_anon(space, page, (size_t)K64_LINUX_PAGE_SIZE)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static int64_t linux_brk_syscall(uint64_t requested) {
+    k64_user_process_t* proc = &process_table[active_ctx.process_index];
+    uint64_t old_brk = proc->linux_brk;
+
+    if (requested == 0) {
+        return (int64_t)old_brk;
+    }
+    if (requested < K64_LINUX_BRK_BASE || requested > K64_LINUX_BRK_LIMIT) {
+        return (int64_t)old_brk;
+    }
+    if (requested <= old_brk) {
+        proc->linux_brk = requested;
+        return (int64_t)proc->linux_brk;
+    }
+    if (!linux_map_heap_range((k64_vm_space_t*)active_ctx.space, old_brk, requested)) {
+        return (int64_t)old_brk;
+    }
+    proc->linux_brk = requested;
+    return (int64_t)proc->linux_brk;
+}
+
+static int64_t linux_mmap_syscall(uint64_t addr, uint64_t len, uint64_t prot, uint64_t flags, uint64_t fd, uint64_t off) {
+    k64_user_process_t* proc = &process_table[active_ctx.process_index];
+    klcs_state_t* state = klcs_state();
+    uint64_t target;
+    uint64_t size;
+    const uint8_t* data = NULL;
+    size_t file_size = 0;
+    (void)prot;
+
+    if (len == 0 || len > 16ULL * 1024ULL * 1024ULL) {
+        return -KLCS_LINUX_EINVAL;
+    }
+    size = (len + 4095ULL) & ~4095ULL;
+    target = addr ? (addr & ~4095ULL) : proc->linux_mmap_next;
+    if (!addr) {
+        proc->linux_mmap_next += size + 0x10000ULL;
+    }
+    if ((flags & 0x20u) != 0 || (int64_t)fd < 0) {
+        return k64_vmm_map_user_anon((k64_vm_space_t*)active_ctx.space, target, (size_t)size) ?
+               (int64_t)target : -KLCS_LINUX_ENOMEM;
+    }
+    if (fd >= KLCS_LINUX_FD_MAX || !state->fds[fd].used || state->fds[fd].kind != KLCS_FD_FILE) {
+        return -KLCS_LINUX_EBADF;
+    }
+    if (!k64_fs_read_file_raw(state->fds[fd].path, &data, &file_size) || off > file_size) {
+        return -KLCS_LINUX_EIO;
+    }
+    if (len > file_size - off) {
+        len = file_size - off;
+    }
+    return k64_vmm_map_user_range((k64_vm_space_t*)active_ctx.space,
+                                  target,
+                                  data + off,
+                                  (size_t)len,
+                                  (size_t)size) ? (int64_t)target : -KLCS_LINUX_ENOMEM;
+}
+
+static int64_t linux_readlink(uint64_t path_ptr, uint64_t out_ptr, uint64_t len) {
+    char path[KLCS_PATH_MAX];
+    const char* target;
+    size_t n;
+
+    if (!linux_copy_user_cstr(path_ptr, path, sizeof(path))) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (!k64_streq(path, "/proc/self/exe")) {
+        return -KLCS_LINUX_ENOENT;
+    }
+    target = current_process_image_path();
+    n = k64_strlen(target);
+    if (n > len) {
+        n = (size_t)len;
+    }
+    return user_write(out_ptr, target, n) ? (int64_t)n : -KLCS_LINUX_EFAULT;
+}
+
+static int64_t linux_readlinkat(uint64_t dirfd, uint64_t path_ptr, uint64_t out_ptr, uint64_t len) {
+    (void)dirfd;
+    return linux_readlink(path_ptr, out_ptr, len);
+}
+
+static int64_t linux_getcwd(uint64_t out_ptr, uint64_t len) {
+    const char cwd[] = "/";
+    size_t need = sizeof(cwd);
+
+    if (!out_ptr || len == 0) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (len < need) {
+        return -KLCS_LINUX_ERANGE;
+    }
+    return user_write(out_ptr, cwd, need) ? (int64_t)need : -KLCS_LINUX_EFAULT;
+}
+
+static int64_t linux_uname(uint64_t out_ptr) {
+    k64_linux_utsname_t uts;
+
+    if (!out_ptr) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    memset(&uts, 0, sizeof(uts));
+    copy_bounded(uts.sysname, sizeof(uts.sysname), "Linux");
+    copy_bounded(uts.nodename, sizeof(uts.nodename), "k64");
+    copy_bounded(uts.release, sizeof(uts.release), "6.8.0-klcs");
+    copy_bounded(uts.version, sizeof(uts.version), "K64 Linux compatibility");
+    copy_bounded(uts.machine, sizeof(uts.machine), "x86_64");
+    copy_bounded(uts.domainname, sizeof(uts.domainname), "localdomain");
+    return user_write(out_ptr, &uts, sizeof(uts)) ? 0 : -KLCS_LINUX_EFAULT;
+}
+
+static int64_t linux_getrandom(uint64_t out_ptr, uint64_t len) {
+    uint8_t buf[64];
+    uint64_t done = 0;
+
+    while (done < len) {
+        size_t n = (size_t)((len - done) < sizeof(buf) ? (len - done) : sizeof(buf));
+        for (size_t i = 0; i < n; ++i) {
+            buf[i] = (uint8_t)(0xA5u ^ (uint8_t)(done + i) ^ (uint8_t)k64_pit_get_ticks());
+        }
+        if (!user_write(out_ptr + done, buf, n)) {
+            return -KLCS_LINUX_EFAULT;
+        }
+        done += n;
+    }
+    return (int64_t)done;
+}
+
+static int64_t linux_writev(uint64_t fd, uint64_t iov_ptr, uint64_t iovcnt) {
+    int64_t total = 0;
+
+    if (!iov_ptr || iovcnt > 64) {
+        return -KLCS_LINUX_EINVAL;
+    }
+    for (uint64_t i = 0; i < iovcnt; ++i) {
+        uint64_t base;
+        uint64_t len;
+        int64_t rc;
+        if (!user_read(iov_ptr + i * 16u, &base, sizeof(base)) ||
+            !user_read(iov_ptr + i * 16u + 8u, &len, sizeof(len))) {
+            return -KLCS_LINUX_EFAULT;
+        }
+        rc = linux_write_user_buffer(fd, base, len);
+        if (rc < 0) {
+            return total ? total : rc;
+        }
+        total += rc;
+        if ((uint64_t)rc != len) {
+            break;
+        }
+    }
+    return total;
+}
+
+static int64_t linux_clock_gettime(uint64_t out_ptr) {
+    k64_linux_timespec_t ts;
+    uint64_t ticks = k64_pit_get_ticks();
+
+    ts.tv_sec = (int64_t)(ticks / 1000ULL);
+    ts.tv_nsec = (int64_t)((ticks % 1000ULL) * 1000000ULL);
+    return user_write(out_ptr, &ts, sizeof(ts)) ? 0 : -KLCS_LINUX_EFAULT;
+}
+
+static void linux_set_fs_base(uint64_t base) {
+    uint32_t lo = (uint32_t)(base & 0xFFFFFFFFu);
+    uint32_t hi = (uint32_t)(base >> 32);
+    __asm__ volatile("wrmsr" : : "c"(0xC0000100u), "a"(lo), "d"(hi));
+}
+
+int64_t k64_usermode_linux_syscall_handler(const k64_linux_syscall_entry_frame_t* frame) {
+    klcs_linux_syscall_frame_t klcs_frame;
+    int64_t rc;
+
+    if (!frame || !active_ctx.active ||
+        active_ctx.process_index < 0 ||
+        active_ctx.process_index >= K64_USER_PROCESS_MAX ||
+        !process_table[active_ctx.process_index].used ||
+        process_table[active_ctx.process_index].personality != K64_PERSONALITY_LINUX_X86_64) {
+        return -KLCS_LINUX_ENOSYS;
+    }
+
+    klcs_frame.nr = frame->nr;
+    klcs_frame.arg0 = frame->arg0;
+    klcs_frame.arg1 = frame->arg1;
+    klcs_frame.arg2 = frame->arg2;
+    klcs_frame.arg3 = frame->arg3;
+    klcs_frame.arg4 = frame->arg4;
+    klcs_frame.arg5 = frame->arg5;
+    klcs_frame.rip = frame->user_rip;
+    klcs_frame.rsp = frame->user_rsp;
+    klcs_frame.pid = process_table[active_ctx.process_index].pid;
+    klcs_frame.tid = klcs_frame.pid;
+
+    switch (frame->nr) {
+        case 0:
+            rc = linux_fd_read(frame->arg0, frame->arg1, frame->arg2);
+            klcs_trace_record_args(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr),
+                                   frame->arg0, frame->arg1, frame->arg2, rc);
+            return rc;
+        case 1:
+            rc = linux_write_user_buffer(frame->arg0, frame->arg1, frame->arg2);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 2:
+            rc = linux_sys_open(frame->arg0, frame->arg1);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 5:
+            rc = linux_fstat(frame->arg0, frame->arg1);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 8:
+            rc = linux_lseek(frame->arg0, frame->arg1, frame->arg2);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 9:
+            rc = linux_mmap_syscall(frame->arg0, frame->arg1, frame->arg2, frame->arg3, frame->arg4, frame->arg5);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 10:
+        case 11:
+            rc = 0;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 12:
+            rc = linux_brk_syscall(frame->arg0);
+            klcs_trace_record_args(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr),
+                                   frame->arg0, frame->arg1, frame->arg2, rc);
+            return rc;
+        case 16:
+            rc = linux_ioctl(frame->arg0, frame->arg1, frame->arg2);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 17:
+            rc = linux_fd_pread(frame->arg0, frame->arg1, frame->arg2, frame->arg3);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 18:
+            rc = linux_fd_pwrite(frame->arg0, frame->arg1, frame->arg2, frame->arg3);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 21: {
+            char p[KLCS_PATH_MAX];
+            char t[KLCS_PATH_MAX];
+            k64_fs_stat_t st;
+            rc = linux_copy_user_cstr(frame->arg0, p, sizeof(p)) &&
+                 klcs_translate_path(p, t, sizeof(t)) &&
+                 k64_fs_stat(t, &st) ? 0 : -KLCS_LINUX_ENOENT;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        }
+        case 20:
+            rc = linux_writev(frame->arg0, frame->arg1, frame->arg2);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 35:
+            rc = linux_sleep_compat();
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 63:
+            rc = linux_uname(frame->arg0);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 72:
+            rc = linux_fcntl(frame->arg0, frame->arg1, frame->arg2);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 77:
+            rc = linux_ftruncate(frame->arg0, frame->arg1);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 79:
+            rc = linux_getcwd(frame->arg0, frame->arg1);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 87:
+            rc = linux_unlink(frame->arg0);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 89:
+            rc = linux_readlink(frame->arg0, frame->arg1, frame->arg2);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 90:
+            rc = linux_chmod(frame->arg0, frame->arg1);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 91:
+            rc = linux_fchmod(frame->arg0, frame->arg1);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 95:
+            rc = 0022;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 158:
+            if (frame->arg0 == 0x1002ULL) {
+                process_table[active_ctx.process_index].linux_fs_base = frame->arg1;
+                linux_set_fs_base(frame->arg1);
+                rc = 0;
+            } else {
+                rc = -KLCS_LINUX_EINVAL;
+            }
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 202:
+            rc = -KLCS_LINUX_EAGAIN;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 218:
+            rc = (int64_t)klcs_frame.tid;
+            linux_set_fs_base(process_table[active_ctx.process_index].linux_fs_base);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 228:
+            rc = linux_clock_gettime(frame->arg1);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 230:
+            rc = linux_sleep_compat();
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 257:
+            rc = linux_sys_open(frame->arg1, frame->arg2);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 262:
+            rc = linux_newfstatat(frame->arg0, frame->arg1, frame->arg2, frame->arg3);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 267:
+            rc = linux_readlinkat(frame->arg0, frame->arg1, frame->arg2, frame->arg3);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 273:
+        case 302:
+        case 334:
+            rc = 0;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 318:
+            rc = linux_getrandom(frame->arg0, frame->arg1);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 60:
+        case 231:
+            active_ctx.result = (int64_t)frame->arg0;
+            active_ctx.active = 0;
+            process_finish(active_ctx.process_index, K64_USER_PROCESS_ZOMBIE, active_ctx.result);
+            k64_user_return_asm(&active_ctx, active_ctx.result);
+            for (;;) {
+            }
+        default:
+            return klcs_dispatch_syscall(&klcs_frame);
+    }
+}
+
 int64_t k64_usermode_syscall_handler(k64_user_trap_frame_t* frame) {
     if (!frame || !active_ctx.active) {
         return K64_ERR_INVAL;
@@ -1589,6 +2617,30 @@ void k64_usermode_init(void) {
     set_tss_descriptor(base, (uint32_t)(sizeof(tss64) - 1));
     __asm__ volatile("ltr %0" : : "r"((uint16_t)K64_GDT_TSS_SELECTOR));
     k64_idt_set_gate_raw(0x80, k64_syscall_stub, 0xEE);
+    {
+        uint64_t star = (0x13ULL << 48) | (0x08ULL << 32);
+        uint64_t lstar = (uint64_t)(uintptr_t)k64_linux_syscall_stub;
+        uint64_t fmask = 0x200ULL;
+        uint64_t efer;
+        uint32_t lo;
+        uint32_t hi;
+
+        __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000080u));
+        efer = ((uint64_t)hi << 32) | lo;
+        efer |= 1ULL;
+        lo = (uint32_t)(efer & 0xFFFFFFFFu);
+        hi = (uint32_t)(efer >> 32);
+        __asm__ volatile("wrmsr" : : "c"(0xC0000080u), "a"(lo), "d"(hi));
+        lo = (uint32_t)(star & 0xFFFFFFFFu);
+        hi = (uint32_t)(star >> 32);
+        __asm__ volatile("wrmsr" : : "c"(0xC0000081u), "a"(lo), "d"(hi));
+        lo = (uint32_t)(lstar & 0xFFFFFFFFu);
+        hi = (uint32_t)(lstar >> 32);
+        __asm__ volatile("wrmsr" : : "c"(0xC0000082u), "a"(lo), "d"(hi));
+        lo = (uint32_t)(fmask & 0xFFFFFFFFu);
+        hi = (uint32_t)(fmask >> 32);
+        __asm__ volatile("wrmsr" : : "c"(0xC0000084u), "a"(lo), "d"(hi));
+    }
     ctx_clear();
     K64_LOG_INFO("User mode initialized.");
 }
@@ -1722,6 +2774,14 @@ int64_t k64_usermode_execute_named_ex(const k64_vm_space_t* space,
     active_ctx.result = K64_ERR_INVAL;
     active_ctx.process_index = process_index;
     active_ctx.space = space;
+    if (process_table[process_index].personality == K64_PERSONALITY_LINUX_X86_64) {
+        process_table[process_index].linux_brk = K64_LINUX_BRK_BASE;
+        if (!linux_map_heap_range((k64_vm_space_t*)space, K64_LINUX_HEAP_BASE, K64_LINUX_BRK_BASE)) {
+            process_finish(process_index, K64_USER_PROCESS_FAULTED, K64_ERR_NOMEM);
+            ctx_clear();
+            return K64_ERR_NOMEM;
+        }
+    }
     active_ctx.result = k64_user_enter_asm(space->cr3, user_stack_top, entry, &active_ctx);
     if (process_table[process_index].state == K64_USER_PROCESS_RUNNING) {
         process_finish(process_index, K64_USER_PROCESS_ZOMBIE, active_ctx.result);

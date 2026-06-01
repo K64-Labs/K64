@@ -16,7 +16,13 @@ The compatibility boundary is intentionally service-oriented. The kernel should 
 
 ## Current Implementation
 
-v0.3.36 introduces the first KLCS foundation:
+KLCS now has two layers:
+
+- A real Ring-3 Linux syscall-entry path for Linux x86_64 ELF programs.
+- A staged dynamic-loader bridge for selected dynamically linked Linux tools
+  under `/compat/linux`.
+
+The current KLCS foundation includes:
 
 - `klcs` built-in K64 service registration.
 - `klcs` shell command.
@@ -27,11 +33,18 @@ v0.3.36 introduces the first KLCS foundation:
 - Linux syscall table with implemented/planned status.
 - Basic Linux FD table foundation.
 - Linux path translation foundation.
-- ELF64 validation for static x86_64 Linux executable candidates.
-- Explicit rejection of malformed, unsupported, or dynamic ELF files.
+- ELF64 validation and execution for static x86_64 Linux executable candidates.
+- Dynamic ELF launch through the staged `/lib64/ld-linux-x86-64.so.2` bridge.
+- TLS, anonymous `mmap`, `brk`, `arch_prctl`, `fstat`, `newfstatat`, `openat`,
+  `read`, `pread64`, `writev`, `clock_gettime`, `getrandom`, and other common
+  startup syscalls needed by staged glibc tools.
 - KLCS host tests for errno mapping, path translation, FD reuse, syscall dispatch, trace logging, and ELF validation.
 
-This is not full Linux binary execution yet. The static ELF loader can validate candidate binaries, but mapping PT_LOAD segments into a Linux-personality process and routing the CPU `syscall` instruction through KLCS still requires a dedicated usermode trap-frame and loader step.
+This is not a full Linux kernel ABI. Staged dynamic Linux binaries such as
+`git`, `nano`, and `tcc` can launch far enough for version/basic checks through
+the bundled loader and libc, but large interactive workflows still depend on
+more Linux syscalls, terminal behavior, process semantics, and filesystem edge
+cases.
 
 ## Shell Usage
 
@@ -44,7 +57,35 @@ klcs trace
 klcs run <path> [args...]
 ```
 
-`klcs run` currently validates the target ELF and reports whether it is a static x86_64 Linux candidate. Dynamic ELF files with `PT_INTERP` are rejected clearly because `/lib64/ld-linux-x86-64.so.2` support is not part of the MVP.
+`klcs run` resolves common compatibility paths such as `tcc`, `/bin/tcc`, and
+`/compat/linux/bin/tcc` into the staged KLCS root. Static x86_64 Linux ELF files
+are executed directly as Linux-personality Ring-3 processes. Dynamic ELF files
+with `PT_INTERP` are launched through the staged loader:
+`/compat/linux/lib64/ld-linux-x86-64.so.2`.
+
+The built-in smoke binary demonstrates the real Linux syscall path:
+
+```text
+klcs run klcs-hello
+```
+
+Expected output:
+
+```text
+klcs-hello: Linux syscall ABI works
+```
+
+Useful staged dynamic checks:
+
+```text
+klcs run tcc -v
+klcs run git --version
+klcs run nano --version
+klcs run sl
+```
+
+`sl` is staged from the real Debian amd64 package and exercises dynamic loader,
+ncurses, terminal metadata, write, ioctl, and sleep compatibility paths.
 
 ## Service Calls
 
@@ -61,20 +102,17 @@ The `klcs.syscall` request payload is a `klcs_linux_syscall_frame_t`.
 
 ## Supported Syscall Foundation
 
-Implemented in the MVP dispatcher:
+Implemented in the dispatcher:
 
-- `read` is listed but real buffer routing is still pending.
-- `write` supports the early stdout/stderr path when called inside the kernel build.
-- `close` closes KLCS-owned non-standard descriptors.
-- `getpid`
-- `getuid`
-- `geteuid`
-- `getgid`
-- `getegid`
-- `exit`
-- `exit_group`
-
-Planned table entries include `open`, `openat`, `lseek`, `mmap`, `munmap`, `mprotect`, `brk`, `uname`, `readlink`, `arch_prctl`, `futex`, `clock_gettime`, `newfstatat`, and `getrandom`.
+- `read`, `pread64`, `pwrite64`, `write`, and `writev` for KLCS file descriptors and
+  stdout/stderr.
+- `open`, `openat`, `close`, `fstat`, `newfstatat`, `lseek`, `access`,
+  `fcntl`, `ftruncate`, `unlink`, `chmod`, `fchmod`, and `umask`.
+- `mmap`, `munmap`, `mprotect`, and `brk` foundations for loader/libc startup.
+- `uname`, `readlink`, `readlinkat`, `arch_prctl`, `set_tid_address`,
+  `set_robust_list`, `futex`, `clock_gettime`, `prlimit64`, `getrandom`, and
+  `rseq` stubs or minimal implementations.
+- `getpid`, `getuid`, `geteuid`, `getgid`, `getegid`, `exit`, and `exit_group`.
 
 Unsupported syscalls return Linux `-ENOSYS`, not K64-native error codes.
 
@@ -96,7 +134,8 @@ Linux apps must not be able to escape the configured compatibility root unless K
 - Linux apps launched through KLCS must run with normal K64 user credentials.
 - Linux errno values are returned to Linux apps; K64 internal errors are translated.
 - ELF headers and program-header bounds are checked before a binary is accepted.
-- Dynamic ELF is rejected until a loader service exists.
+- Dynamic ELF payloads are routed through the staged loader bridge and still run
+  with normal K64 user credentials.
 - KLCS pseudo-devices are explicit; arbitrary `/dev` access is not allowed.
 - KLCS is not required for K64 boot.
 
@@ -104,9 +143,8 @@ Linux apps must not be able to escape the configured compatibility root unless K
 
 Next milestones:
 
-1. Map static Linux ELF `PT_LOAD` segments into a Linux-personality process.
-2. Route x86_64 Linux `syscall` ABI frames from that process into `klcs.syscall`.
-3. Implement real Linux FD objects over K64 `io.*` and `fs.*` service calls.
-4. Add `/dev/null`, `/dev/zero`, `/proc/self/exe`, `openat`, `read`, `write`, `fstat`, and `newfstatat`.
-5. Add `brk`, anonymous `mmap`, `munmap`, `arch_prctl`, minimal futex, and time syscalls.
-6. Add static Linux hello-world integration tests built offline.
+1. Expand Linux process and signal semantics enough for larger `git` workflows.
+2. Improve terminal behavior for interactive `nano`.
+3. Add more complete file creation, permissions, and directory traversal tests.
+4. Replace remaining KLCS direct kernel mediation with service-owned paths where
+   practical.

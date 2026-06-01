@@ -1,6 +1,7 @@
 #include "k64_klcs.h"
 #include "k64_string.h"
 #ifndef K64_HOST_TEST
+#include "k64_serial.h"
 #include "k64_terminal.h"
 #endif
 
@@ -27,31 +28,49 @@ static klcs_state_t klcs;
 static const klcs_syscall_entry_t syscall_table[] = {
     {0, "read", true},
     {1, "write", true},
-    {2, "open", false},
+    {2, "open", true},
     {3, "close", true},
-    {8, "lseek", false},
-    {9, "mmap", false},
-    {10, "mprotect", false},
-    {11, "munmap", false},
-    {12, "brk", false},
-    {21, "access", false},
+    {5, "fstat", true},
+    {8, "lseek", true},
+    {9, "mmap", true},
+    {10, "mprotect", true},
+    {11, "munmap", true},
+    {12, "brk", true},
+    {16, "ioctl", true},
+    {17, "pread64", true},
+    {18, "pwrite64", true},
+    {20, "writev", true},
+    {21, "access", true},
+    {35, "nanosleep", true},
     {39, "getpid", true},
     {60, "exit", true},
-    {63, "uname", false},
-    {89, "readlink", false},
+    {63, "uname", true},
+    {72, "fcntl", true},
+    {79, "getcwd", true},
+    {77, "ftruncate", true},
+    {87, "unlink", true},
+    {89, "readlink", true},
+    {90, "chmod", true},
+    {91, "fchmod", true},
+    {95, "umask", true},
     {102, "getuid", true},
     {104, "getgid", true},
     {107, "geteuid", true},
     {108, "getegid", true},
-    {158, "arch_prctl", false},
-    {202, "futex", false},
+    {158, "arch_prctl", true},
+    {202, "futex", true},
     {217, "getdents64", false},
-    {218, "set_tid_address", false},
-    {228, "clock_gettime", false},
+    {218, "set_tid_address", true},
+    {228, "clock_gettime", true},
+    {230, "clock_nanosleep", true},
     {231, "exit_group", true},
-    {257, "openat", false},
-    {262, "newfstatat", false},
-    {318, "getrandom", false},
+    {257, "openat", true},
+    {262, "newfstatat", true},
+    {267, "readlinkat", true},
+    {273, "set_robust_list", true},
+    {302, "prlimit64", true},
+    {318, "getrandom", true},
+    {334, "rseq", true},
 };
 
 static void klcs_copy(char* dst, size_t dst_size, const char* src) {
@@ -104,6 +123,25 @@ static void klcs_append_u64(char* dst, size_t dst_size, uint64_t value) {
         klcs_append(dst, dst_size, c);
     }
 }
+
+#ifndef K64_HOST_TEST
+static void klcs_serial_write_u64(uint64_t value) {
+    char tmp[32];
+    size_t n = 0;
+
+    if (value == 0) {
+        k64_serial_putc('0');
+        return;
+    }
+    while (value && n < sizeof(tmp)) {
+        tmp[n++] = (char)('0' + (value % 10u));
+        value /= 10u;
+    }
+    while (n > 0) {
+        k64_serial_putc(tmp[--n]);
+    }
+}
+#endif
 
 static uint16_t read_u16le(const uint8_t* p) {
     return (uint16_t)p[0] | (uint16_t)((uint16_t)p[1] << 8);
@@ -180,6 +218,38 @@ void klcs_trace_record(uint64_t pid, uint64_t nr, const char* name, int64_t resu
     } else {
         klcs_append_u64(line, 96, (uint64_t)result);
     }
+#ifndef K64_HOST_TEST
+    k64_serial_write(line);
+    k64_serial_write("\n");
+#endif
+}
+
+void klcs_trace_record_args(uint64_t pid,
+                            uint64_t nr,
+                            const char* name,
+                            uint64_t arg0,
+                            uint64_t arg1,
+                            uint64_t arg2,
+                            int64_t result) {
+    klcs_trace_record(pid, nr, name, result);
+#ifndef K64_HOST_TEST
+    if (!klcs.trace_enabled) {
+        return;
+    }
+    k64_serial_write("[klcs-args] ");
+    k64_serial_write(name ? name : "unknown");
+    k64_serial_write(" a0=");
+    klcs_serial_write_u64(arg0);
+    k64_serial_write(" a1=");
+    klcs_serial_write_u64(arg1);
+    k64_serial_write(" a2=");
+    klcs_serial_write_u64(arg2);
+    k64_serial_write("\n");
+#else
+    (void)arg0;
+    (void)arg1;
+    (void)arg2;
+#endif
 }
 
 void klcs_status(char* out, size_t out_size) {
@@ -192,7 +262,7 @@ void klcs_status(char* out, size_t out_size) {
     klcs_append(out, out_size, "ELF64 loader: validation enabled\n");
     klcs_append(out, out_size, "syscall routing: service table enabled\n");
     klcs_append(out, out_size, "filesystem bridge: foundation\n");
-    klcs_append(out, out_size, "memory bridge: planned\n");
+    klcs_append(out, out_size, "memory bridge: mmap/brk foundation\n");
     klcs_append(out, out_size, "process bridge: partial\n");
     klcs_append(out, out_size, "trace: ");
     klcs_append(out, out_size, klcs.trace_enabled ? "on\n" : "off\n");
@@ -258,6 +328,8 @@ int klcs_fd_alloc(klcs_fd_kind_t kind, const char* path, int native_fd) {
             klcs.fds[i].kind = kind;
             klcs.fds[i].native_fd = native_fd;
             klcs.fds[i].cloexec = false;
+            klcs.fds[i].offset = 0;
+            klcs.fds[i].flags = 0;
             klcs_copy(klcs.fds[i].path, sizeof(klcs.fds[i].path), path ? path : "");
             return i;
         }
@@ -277,8 +349,26 @@ bool klcs_translate_path(const char* linux_path, char* out, size_t out_size) {
     if (!linux_path || !out || out_size == 0 || !linux_path[0]) {
         return false;
     }
-    if (k64_streq(linux_path, "/")) {
+    if (k64_streq(linux_path, ".") || k64_streq(linux_path, "./")) {
         klcs_copy(out, out_size, "/compat/linux/root");
+    } else if (k64_strncmp(linux_path, "./", 2) == 0) {
+        klcs_copy(out, out_size, "/compat/linux/root/");
+        klcs_append(out, out_size, linux_path + 2);
+    } else if (k64_streq(linux_path, "..") || k64_streq(linux_path, "../")) {
+        klcs_copy(out, out_size, "/compat/linux/root");
+    } else if (k64_strncmp(linux_path, "/compat/linux/", 14) == 0) {
+        klcs_copy(out, out_size, linux_path);
+    } else if (k64_streq(linux_path, "/")) {
+        klcs_copy(out, out_size, "/compat/linux/root");
+    } else if (k64_strncmp(linux_path, "/bin/", 5) == 0 ||
+               k64_strncmp(linux_path, "/usr/bin/", 9) == 0 ||
+               k64_strncmp(linux_path, "/lib/", 5) == 0 ||
+               k64_strncmp(linux_path, "/lib64/", 7) == 0 ||
+               k64_strncmp(linux_path, "/usr/lib/", 9) == 0 ||
+               k64_strncmp(linux_path, "/usr/lib64/", 11) == 0 ||
+               k64_strncmp(linux_path, "/usr/share/", 11) == 0) {
+        klcs_copy(out, out_size, "/compat/linux");
+        klcs_append(out, out_size, linux_path);
     } else if (k64_streq(linux_path, "/tmp") || k64_strncmp(linux_path, "/tmp/", 5) == 0) {
         klcs_copy(out, out_size, linux_path);
     } else if (k64_strncmp(linux_path, "/home", 5) == 0) {
