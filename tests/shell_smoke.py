@@ -348,7 +348,6 @@ def main():
             ("klcs status", "KLCS: running"),
             ("klcs syscalls", "write implemented"),
             ("klcs run klcs-hello", "klcs-hello: Linux syscall ABI works"),
-            ("klcs run sl", "ELF: exit code", 45),
             ("klcs trace on", "KLCS trace: on"),
             ("klcs trace off", "KLCS trace: off"),
             ("klcs run /etc/motd", "invalid Linux ELF"),
@@ -404,6 +403,7 @@ def main():
                 checks.insert(55, ("klcs run tcc -v", "tcc version", 30))
                 checks.insert(56, ("klcs run git --version", "git version", 30))
                 checks.insert(57, ("klcs run nano --version", "GNU nano", 30))
+                checks.insert(58, ("klcs run sl", "ELF: exit code", 45))
             for item in checks:
                 if len(item) == 3:
                     cmd, expected, timeout = item

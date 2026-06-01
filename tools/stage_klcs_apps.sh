@@ -114,7 +114,7 @@ stage_crt_objects() {
 
 stage_real_sl_deb() {
   local work="/tmp/k64-klcs-sl"
-  local deb_url="https://deb.debian.org/debian/pool/main/s/sl/sl_5.02-1+b1_amd64.deb"
+  local deb_url="https://deb.debian.org/debian/pool/main/s/sl/sl_5.02-1_amd64.deb"
 
   if ! command -v curl >/dev/null 2>&1 || ! command -v ar >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
     echo "sl unavailable: need curl+ar+tar to extract Debian sl package"
