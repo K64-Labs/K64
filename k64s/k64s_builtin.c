@@ -655,7 +655,7 @@ static bool klcs_read_linux_payload(const char* path,
     return false;
 }
 
-static bool klcs_print_file_validation(const char* path, const char* run_args) {
+static bool klcs_print_file_validation(const char* path, const char* run_args, bool quiet) {
     const uint8_t* data;
     size_t size;
     klcs_elf_info_t info;
@@ -665,28 +665,36 @@ static bool klcs_print_file_validation(const char* path, const char* run_args) {
     const char* loader = "/compat/linux/lib64/ld-linux-x86-64.so.2";
 
     if (!path || !path[0]) {
-        svc_print_line("klcs: missing path");
+        if (!quiet) {
+            svc_print_line("klcs: missing path");
+        }
         return true;
     }
     if (!klcs_read_linux_payload(path, resolved, sizeof(resolved), &data, &size)) {
-        svc_print_line("klcs: file not found");
-        svc_print_line("klcs: try tcc, nano, git, /bin/tcc, or /compat/linux/bin/tcc");
+        if (!quiet) {
+            svc_print_line("klcs: file not found");
+            svc_print_line("klcs: try tcc, nano, git, /bin/tcc, or /compat/linux/bin/tcc");
+        }
         return true;
     }
-    if (!k64_streq(path, resolved)) {
+    if (!quiet && !k64_streq(path, resolved)) {
         k64_term_write("klcs: resolved ");
         k64_term_write(path);
         k64_term_write(" -> ");
         svc_print_line(resolved);
     }
     if (!klcs_validate_elf64(data, size, &info)) {
-        k64_term_write("klcs: invalid Linux ELF: ");
-        svc_print_line(info.message);
+        if (!quiet) {
+            k64_term_write("klcs: invalid Linux ELF: ");
+            svc_print_line(info.message);
+        }
         return true;
     }
     if (info.dynamic) {
-        svc_print_line("klcs: dynamic x86_64 ELF accepted");
-        svc_print_line("klcs: launching staged Linux dynamic loader");
+        if (!quiet) {
+            svc_print_line("klcs: dynamic x86_64 ELF accepted");
+            svc_print_line("klcs: launching staged Linux dynamic loader");
+        }
         linux_argv_path = resolved;
         if (k64_strncmp(resolved, "/compat/linux", 13) == 0) {
             linux_argv_path = resolved + 13;
@@ -704,16 +712,28 @@ static bool klcs_print_file_validation(const char* path, const char* run_args) {
             svc_append(loader_args, sizeof(loader_args), " ");
             svc_append(loader_args, sizeof(loader_args), run_args);
         }
+        if (quiet) {
+            k64_elf_set_quiet_next(true);
+        }
         if (!k64_elf_spawn_user_path_args(loader, loader_args)) {
-            svc_print_line("klcs: dynamic loader execution failed");
+            if (!quiet) {
+                svc_print_line("klcs: dynamic loader execution failed");
+            }
         }
         return true;
     }
-    svc_print_line("klcs: static x86_64 ELF accepted");
-    svc_print_line("klcs: entering Linux syscall ABI");
+    if (!quiet) {
+        svc_print_line("klcs: static x86_64 ELF accepted");
+        svc_print_line("klcs: entering Linux syscall ABI");
+    }
     k64_usermode_set_next_personality(K64_PERSONALITY_LINUX_X86_64);
+    if (quiet) {
+        k64_elf_set_quiet_next(true);
+    }
     if (!k64_elf_spawn_user_path_args(resolved, run_args ? run_args : "")) {
-        svc_print_line("klcs: execution failed");
+        if (!quiet) {
+            svc_print_line("klcs: execution failed");
+        }
     }
     return true;
 }
@@ -751,10 +771,11 @@ static bool klcs_command(const char* command, const char* args) {
         k64_term_write(buf);
         return true;
     }
-    if (k64_streq(sub, "run")) {
+    if (k64_streq(sub, "run") || k64_streq(sub, "runq")) {
         char path[256];
+        bool quiet = k64_streq(sub, "runq");
         args = svc_next_token(args, path, sizeof(path));
-        return klcs_print_file_validation(path, args);
+        return klcs_print_file_validation(path, args, quiet);
     }
     klcs_usage();
     return true;

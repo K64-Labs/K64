@@ -78,11 +78,27 @@ klcs-hello: Linux syscall ABI works
 Useful staged dynamic checks:
 
 ```text
-klcs run tcc -v
-klcs run git --version
-klcs run nano --version
-klcs run sl
+tcc -v
+git --version
+nano --version
+sl
 ```
+
+The interactive shell also supports a small PATH-like resolver. Paths listed in
+`/etc/path/inpath.cfg` are searched after built-ins, service commands, service
+startup, and driver startup. The default file contains:
+
+```text
+/ex
+/compat/linux/bin
+/compat/linux/usr/bin
+```
+
+Native K64 programs found in `/ex` can be launched by name, and staged Linux
+ELFs found in `/compat/linux/...` are launched through KLCS automatically. This
+means `nano`, `tcc`, `git`, and `sl` can be executed directly without typing
+`klcs run`. The explicit `klcs run <path>` command remains available as the
+verbose diagnostic form.
 
 `sl` is staged from the real Debian amd64 package and exercises dynamic loader,
 ncurses, terminal metadata, write, ioctl, and sleep compatibility paths.

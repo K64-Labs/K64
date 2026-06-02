@@ -22,6 +22,8 @@
 #define SHELL_HISTORY_MAX 16
 #define SHELL_EVENTS_PER_POLL 32
 #define SHELL_LAYOUT_CONFIG_PATH "/etc/keyboard/layout.cfg"
+#define SHELL_INPATH_CONFIG_PATH "/etc/path/inpath.cfg"
+#define SHELL_DEFAULT_INPATH "/ex\n/compat/linux/bin\n"
 
 typedef struct {
     char line[SHELL_MAX_LINE];
@@ -173,33 +175,158 @@ static bool shell_parse_u64(const char* s, uint64_t* out) {
     return true;
 }
 
-static bool shell_try_execute_elf(const char* name, const char* args) {
-    char path[96];
+static bool shell_append_text(char* dst, size_t dst_size, const char* src) {
+    size_t pos = 0;
+    size_t i = 0;
+
+    if (!dst || dst_size == 0) {
+        return false;
+    }
+    while (dst[pos] && pos + 1 < dst_size) {
+        pos++;
+    }
+    while (src && src[i]) {
+        if (pos + 1 >= dst_size) {
+            return false;
+        }
+        dst[pos++] = src[i++];
+    }
+    dst[pos] = '\0';
+    return true;
+}
+
+static bool shell_join_path(char* out, size_t out_size, const char* dir, const char* name) {
+    size_t len;
+
+    if (!out || out_size == 0 || !dir || !dir[0] || !name || !name[0]) {
+        return false;
+    }
+    out[0] = '\0';
+    if (!shell_append_text(out, out_size, dir)) {
+        return false;
+    }
+    len = k64_strlen(out);
+    if (len > 0 && out[len - 1] != '/') {
+        if (!shell_append_text(out, out_size, "/")) {
+            return false;
+        }
+    }
+    return shell_append_text(out, out_size, name);
+}
+
+static bool shell_file_exists(const char* path) {
+    k64_fs_stat_t st;
+
+    return path && path[0] && k64_fs_stat(path, &st) && !st.is_dir;
+}
+
+static bool shell_path_is_linux_compat(const char* path) {
+    return path &&
+           (k64_strncmp(path, "/compat/linux/", 14) == 0 ||
+            k64_strncmp(path, "/bin/", 5) == 0 ||
+            k64_strncmp(path, "/usr/bin/", 9) == 0);
+}
+
+static bool shell_run_linux_path(const char* path, const char* args) {
+    char run_args[512];
+    k64_service_result_t service_result;
+
+    if (!path || !path[0]) {
+        return false;
+    }
+    service_result = k64_system_start_service_by_name("klcs");
+    if (service_result != K64_SERVICE_OK && service_result != K64_SERVICE_ERR_ALREADY_RUNNING) {
+        return false;
+    }
+    run_args[0] = '\0';
+    if (!shell_append_text(run_args, sizeof(run_args), "runq ") ||
+        !shell_append_text(run_args, sizeof(run_args), path)) {
+        return false;
+    }
+    if (args && args[0]) {
+        if (!shell_append_text(run_args, sizeof(run_args), " ") ||
+            !shell_append_text(run_args, sizeof(run_args), args)) {
+            return false;
+        }
+    }
+    return k64_system_dispatch_command("klcs", run_args);
+}
+
+static bool shell_try_execute_path_candidate(const char* path, const char* args) {
+    char elf_path[128];
+
+    if (!path || !path[0]) {
+        return false;
+    }
+    if (shell_path_is_linux_compat(path)) {
+        if (shell_file_exists(path) ||
+            k64_strncmp(path, "/bin/", 5) == 0 ||
+            k64_strncmp(path, "/usr/bin/", 9) == 0) {
+            return shell_run_linux_path(path, args);
+        }
+        return false;
+    }
+    if (shell_file_exists(path)) {
+        k64_elf_set_quiet_next(true);
+        return k64_elf_spawn_user_path_args(path, args ? args : "");
+    }
+    if (!k64_streq(path + (k64_strlen(path) >= 4 ? k64_strlen(path) - 4 : 0), ".elf")) {
+        elf_path[0] = '\0';
+        if (shell_append_text(elf_path, sizeof(elf_path), path) &&
+            shell_append_text(elf_path, sizeof(elf_path), ".elf") &&
+            shell_file_exists(elf_path)) {
+            k64_elf_set_quiet_next(true);
+            return k64_elf_spawn_user_path_args(elf_path, args ? args : "");
+        }
+    }
+    return false;
+}
+
+static bool shell_try_execute_inpath(const char* name, const char* args) {
+    char config[512];
+    const char* paths;
+    size_t pos = 0;
 
     if (!name || !name[0]) {
         return false;
     }
-
-    path[0] = '\0';
-    {
-        const char* prefix = "/ex/";
-        int pos = 0;
-        for (int i = 0; prefix[i] && pos + 1 < (int)sizeof(path); ++i) {
-            path[pos++] = prefix[i];
-        }
-        for (int i = 0; name[i] && pos + 1 < (int)sizeof(path); ++i) {
-            path[pos++] = name[i];
-        }
-        if (!k64_streq(name + (k64_strlen(name) >= 4 ? k64_strlen(name) - 4 : 0), ".elf")) {
-            const char* suffix = ".elf";
-            for (int i = 0; suffix[i] && pos + 1 < (int)sizeof(path); ++i) {
-                path[pos++] = suffix[i];
-            }
-        }
-        path[pos] = '\0';
+    if (name[0] == '/' || name[0] == '.') {
+        return shell_try_execute_path_candidate(name, args);
     }
 
-    return k64_elf_spawn_user_path_args(path, args);
+    if (k64_fs_cat(SHELL_INPATH_CONFIG_PATH, config, sizeof(config))) {
+        paths = config;
+    } else {
+        paths = SHELL_DEFAULT_INPATH;
+    }
+
+    while (paths[pos]) {
+        char dir[96];
+        char candidate[160];
+        size_t di = 0;
+
+        while (paths[pos] == ':' || paths[pos] == '\n' || paths[pos] == '\r' ||
+               paths[pos] == ' ' || paths[pos] == '\t') {
+            pos++;
+        }
+        while (paths[pos] &&
+               paths[pos] != ':' && paths[pos] != '\n' && paths[pos] != '\r' &&
+               paths[pos] != ' ' && paths[pos] != '\t') {
+            if (di + 1 < sizeof(dir)) {
+                dir[di++] = paths[pos];
+            }
+            pos++;
+        }
+        dir[di] = '\0';
+        if (!dir[0]) {
+            continue;
+        }
+        if (shell_join_path(candidate, sizeof(candidate), dir, name) &&
+            shell_try_execute_path_candidate(candidate, args)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static const char* shell_next_token(const char* s, char* token, int token_size) {
@@ -945,7 +1072,7 @@ static void shell_handle_command(const char* cmd) {
             k64_term_write("sync complete\n");
             return;
         case K64_SHELL_CMD_UNKNOWN: {
-            char unknown_cmd[32];
+            char unknown_cmd[96];
             const char* unknown_args = shell_next_token(cmd, unknown_cmd, sizeof(unknown_cmd));
 
             if (k64_system_dispatch_command(unknown_cmd, unknown_args)) {
@@ -989,7 +1116,7 @@ static void shell_handle_command(const char* cmd) {
                 }
             }
 
-            if (shell_try_execute_elf(unknown_cmd, unknown_args)) {
+            if (shell_try_execute_inpath(unknown_cmd, unknown_args)) {
                 return;
             }
 

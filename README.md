@@ -817,13 +817,20 @@ If the shell does not recognize a command as a built-in or a registered service 
 
 1. starting a service with that name
 2. starting a driver with that name
-3. running `/ex/<name>.elf`
+3. resolving the name through `/etc/path/inpath.cfg`
 
 That means:
 
 - typing `hello` can start `/k64s/hello.k64s` if such a binary service module exists
 - typing `hello-driver` can start `/k64m/hello-driver.k64m`
-- typing an executable name with no matching module can fall back to `/ex/<name>.elf`
+- typing an executable name with no matching module can fall back to a path entry such as `/ex/<name>.elf` or `/compat/linux/bin/<name>`
+
+The default `/etc/path/inpath.cfg` contains `/ex`, `/compat/linux/bin`, and
+`/compat/linux/usr/bin`. Native K64 ELFs in `/ex` and staged Linux ELFs in
+`/compat/linux/...` can therefore be launched directly by name. For example,
+after KLCS is installed, `nano --version`, `tcc -v`, `git --version`, and `sl`
+work from the shell without typing `klcs run`. The explicit `klcs run` command
+remains the verbose diagnostic form.
 
 ### Service command dispatch
 
@@ -1309,9 +1316,9 @@ When you enter a command, the shell:
 1. parses built-ins it owns directly
 2. asks the service command registry whether a running service owns the command, then runs that handler
 3. if still unresolved, tries to start a service or driver by that name
-4. if still unresolved, tries `/ex/<command>.elf`
+4. if still unresolved, searches `/etc/path/inpath.cfg`
 
-That last chain is what lets names like `servicectl` or `driverctl` act as both executable service names and command surfaces, while still allowing direct ELF execution from `/ex`.
+That last chain is what lets names like `servicectl` or `driverctl` act as both executable service names and command surfaces, while still allowing direct native ELF execution from `/ex` and direct KLCS Linux ELF execution from `/compat/linux/bin`.
 
 ## ELF Loader and Native Executables
 

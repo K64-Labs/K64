@@ -71,6 +71,7 @@ typedef struct {
 
 static k64_elf_context_t elf_contexts[K64_ELF_CONTEXT_MAX];
 static int elf_context_depth;
+static bool elf_quiet_next;
 
 static uint64_t elf_align_up(uint64_t value, uint64_t align) {
     return (value + align - 1ULL) & ~(align - 1ULL);
@@ -519,6 +520,9 @@ static bool elf_execute_impl_ex(const char* path,
     k64_elf_context_t* ctx;
     int rc;
     char process_path[128];
+    bool quiet = elf_quiet_next;
+
+    elf_quiet_next = false;
 
     if (!path || !path[0]) {
         return false;
@@ -648,9 +652,11 @@ static bool elf_execute_impl_ex(const char* path,
         }
     }
 
-    k64_term_write("ELF: executing ");
-    k64_term_write(path);
-    k64_term_putc('\n');
+    if (!quiet) {
+        k64_term_write("ELF: executing ");
+        k64_term_write(path);
+        k64_term_putc('\n');
+    }
     if (user_mode && !k64_vmm_is_mapped(&ctx->space, entry, true)) {
         k64_term_write("ELF: entry page is not mapped\n");
         k64_vmm_release_service_space(&ctx->space);
@@ -683,9 +689,11 @@ static bool elf_execute_impl_ex(const char* path,
     } else {
         rc = (int)k64_vmm_call_isolated(&ctx->space, entry, 0, 0, 0);
     }
-    k64_term_write("ELF: exit code ");
-    k64_term_write_dec((uint64_t)(uint32_t)rc);
-    k64_term_putc('\n');
+    if (!quiet) {
+        k64_term_write("ELF: exit code ");
+        k64_term_write_dec((uint64_t)(uint32_t)rc);
+        k64_term_putc('\n');
+    }
     k64_vmm_release_service_space(&ctx->space);
     elf_context_depth--;
     return true;
@@ -812,6 +820,10 @@ bool k64_elf_execute_linux_dynamic(const char* main_path,
     k64_vmm_release_service_space(&ctx->space);
     elf_context_depth--;
     return true;
+}
+
+void k64_elf_set_quiet_next(bool quiet) {
+    elf_quiet_next = quiet;
 }
 
 bool k64_elf_spawn_user_path(const char* path) {

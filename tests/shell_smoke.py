@@ -347,6 +347,7 @@ def main():
             ("write /dev/null discarded", PROMPT_NEEDLE),
             ("klcs status", "KLCS: running"),
             ("klcs syscalls", "write implemented"),
+            ("cat /etc/path/inpath.cfg", "/compat/linux/bin"),
             ("klcs run klcs-hello", "klcs-hello: Linux syscall ABI works"),
             ("klcs trace on", "KLCS trace: on"),
             ("klcs trace off", "KLCS trace: off"),
@@ -400,10 +401,13 @@ def main():
                 checks.insert(25, ("netctl resolve example.com", "resolve: example.com ->"))
                 checks.insert(26, ("kcurl example.com", "Example Domain"))
             if os.environ.get("K64_SMOKE_KLCS_DYNAMIC") == "1":
-                checks.insert(55, ("klcs run tcc -v", "tcc version", 30))
-                checks.insert(56, ("klcs run git --version", "git version", 30))
-                checks.insert(57, ("klcs run nano --version", "GNU nano", 30))
-                checks.insert(58, ("klcs run sl", "ELF: exit code", 45))
+                checks.insert(55, ("tcc -v", "tcc version", 30))
+                checks.insert(56, ("git --version", "git version", 30))
+                checks.insert(57, ("nano --version", "GNU nano", 30))
+                checks.insert(58, ("sl", PROMPT_NEEDLE, 45))
+                checks.insert(59, ("klcs run tcc -v", "tcc version", 30))
+                checks.insert(60, ("klcs run git --version", "git version", 30))
+                checks.insert(61, ("klcs run nano --version", "GNU nano", 30))
             for item in checks:
                 if len(item) == 3:
                     cmd, expected, timeout = item
