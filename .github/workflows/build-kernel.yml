@@ -45,7 +45,9 @@ jobs:
 
     - name: Fetch GRUB source headers
       run: |
-        git clone --depth 1 https://git.savannah.gnu.org/git/grub.git /tmp/grub-src
+        rm -rf /tmp/grub-src
+        git clone --depth 1 https://git.savannah.gnu.org/git/grub.git /tmp/grub-src || \
+          git clone --depth 1 https://github.com/rhboot/grub2.git /tmp/grub-src
 
     - name: Build and test K64
       env:
