@@ -122,13 +122,19 @@ Implemented in the dispatcher:
 
 - `read`, `pread64`, `pwrite64`, `write`, and `writev` for KLCS file descriptors and
   stdout/stderr.
+- `poll` and `ppoll` for the current KLCS descriptor classes.
 - `open`, `openat`, `close`, `fstat`, `newfstatat`, `lseek`, `access`,
-  `fcntl`, `ftruncate`, `unlink`, `chmod`, `fchmod`, and `umask`.
-- `mmap`, `munmap`, `mprotect`, and `brk` foundations for loader/libc startup.
+  `statx`, `getdents64`, `fcntl`, `ftruncate`, `mkdir`, `mkdirat`, `rmdir`,
+  `unlink`, `unlinkat`, `rename`, `renameat2`, `chmod`, `fchmod`, `faccessat`,
+  `utimensat`, and `umask`.
+- `mmap`, `munmap`, `mprotect`, `mremap`, and `brk` foundations for loader/libc
+  startup.
 - `uname`, `readlink`, `readlinkat`, `arch_prctl`, `set_tid_address`,
-  `set_robust_list`, `futex`, `clock_gettime`, `prlimit64`, `getrandom`, and
-  `rseq` stubs or minimal implementations.
-- `getpid`, `getuid`, `geteuid`, `getgid`, `getegid`, `exit`, and `exit_group`.
+  `rt_sigaction`, `rt_sigprocmask`, `sigaltstack`, `set_robust_list`, `futex`,
+  `clock_gettime`, `prlimit64`, `getrandom`, and `rseq` stubs or minimal
+  implementations.
+- `getpid`, `gettid`, `getppid`, `getuid`, `geteuid`, `getgid`, `getegid`,
+  `exit`, and `exit_group`.
 
 Unsupported syscalls return Linux `-ENOSYS`, not K64-native error codes.
 

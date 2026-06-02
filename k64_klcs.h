@@ -13,6 +13,7 @@
 #define KLCS_LINUX_EMFILE 24
 #define KLCS_LINUX_ERANGE 34
 #define KLCS_LINUX_ENOSYS 38
+#define KLCS_LINUX_ENOTEMPTY 39
 #define KLCS_LINUX_ENOMEM 12
 #define KLCS_LINUX_EEXIST 17
 #define KLCS_LINUX_ENOTDIR 20
@@ -49,6 +50,7 @@ typedef enum {
     KLCS_FD_STDOUT,
     KLCS_FD_STDERR,
     KLCS_FD_FILE,
+    KLCS_FD_DIR,
     KLCS_FD_DEV_NULL,
     KLCS_FD_DEV_ZERO,
 } klcs_fd_kind_t;

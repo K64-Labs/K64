@@ -1693,11 +1693,57 @@ typedef struct {
 } k64_linux_timespec_t;
 
 typedef struct {
+    int64_t tv_sec;
+    uint32_t tv_nsec;
+    int32_t __reserved;
+} k64_linux_statx_timestamp_t;
+
+typedef struct {
+    uint32_t stx_mask;
+    uint32_t stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink;
+    uint32_t stx_uid;
+    uint32_t stx_gid;
+    uint16_t stx_mode;
+    uint16_t __spare0;
+    uint64_t stx_ino;
+    uint64_t stx_size;
+    uint64_t stx_blocks;
+    uint64_t stx_attributes_mask;
+    k64_linux_statx_timestamp_t stx_atime;
+    k64_linux_statx_timestamp_t stx_btime;
+    k64_linux_statx_timestamp_t stx_ctime;
+    k64_linux_statx_timestamp_t stx_mtime;
+    uint32_t stx_rdev_major;
+    uint32_t stx_rdev_minor;
+    uint32_t stx_dev_major;
+    uint32_t stx_dev_minor;
+    uint64_t stx_mnt_id;
+    uint32_t stx_dio_mem_align;
+    uint32_t stx_dio_offset_align;
+    uint64_t __spare3[12];
+} k64_linux_statx_t;
+
+typedef struct {
+    uint64_t d_ino;
+    int64_t d_off;
+    uint16_t d_reclen;
+    uint8_t d_type;
+} __attribute__((packed)) k64_linux_dirent64_prefix_t;
+
+typedef struct {
     uint16_t ws_row;
     uint16_t ws_col;
     uint16_t ws_xpixel;
     uint16_t ws_ypixel;
 } k64_linux_winsize_t;
+
+typedef struct {
+    int32_t fd;
+    int16_t events;
+    int16_t revents;
+} k64_linux_pollfd_t;
 
 static bool linux_copy_user_cstr(uint64_t user_ptr, char* out, size_t out_size) {
     if (!user_ptr || !out || out_size == 0) {
@@ -1934,7 +1980,6 @@ static int64_t linux_fd_pwrite(uint64_t fd, uint64_t user_ptr, uint64_t len, uin
 static int64_t linux_fd_open_path(const char* linux_path, uint64_t flags) {
     char path[KLCS_PATH_MAX];
     k64_fs_stat_t st;
-    (void)flags;
 
     if (!klcs_translate_path(linux_path, path, sizeof(path))) {
         return -KLCS_LINUX_EINVAL;
@@ -1953,7 +1998,10 @@ static int64_t linux_fd_open_path(const char* linux_path, uint64_t flags) {
         }
     }
     if (st.is_dir) {
-        return -KLCS_LINUX_EISDIR;
+        if ((flags & 3u) != 0 || (flags & 512u) != 0) {
+            return -KLCS_LINUX_EISDIR;
+        }
+        return klcs_fd_alloc(KLCS_FD_DIR, path, -1);
     }
     if ((flags & 512u) != 0 && !k64_fs_write_file_raw(path, NULL, 0)) {
         return -KLCS_LINUX_EACCES;
@@ -2019,6 +2067,52 @@ static int64_t linux_stat_path(const char* linux_path, uint64_t out_ptr) {
     return user_write(out_ptr, &lst, sizeof(lst)) ? 0 : -KLCS_LINUX_EFAULT;
 }
 
+static void linux_fill_statx_from_k64(const k64_fs_stat_t* st, k64_linux_statx_t* out) {
+    uint16_t type = st->is_dir ? 0040000u : 0100000u;
+    uint32_t mode = st->mode ? st->mode : (st->is_dir ? 0755u : 0644u);
+
+    memset(out, 0, sizeof(*out));
+    out->stx_mask = 0x00001fffu;
+    out->stx_blksize = 4096u;
+    out->stx_nlink = st->is_dir ? 2u : 1u;
+    out->stx_uid = st->uid;
+    out->stx_gid = st->gid;
+    out->stx_mode = (uint16_t)(type | (mode & 07777u));
+    out->stx_ino = st->generation ? st->generation : 1u;
+    out->stx_size = st->is_dir ? 4096u : (uint64_t)st->size;
+    out->stx_blocks = (out->stx_size + 511u) / 512u;
+    out->stx_atime.tv_sec = (int64_t)(st->modified_tick / 1000ULL);
+    out->stx_btime.tv_sec = (int64_t)(st->created_tick / 1000ULL);
+    out->stx_ctime.tv_sec = (int64_t)(st->modified_tick / 1000ULL);
+    out->stx_mtime.tv_sec = (int64_t)(st->modified_tick / 1000ULL);
+}
+
+static int64_t linux_statx(uint64_t dirfd,
+                           uint64_t path_ptr,
+                           uint64_t flags,
+                           uint64_t mask,
+                           uint64_t out_ptr) {
+    char linux_path[KLCS_PATH_MAX];
+    char path[KLCS_PATH_MAX];
+    k64_fs_stat_t st;
+    k64_linux_statx_t sx;
+    (void)dirfd;
+    (void)flags;
+    (void)mask;
+
+    if (!out_ptr) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (!linux_copy_user_cstr(path_ptr, linux_path, sizeof(linux_path))) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (!klcs_translate_path(linux_path, path, sizeof(path)) || !k64_fs_stat(path, &st)) {
+        return -KLCS_LINUX_ENOENT;
+    }
+    linux_fill_statx_from_k64(&st, &sx);
+    return user_write(out_ptr, &sx, sizeof(sx)) ? 0 : -KLCS_LINUX_EFAULT;
+}
+
 static int64_t linux_fstat(uint64_t fd, uint64_t out_ptr) {
     klcs_state_t* state = klcs_state();
     klcs_fd_t* desc;
@@ -2040,7 +2134,7 @@ static int64_t linux_fstat(uint64_t fd, uint64_t out_ptr) {
         st.uid = 0;
         st.gid = 0;
         st.size = 0;
-    } else if (desc->kind == KLCS_FD_FILE) {
+    } else if (desc->kind == KLCS_FD_FILE || desc->kind == KLCS_FD_DIR) {
         if (!k64_fs_stat(desc->path, &st)) {
             return -KLCS_LINUX_ENOENT;
         }
@@ -2073,7 +2167,8 @@ static int64_t linux_lseek(uint64_t fd, uint64_t offset, uint64_t whence) {
         return -KLCS_LINUX_EBADF;
     }
     desc = &state->fds[fd];
-    if (desc->kind != KLCS_FD_FILE && desc->kind != KLCS_FD_DEV_ZERO && desc->kind != KLCS_FD_DEV_NULL) {
+    if (desc->kind != KLCS_FD_FILE && desc->kind != KLCS_FD_DIR &&
+        desc->kind != KLCS_FD_DEV_ZERO && desc->kind != KLCS_FD_DEV_NULL) {
         return -KLCS_LINUX_EBADF;
     }
     if (whence == 0) {
@@ -2091,6 +2186,102 @@ static int64_t linux_lseek(uint64_t fd, uint64_t offset, uint64_t whence) {
     }
     desc->offset = (uint64_t)next;
     return next;
+}
+
+typedef struct {
+    uint64_t user_ptr;
+    uint64_t user_len;
+    uint64_t skip;
+    uint64_t index;
+    uint64_t written;
+    bool full;
+} linux_getdents_ctx_t;
+
+static bool linux_getdents_emit(linux_getdents_ctx_t* ctx,
+                                const char* name,
+                                bool is_dir,
+                                uint64_t ino) {
+    k64_linux_dirent64_prefix_t rec;
+    char zero = '\0';
+    size_t name_len;
+    uint16_t reclen;
+    uint64_t entry_index;
+    uint64_t pos;
+
+    if (!ctx || !name || !name[0]) {
+        return true;
+    }
+    entry_index = ctx->index;
+    if (entry_index < ctx->skip) {
+        ctx->index++;
+        return true;
+    }
+    name_len = k64_strlen(name);
+    reclen = (uint16_t)((sizeof(rec) + name_len + 1u + 7u) & ~7u);
+    if (ctx->written + reclen > ctx->user_len) {
+        ctx->full = true;
+        return false;
+    }
+
+    rec.d_ino = ino ? ino : (entry_index + 1u);
+    rec.d_off = (int64_t)(entry_index + 1u);
+    rec.d_reclen = reclen;
+    rec.d_type = is_dir ? 4u : 8u;
+    pos = ctx->user_ptr + ctx->written;
+    if (!user_write(pos, &rec, sizeof(rec)) ||
+        !user_write(pos + sizeof(rec), name, name_len) ||
+        !user_write(pos + sizeof(rec) + name_len, &zero, 1)) {
+        ctx->full = true;
+        return false;
+    }
+    for (uint64_t pad = sizeof(rec) + name_len + 1u; pad < reclen; ++pad) {
+        if (!user_write(pos + pad, &zero, 1)) {
+            ctx->full = true;
+            return false;
+        }
+    }
+    ctx->written += reclen;
+    ctx->index++;
+    return true;
+}
+
+static bool linux_getdents_iter(const char* name, bool is_dir, void* opaque) {
+    linux_getdents_ctx_t* ctx = (linux_getdents_ctx_t*)opaque;
+    return linux_getdents_emit(ctx, name, is_dir, 0);
+}
+
+static int64_t linux_getdents64(uint64_t fd, uint64_t user_ptr, uint64_t len) {
+    klcs_state_t* state = klcs_state();
+    klcs_fd_t* desc;
+    linux_getdents_ctx_t ctx;
+
+    if (!user_ptr && len) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (len == 0) {
+        return 0;
+    }
+    if (fd >= KLCS_LINUX_FD_MAX || !state->fds[fd].used) {
+        return -KLCS_LINUX_EBADF;
+    }
+    desc = &state->fds[fd];
+    if (desc->kind != KLCS_FD_DIR) {
+        return -KLCS_LINUX_ENOTDIR;
+    }
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.user_ptr = user_ptr;
+    ctx.user_len = len;
+    ctx.skip = desc->offset;
+    if (!linux_getdents_emit(&ctx, ".", true, 1) ||
+        !linux_getdents_emit(&ctx, "..", true, 1)) {
+        desc->offset = ctx.index;
+        return ctx.written ? (int64_t)ctx.written : -KLCS_LINUX_EINVAL;
+    }
+    if (!k64_fs_iter_dir(desc->path, linux_getdents_iter, &ctx) && ctx.written == 0) {
+        return -KLCS_LINUX_ENOENT;
+    }
+    desc->offset = ctx.index;
+    return (int64_t)ctx.written;
 }
 
 static int64_t linux_fcntl(uint64_t fd, uint64_t cmd, uint64_t arg) {
@@ -2142,6 +2333,79 @@ static int64_t linux_unlink(uint64_t path_ptr) {
         return -KLCS_LINUX_EINVAL;
     }
     return k64_fs_remove(path) ? 0 : -KLCS_LINUX_ENOENT;
+}
+
+static int64_t linux_mkdir(uint64_t path_ptr, uint64_t mode) {
+    char linux_path[KLCS_PATH_MAX];
+    char path[KLCS_PATH_MAX];
+    k64_fs_stat_t st;
+    (void)mode;
+
+    if (!linux_copy_user_cstr(path_ptr, linux_path, sizeof(linux_path))) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (!klcs_translate_path(linux_path, path, sizeof(path))) {
+        return -KLCS_LINUX_EINVAL;
+    }
+    if (k64_fs_stat(path, &st)) {
+        return -KLCS_LINUX_EEXIST;
+    }
+    return k64_fs_mkdir(path) ? 0 : -KLCS_LINUX_EACCES;
+}
+
+static int64_t linux_rmdir(uint64_t path_ptr) {
+    char linux_path[KLCS_PATH_MAX];
+    char path[KLCS_PATH_MAX];
+
+    if (!linux_copy_user_cstr(path_ptr, linux_path, sizeof(linux_path))) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (!klcs_translate_path(linux_path, path, sizeof(path))) {
+        return -KLCS_LINUX_EINVAL;
+    }
+    return k64_fs_rmdir(path) ? 0 : -KLCS_LINUX_ENOENT;
+}
+
+static int64_t linux_rename(uint64_t old_ptr, uint64_t new_ptr) {
+    char old_linux[KLCS_PATH_MAX];
+    char new_linux[KLCS_PATH_MAX];
+    char old_path[KLCS_PATH_MAX];
+    char new_path[KLCS_PATH_MAX];
+
+    if (!linux_copy_user_cstr(old_ptr, old_linux, sizeof(old_linux)) ||
+        !linux_copy_user_cstr(new_ptr, new_linux, sizeof(new_linux))) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (!klcs_translate_path(old_linux, old_path, sizeof(old_path)) ||
+        !klcs_translate_path(new_linux, new_path, sizeof(new_path))) {
+        return -KLCS_LINUX_EINVAL;
+    }
+    return k64_fs_move(old_path, new_path) ? 0 : -KLCS_LINUX_ENOENT;
+}
+
+static int64_t linux_unlinkat(uint64_t dirfd, uint64_t path_ptr, uint64_t flags) {
+    (void)dirfd;
+    if ((flags & 0x200u) != 0) {
+        return linux_rmdir(path_ptr);
+    }
+    return linux_unlink(path_ptr);
+}
+
+static int64_t linux_utimensat(uint64_t dirfd, uint64_t path_ptr, uint64_t times_ptr, uint64_t flags) {
+    char linux_path[KLCS_PATH_MAX];
+    char path[KLCS_PATH_MAX];
+    k64_fs_stat_t st;
+    (void)dirfd;
+    (void)times_ptr;
+    (void)flags;
+
+    if (!linux_copy_user_cstr(path_ptr, linux_path, sizeof(linux_path))) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (!klcs_translate_path(linux_path, path, sizeof(path)) || !k64_fs_stat(path, &st)) {
+        return -KLCS_LINUX_ENOENT;
+    }
+    return 0;
 }
 
 static int64_t linux_chmod(uint64_t path_ptr, uint64_t mode) {
@@ -2214,6 +2478,53 @@ static int64_t linux_sleep_compat(void) {
         __asm__ __volatile__("pause");
     }
     return 0;
+}
+
+static int64_t linux_poll(uint64_t fds_ptr, uint64_t nfds, uint64_t timeout_ms) {
+    klcs_state_t* state = klcs_state();
+    int64_t ready = 0;
+
+    if (!fds_ptr && nfds) {
+        return -KLCS_LINUX_EFAULT;
+    }
+    if (nfds > 128) {
+        return -KLCS_LINUX_EINVAL;
+    }
+    for (uint64_t i = 0; i < nfds; ++i) {
+        k64_linux_pollfd_t pfd;
+        int16_t revents = 0;
+        if (!user_read(fds_ptr + i * sizeof(pfd), &pfd, sizeof(pfd))) {
+            return -KLCS_LINUX_EFAULT;
+        }
+        if (pfd.fd < 0) {
+            pfd.revents = 0;
+        } else if ((uint64_t)pfd.fd >= KLCS_LINUX_FD_MAX || !state->fds[pfd.fd].used) {
+            pfd.revents = 0x20;
+        } else {
+            klcs_fd_t* desc = &state->fds[pfd.fd];
+            if ((pfd.events & 0x0001) != 0 &&
+                (desc->kind == KLCS_FD_FILE || desc->kind == KLCS_FD_DIR ||
+                 desc->kind == KLCS_FD_DEV_ZERO)) {
+                revents |= 0x0001;
+            }
+            if ((pfd.events & 0x0004) != 0 &&
+                (desc->kind == KLCS_FD_FILE || desc->kind == KLCS_FD_DEV_NULL ||
+                 desc->kind == KLCS_FD_STDOUT || desc->kind == KLCS_FD_STDERR)) {
+                revents |= 0x0004;
+            }
+            pfd.revents = revents;
+        }
+        if (pfd.revents) {
+            ready++;
+        }
+        if (!user_write(fds_ptr + i * sizeof(pfd), &pfd, sizeof(pfd))) {
+            return -KLCS_LINUX_EFAULT;
+        }
+    }
+    if (ready == 0 && timeout_ms != 0) {
+        (void)linux_sleep_compat();
+    }
+    return ready;
 }
 
 static bool linux_map_heap_range(k64_vm_space_t* space, uint64_t from, uint64_t to) {
@@ -2448,6 +2759,10 @@ int64_t k64_usermode_linux_syscall_handler(const k64_linux_syscall_entry_frame_t
             rc = linux_fstat(frame->arg0, frame->arg1);
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
             return rc;
+        case 7:
+            rc = linux_poll(frame->arg0, frame->arg1, frame->arg2);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
         case 8:
             rc = linux_lseek(frame->arg0, frame->arg1, frame->arg2);
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
@@ -2465,6 +2780,11 @@ int64_t k64_usermode_linux_syscall_handler(const k64_linux_syscall_entry_frame_t
             rc = linux_brk_syscall(frame->arg0);
             klcs_trace_record_args(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr),
                                    frame->arg0, frame->arg1, frame->arg2, rc);
+            return rc;
+        case 13:
+        case 14:
+            rc = 0;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
             return rc;
         case 16:
             rc = linux_ioctl(frame->arg0, frame->arg1, frame->arg2);
@@ -2488,6 +2808,14 @@ int64_t k64_usermode_linux_syscall_handler(const k64_linux_syscall_entry_frame_t
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
             return rc;
         }
+        case 23:
+            rc = 0;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 25:
+            rc = frame->arg0 ? (int64_t)frame->arg0 : -KLCS_LINUX_EINVAL;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
         case 20:
             rc = linux_writev(frame->arg0, frame->arg1, frame->arg2);
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
@@ -2512,6 +2840,18 @@ int64_t k64_usermode_linux_syscall_handler(const k64_linux_syscall_entry_frame_t
             rc = linux_getcwd(frame->arg0, frame->arg1);
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
             return rc;
+        case 82:
+            rc = linux_rename(frame->arg0, frame->arg1);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 83:
+            rc = linux_mkdir(frame->arg0, frame->arg1);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 84:
+            rc = linux_rmdir(frame->arg0);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
         case 87:
             rc = linux_unlink(frame->arg0);
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
@@ -2532,6 +2872,28 @@ int64_t k64_usermode_linux_syscall_handler(const k64_linux_syscall_entry_frame_t
             rc = 0022;
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
             return rc;
+        case 102:
+        case 104:
+        case 107:
+        case 108:
+        case 110:
+        case 111:
+        case 121:
+            rc = 0;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 109:
+            rc = 0;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 112:
+            rc = (int64_t)klcs_frame.pid;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 131:
+            rc = 0;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
         case 158:
             if (frame->arg0 == 0x1002ULL) {
                 process_table[active_ctx.process_index].linux_fs_base = frame->arg1;
@@ -2542,8 +2904,16 @@ int64_t k64_usermode_linux_syscall_handler(const k64_linux_syscall_entry_frame_t
             }
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
             return rc;
+        case 186:
+            rc = (int64_t)klcs_frame.tid;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
         case 202:
             rc = -KLCS_LINUX_EAGAIN;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 217:
+            rc = linux_getdents64(frame->arg0, frame->arg1, frame->arg2);
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
             return rc;
         case 218:
@@ -2563,12 +2933,34 @@ int64_t k64_usermode_linux_syscall_handler(const k64_linux_syscall_entry_frame_t
             rc = linux_sys_open(frame->arg1, frame->arg2);
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
             return rc;
+        case 258:
+            rc = linux_mkdir(frame->arg1, frame->arg2);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
         case 262:
             rc = linux_newfstatat(frame->arg0, frame->arg1, frame->arg2, frame->arg3);
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
             return rc;
+        case 264:
+            rc = linux_unlinkat(frame->arg0, frame->arg1, frame->arg2);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
         case 267:
             rc = linux_readlinkat(frame->arg0, frame->arg1, frame->arg2, frame->arg3);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 269: {
+            char p[KLCS_PATH_MAX];
+            char t[KLCS_PATH_MAX];
+            k64_fs_stat_t st;
+            rc = linux_copy_user_cstr(frame->arg1, p, sizeof(p)) &&
+                 klcs_translate_path(p, t, sizeof(t)) &&
+                 k64_fs_stat(t, &st) ? 0 : -KLCS_LINUX_ENOENT;
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        }
+        case 271:
+            rc = linux_poll(frame->arg0, frame->arg1, frame->arg2);
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
             return rc;
         case 273:
@@ -2577,8 +2969,20 @@ int64_t k64_usermode_linux_syscall_handler(const k64_linux_syscall_entry_frame_t
             rc = 0;
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
             return rc;
+        case 280:
+            rc = linux_utimensat(frame->arg0, frame->arg1, frame->arg2, frame->arg3);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 316:
+            rc = frame->arg4 ? -KLCS_LINUX_EINVAL : linux_rename(frame->arg1, frame->arg3);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
         case 318:
             rc = linux_getrandom(frame->arg0, frame->arg1);
+            klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
+            return rc;
+        case 332:
+            rc = linux_statx(frame->arg0, frame->arg1, frame->arg2, frame->arg3, frame->arg4);
             klcs_trace_record(klcs_frame.pid, frame->nr, klcs_syscall_name(frame->nr), rc);
             return rc;
         case 60:
