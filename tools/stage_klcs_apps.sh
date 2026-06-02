@@ -37,6 +37,37 @@ copy_deps() {
   done
 }
 
+download_deb() {
+  local package="$1"
+  local out="$2"
+  shift 2
+  local work
+  work="$(dirname "$out")"
+
+  rm -f "$out"
+  if command -v apt-get >/dev/null 2>&1; then
+    rm -f "$work/${package}_"*.deb
+    if (cd "$work" && apt-get download "$package" >/dev/null 2>&1); then
+      local deb
+      deb="$(find "$work" -maxdepth 1 -name "${package}_*.deb" | head -n 1)"
+      if [ -n "$deb" ] && [ -e "$deb" ]; then
+        mv "$deb" "$out"
+        return 0
+      fi
+    fi
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    local url
+    for url in "$@"; do
+      if [ -n "$url" ] && curl -fsSL -o "$out" "$url"; then
+        return 0
+      fi
+    done
+  fi
+  return 1
+}
+
 stage_host_tool() {
   local name="$1"
   local path
@@ -55,10 +86,13 @@ stage_nano_deb() {
     return 0
   fi
   local work="/tmp/k64-klcs-nano"
-  local url="https://deb.debian.org/debian/pool/main/n/nano/nano_7.2-1+deb12u1_amd64.deb"
   rm -rf "$work"
   mkdir -p "$work/extract"
-  curl -fsSL -o "$work/nano.deb" "$url"
+  if ! download_deb nano "$work/nano.deb" \
+      "https://deb.debian.org/debian/pool/main/n/nano/nano_7.2-1+deb12u1_amd64.deb"; then
+    echo "nano unavailable: could not download package"
+    return 0
+  fi
   (cd "$work" && ar x nano.deb)
   tar -C "$work/extract" -xf "$work"/data.tar.*
   if [ -x "$work/extract/bin/nano" ]; then
@@ -114,15 +148,19 @@ stage_crt_objects() {
 
 stage_real_sl_deb() {
   local work="/tmp/k64-klcs-sl"
-  local deb_url="https://deb.debian.org/debian/pool/main/s/sl/sl_5.02-1_amd64.deb"
 
   if ! command -v curl >/dev/null 2>&1 || ! command -v ar >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
-    echo "sl unavailable: need curl+ar+tar to extract Debian sl package"
+    echo "sl unavailable: need curl/apt-get+ar+tar to extract Debian sl package"
     return 0
   fi
   rm -rf "$work"
   mkdir -p "$work/extract"
-  curl -fsSL "$deb_url" -o "$work/sl.deb"
+  if ! download_deb sl "$work/sl.deb" \
+      "https://deb.debian.org/debian/pool/main/s/sl/sl_5.02-1+b1_amd64.deb" \
+      "https://deb.debian.org/debian/pool/main/s/sl/sl_5.02-1_amd64.deb"; then
+    echo "sl unavailable: could not download package"
+    return 0
+  fi
   (cd "$work" && ar x sl.deb)
   tar -xf "$work"/data.tar.* -C "$work/extract"
   if [ -x "$work/extract/usr/games/sl" ]; then
